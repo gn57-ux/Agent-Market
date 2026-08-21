@@ -44,4 +44,14 @@ describe("Amount parse/format (18 decimals)", () => {
   it("rejects a malformed decimal string", () => {
     expect(() => parseAmount("not-a-number")).toThrow();
   });
+
+  it("rejects negative amounts instead of silently wrapping them", () => {
+    expect(() => parseAmount("-1")).toThrow(/negative/);
+  });
+
+  it("rejects input with more fractional digits than the token's decimals instead of silently rounding", () => {
+    expect(() => parseAmount("0.0000000000000000009")).toThrow(/fractional digits/);
+    // exactly at the boundary (18 digits) is fine
+    expect(() => parseAmount("0.000000000000000001")).not.toThrow();
+  });
 });
