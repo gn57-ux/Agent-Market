@@ -149,6 +149,66 @@ describe("useTransactionFlow", () => {
     await waitFor(() => expect(result.current.status.kind).toBe("confirmed"));
   });
 
+  it("confirming is actually observable while awaiting confirm(), not skipped by batching", async () => {
+    let resolveConfirm!: (value: { confirmations: number }) => void;
+    const confirmPromise = new Promise<{ confirmations: number }>((resolve) => {
+      resolveConfirm = resolve;
+    });
+    const buildTx = vi.fn().mockResolvedValue({ hash: TX_HASH });
+    const confirm = vi.fn().mockReturnValue(confirmPromise);
+    const verify = vi.fn().mockResolvedValue({ outcome: "confirmed" });
+
+    const { result } = renderHook(() => useTransactionFlow({ buildTx, confirm, verify }));
+
+    let startPromise!: Promise<unknown>;
+    await act(async () => {
+      startPromise = result.current.start();
+      // Yield one microtask so buildTx resolves and confirmAndVerify sets
+      // "confirming" — without yet resolving confirm() itself.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.status.kind).toBe("confirming");
+    expect(verify).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveConfirm({ confirmations: 2 });
+      await startPromise;
+    });
+    expect(result.current.status).toEqual({ kind: "confirmed", txHash: TX_HASH });
+  });
+
+  it("retry captured before a concurrent start() reads live state via a ref, not a stale closure, and recovers instead of re-broadcasting", async () => {
+    const buildTx = vi.fn().mockResolvedValue({ hash: TX_HASH });
+    const confirm = vi.fn().mockResolvedValue({ confirmations: 1 });
+    const verify = vi
+      .fn()
+      .mockResolvedValueOnce({ outcome: "rpcUnavailable", error: "RPC_TEMPORARILY_UNAVAILABLE" })
+      .mockResolvedValueOnce({ outcome: "confirmed" });
+
+    const { result } = renderHook(() => useTransactionFlow({ buildTx, confirm, verify }));
+
+    // Capture `retry` while status is still "idle" — a stale closure would
+    // see status.kind === "idle" forever and always fall through to start().
+    const staleRetry = result.current.retry;
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.status.kind).toBe("rpcRecoveryPending");
+
+    let retryResult;
+    await act(async () => {
+      retryResult = await staleRetry();
+    });
+
+    // A correct implementation recovers the existing tx (no second buildTx
+    // call); the stale-closure bug would call buildTx again here.
+    expect(buildTx).toHaveBeenCalledTimes(1);
+    expect(retryResult).toEqual({ outcome: "confirmed", txHash: TX_HASH });
+  });
+
   it("buildTx throwing maps to failed with the error message as reason", async () => {
     const buildTx = vi.fn().mockRejectedValue(new Error("user rejected signature"));
     const confirm = vi.fn();
