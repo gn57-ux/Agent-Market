@@ -152,6 +152,13 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     error TaskNotAccepted(bytes32 taskId, TaskStatus status);
     error TaskNotSubmitted(bytes32 taskId, TaskStatus status);
     error DeliveryDeadlineAlreadyPassed(bytes32 taskId, uint64 deliveryDeadline, uint256 blockTimestamp);
+    error InvalidReviewWindow(uint64 reviewWindow);
+
+    /// @notice Upper bound accepted for `reviewWindow_` at deployment: half of `type(uint64).max`
+    /// seconds (~292 billion years), far beyond any realistic value, but small enough that
+    /// `submittedAt + reviewWindow` (both uint64) can never overflow for any `block.timestamp`
+    /// reachable before uint64 timestamps themselves stop making sense.
+    uint64 private constant MAX_REVIEW_WINDOW = type(uint64).max / 2;
 
     /// @param supportedToken_ The single ERC-20 this escrow accepts for task budgets (PRD §3.3).
     /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
@@ -160,12 +167,19 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     /// @dev `authorizedSigner_` can never be `address(0)`: `authorizedSigner` is immutable with no
     /// rotation path, and ECDSA.recover can never return the zero address for a valid signature,
     /// so a zero signer would make `acceptTask` permanently unusable for the life of this deploy.
+    /// `reviewWindow_` must be nonzero (a real review period) and bounded by `MAX_REVIEW_WINDOW`,
+    /// since an unvalidated huge value would make `submittedAt + reviewWindow` overflow uint64 on
+    /// every `submitResult` call — permanently bricking the deploy with no way to fix it, `reviewWindow`
+    /// being immutable.
     constructor(
         IERC20 supportedToken_,
         address authorizedSigner_,
         uint64 reviewWindow_
     ) EIP712("AgentMarketTaskEscrow", "1") {
         if (authorizedSigner_ == address(0)) revert ZeroAuthorizedSigner();
+        if (reviewWindow_ == 0 || reviewWindow_ > MAX_REVIEW_WINDOW) {
+            revert InvalidReviewWindow(reviewWindow_);
+        }
         supportedToken = supportedToken_;
         authorizedSigner = authorizedSigner_;
         reviewWindow = reviewWindow_;

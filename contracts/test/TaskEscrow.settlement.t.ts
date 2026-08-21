@@ -206,6 +206,23 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
       const task = await escrow.getTask(id);
       expect(task.status).to.equal(1n); // still ACCEPTED, not silently SUBMITTED
     });
+
+    it("rejects submission exactly at the deliveryDeadline (>= boundary, not just >)", async () => {
+      const id = taskId("task-submit-exact-deadline");
+      await createAcceptedTask(id, budget, 5n, 120);
+
+      const task = await escrow.getTask(id);
+      const exactDeadline = task.deliveryDeadline;
+
+      // Mine the submitResult block with timestamp == deliveryDeadline exactly.
+      await ethers.provider.send("evm_setNextBlockTimestamp", [Number(exactDeadline)]);
+
+      const resultHash = ethers.keccak256(ethers.toUtf8Bytes("result-exact-boundary"));
+
+      await expect(
+        escrow.connect(agent).submitResult(id, resultHash),
+      ).to.be.revertedWithCustomError(escrow, "DeliveryDeadlineAlreadyPassed");
+    });
   });
 
   describe("approveResult", () => {
@@ -269,6 +286,39 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
         escrow,
         "TaskNotSubmitted",
       );
+    });
+  });
+
+  describe("constructor reviewWindow validation", () => {
+    it("reverts deployment with reviewWindow = 0", async () => {
+      const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
+      await expect(
+        escrowFactory.deploy(tokenAddress, authorizedSigner.address, 0n),
+      ).to.be.revertedWithCustomError(escrow, "InvalidReviewWindow");
+    });
+
+    it("reverts deployment with a reviewWindow that would overflow submittedAt + reviewWindow", async () => {
+      const maxUint64 = 2n ** 64n - 1n;
+      const tooLarge = maxUint64 / 2n + 1n; // one past the contract's MAX_REVIEW_WINDOW
+
+      const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
+      await expect(
+        escrowFactory.deploy(tokenAddress, authorizedSigner.address, tooLarge),
+      ).to.be.revertedWithCustomError(escrow, "InvalidReviewWindow");
+    });
+
+    it("accepts deployment with the maximum allowed reviewWindow", async () => {
+      const maxUint64 = 2n ** 64n - 1n;
+      const maxAllowed = maxUint64 / 2n;
+
+      const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
+      const maxEscrow = await escrowFactory.deploy(
+        tokenAddress,
+        authorizedSigner.address,
+        maxAllowed,
+      );
+      await expect(maxEscrow.waitForDeployment()).to.not.be.reverted;
+      expect(await maxEscrow.reviewWindow()).to.equal(maxAllowed);
     });
   });
 });
