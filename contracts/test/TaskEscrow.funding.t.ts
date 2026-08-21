@@ -6,6 +6,7 @@ import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signer
 describe("TaskEscrow.createTask (AC-101)", () => {
   let requester: HardhatEthersSigner;
   let other: HardhatEthersSigner;
+  let arbitrator: HardhatEthersSigner;
   let escrow: TaskEscrow;
   let token: YDToken;
 
@@ -23,14 +24,19 @@ describe("TaskEscrow.createTask (AC-101)", () => {
   };
 
   beforeEach(async () => {
-    [requester, other] = await ethers.getSigners();
+    [requester, other, arbitrator] = await ethers.getSigners();
 
     const tokenFactory = await ethers.getContractFactory("YDToken", requester);
     token = await tokenFactory.deploy(requester.address, ethers.parseUnits("1000000", 18));
     await token.waitForDeployment();
 
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
-    escrow = await escrowFactory.deploy(await token.getAddress(), other.address, 259200n);
+    escrow = await escrowFactory.deploy(
+      await token.getAddress(),
+      other.address,
+      259200n,
+      arbitrator.address,
+    );
     await escrow.waitForDeployment();
 
     await token.connect(requester).approve(await escrow.getAddress(), ethers.MaxUint256);
@@ -87,6 +93,7 @@ describe("TaskEscrow.createTask (AC-101)", () => {
       await feeToken.getAddress(),
       other.address,
       259200n,
+      arbitrator.address,
     );
     await feeEscrow.waitForDeployment();
     await feeToken.connect(requester).approve(await feeEscrow.getAddress(), ethers.MaxUint256);

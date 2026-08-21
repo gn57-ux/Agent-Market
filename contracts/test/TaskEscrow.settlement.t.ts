@@ -8,6 +8,7 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
   let agent: HardhatEthersSigner;
   let otherAgent: HardhatEthersSigner;
   let authorizedSigner: HardhatEthersSigner;
+  let arbitrator: HardhatEthersSigner;
   let escrow: TaskEscrow;
   let token: YDToken;
   let escrowAddress: string;
@@ -90,7 +91,7 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
   };
 
   beforeEach(async () => {
-    [requester, agent, otherAgent, authorizedSigner] = await ethers.getSigners();
+    [requester, agent, otherAgent, authorizedSigner, arbitrator] = await ethers.getSigners();
 
     const tokenFactory = await ethers.getContractFactory("YDToken", requester);
     token = await tokenFactory.deploy(requester.address, ethers.parseUnits("1000000", 18));
@@ -98,7 +99,12 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
     tokenAddress = await token.getAddress();
 
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
-    escrow = await escrowFactory.deploy(tokenAddress, authorizedSigner.address, reviewWindow);
+    escrow = await escrowFactory.deploy(
+      tokenAddress,
+      authorizedSigner.address,
+      reviewWindow,
+      arbitrator.address,
+    );
     await escrow.waitForDeployment();
     escrowAddress = await escrow.getAddress();
 
@@ -501,7 +507,7 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
     it("reverts deployment with reviewWindow = 0", async () => {
       const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
       await expect(
-        escrowFactory.deploy(tokenAddress, authorizedSigner.address, 0n),
+        escrowFactory.deploy(tokenAddress, authorizedSigner.address, 0n, arbitrator.address),
       ).to.be.revertedWithCustomError(escrow, "InvalidReviewWindow");
     });
 
@@ -511,7 +517,7 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
 
       const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
       await expect(
-        escrowFactory.deploy(tokenAddress, authorizedSigner.address, tooLarge),
+        escrowFactory.deploy(tokenAddress, authorizedSigner.address, tooLarge, arbitrator.address),
       ).to.be.revertedWithCustomError(escrow, "InvalidReviewWindow");
     });
 
@@ -524,6 +530,7 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
         tokenAddress,
         authorizedSigner.address,
         maxAllowed,
+        arbitrator.address,
       );
       await expect(maxEscrow.waitForDeployment()).to.not.be.reverted;
       expect(await maxEscrow.reviewWindow()).to.equal(maxAllowed);

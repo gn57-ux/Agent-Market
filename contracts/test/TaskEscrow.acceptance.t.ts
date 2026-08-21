@@ -9,6 +9,7 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
   let otherAgent: HardhatEthersSigner;
   let authorizedSigner: HardhatEthersSigner;
   let strangerSigner: HardhatEthersSigner;
+  let arbitrator: HardhatEthersSigner;
   let escrow: TaskEscrow;
   let token: YDToken;
   let escrowAddress: string;
@@ -74,7 +75,8 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
   };
 
   beforeEach(async () => {
-    [requester, agent, otherAgent, authorizedSigner, strangerSigner] = await ethers.getSigners();
+    [requester, agent, otherAgent, authorizedSigner, strangerSigner, arbitrator] =
+      await ethers.getSigners();
 
     const tokenFactory = await ethers.getContractFactory("YDToken", requester);
     token = await tokenFactory.deploy(requester.address, ethers.parseUnits("1000000", 18));
@@ -82,7 +84,12 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     tokenAddress = await token.getAddress();
 
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
-    escrow = await escrowFactory.deploy(tokenAddress, authorizedSigner.address, 259200n);
+    escrow = await escrowFactory.deploy(
+      tokenAddress,
+      authorizedSigner.address,
+      259200n,
+      arbitrator.address,
+    );
     await escrow.waitForDeployment();
     escrowAddress = await escrow.getAddress();
 
@@ -232,6 +239,7 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
       feeTokenAddress,
       authorizedSigner.address,
       259200n,
+      arbitrator.address,
     );
     await feeEscrow.waitForDeployment();
     const feeEscrowAddress = await feeEscrow.getAddress();
@@ -510,7 +518,7 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
   it("reverts deployment with a zero-address authorized signer", async () => {
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
     await expect(
-      escrowFactory.deploy(tokenAddress, ethers.ZeroAddress, 259200n),
+      escrowFactory.deploy(tokenAddress, ethers.ZeroAddress, 259200n, arbitrator.address),
     ).to.be.revertedWithCustomError(escrow, "ZeroAuthorizedSigner");
   });
 });

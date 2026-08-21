@@ -38,6 +38,12 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     /// acceleration) can deploy with a shorter window without changing this contract.
     uint64 public immutable reviewWindow;
 
+    /// @notice Single address authorized to call `resolveDispute` (design.md 决策: 指定地址二选一
+    /// 裁决, 一期不做多签/委员会/`AccessControl` role — matching the existing single-trusted-address,
+    /// immutable, no-rotation pattern already used for `authorizedSigner`). Fixed at deployment;
+    /// rotating the arbitrator means deploying a new `TaskEscrow`.
+    address public immutable arbitrator;
+
     /// @notice Stake rate applied to `budget` on acceptance, expressed in basis points
     /// (PRD §6.1, 已确认决定: fixed at 600 = 6%).
     uint256 public constant STAKE_RATE_BPS = 600;
@@ -155,6 +161,10 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     error InvalidReviewWindow(uint64 reviewWindow);
     error DeliveryDeadlineNotYetPassed(bytes32 taskId, uint64 deliveryDeadline, uint256 blockTimestamp);
     error ReviewDeadlineNotYetPassed(bytes32 taskId, uint64 reviewDeadline, uint256 blockTimestamp);
+    error ZeroArbitrator();
+    error NotArbitrator(address caller);
+    error ReviewDeadlinePassed(bytes32 taskId, uint64 reviewDeadline, uint256 blockTimestamp);
+    error TaskNotDisputed(bytes32 taskId, TaskStatus status);
 
     /// @notice Upper bound accepted for `reviewWindow_` at deployment: half of `type(uint64).max`
     /// seconds (~292 billion years), far beyond any realistic value, but small enough that
@@ -166,25 +176,32 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
     /// @param reviewWindow_ Duration (seconds) added to `submittedAt` to compute `reviewDeadline`
     /// in `submitResult` (PRD §2.4, default 72h = 259200s; tests may pass a shorter value).
+    /// @param arbitrator_ The single address authorized to call `resolveDispute`.
     /// @dev `authorizedSigner_` can never be `address(0)`: `authorizedSigner` is immutable with no
     /// rotation path, and ECDSA.recover can never return the zero address for a valid signature,
     /// so a zero signer would make `acceptTask` permanently unusable for the life of this deploy.
     /// `reviewWindow_` must be nonzero (a real review period) and bounded by `MAX_REVIEW_WINDOW`,
     /// since an unvalidated huge value would make `submittedAt + reviewWindow` overflow uint64 on
     /// every `submitResult` call — permanently bricking the deploy with no way to fix it, `reviewWindow`
-    /// being immutable.
+    /// being immutable. `arbitrator_` can never be `address(0)` for the same reason as
+    /// `authorizedSigner_`: `arbitrator` is immutable with no rotation path, so a zero arbitrator
+    /// would permanently brick `resolveDispute` (and therefore any disputed task) for the life of
+    /// this deploy.
     constructor(
         IERC20 supportedToken_,
         address authorizedSigner_,
-        uint64 reviewWindow_
+        uint64 reviewWindow_,
+        address arbitrator_
     ) EIP712("AgentMarketTaskEscrow", "1") {
         if (authorizedSigner_ == address(0)) revert ZeroAuthorizedSigner();
         if (reviewWindow_ == 0 || reviewWindow_ > MAX_REVIEW_WINDOW) {
             revert InvalidReviewWindow(reviewWindow_);
         }
+        if (arbitrator_ == address(0)) revert ZeroArbitrator();
         supportedToken = supportedToken_;
         authorizedSigner = authorizedSigner_;
         reviewWindow = reviewWindow_;
+        arbitrator = arbitrator_;
     }
 
     /// @notice Creates a new task and locks 100% of `budget` into escrow from `msg.sender`.
@@ -441,5 +458,61 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
         emit ReviewTimeoutFinalized(taskId, agent, budget, stake);
 
         supportedToken.safeTransfer(agent, budget + stake);
+    }
+
+    /// @notice Requester-triggered dispute of a submitted result: records the evidence hash and
+    /// moves the task into `DISPUTED`, taking it out of reach of the normal timeout/approval
+    /// settlement paths until `resolveDispute` is called.
+    /// @dev F-109 / AC-107. Must be called by the task's `requester` while the task is still
+    /// `SUBMITTED` and strictly before `reviewDeadline` — once `reviewDeadline` has passed,
+    /// `finalizeReviewTimeout` is the applicable path instead, so a dispute opened after that
+    /// point is rejected rather than silently reopening a window that has already closed.
+    /// "暂停普通超时结算路径" requires no extra code here: `finalizeReviewTimeout`'s existing
+    /// `task.status == TaskStatus.SUBMITTED` check naturally fails once this function flips
+    /// `status` to `DISPUTED`. Checks-Effects only — no external token transfer, so no
+    /// Interactions step and no reentrancy surface, but `nonReentrant` is kept for consistency
+    /// with every other state-mutating external function on this contract.
+    function openDispute(bytes32 taskId, bytes32 disputeEvidenceHash) external nonReentrant {
+        if (!_taskExists[taskId]) revert TaskNotFound(taskId);
+        Task storage task = _tasks[taskId];
+        if (task.requester != msg.sender) revert NotTaskRequester(taskId, msg.sender);
+        if (task.status != TaskStatus.SUBMITTED) revert TaskNotSubmitted(taskId, task.status);
+        if (block.timestamp >= task.reviewDeadline) {
+            revert ReviewDeadlinePassed(taskId, task.reviewDeadline, block.timestamp);
+        }
+
+        task.disputeEvidenceHash = disputeEvidenceHash;
+        task.status = TaskStatus.DISPUTED;
+
+        emit DisputeOpened(taskId, msg.sender, disputeEvidenceHash);
+    }
+
+    /// @notice Arbitrator-only, one-shot terminal resolution of a disputed task: `supportAgent ==
+    /// true` pays `budget + stake` to the agent (`RELEASED`); `supportAgent == false` pays
+    /// `budget + stake` to the requester, i.e. the agent forfeits their stake exactly as in
+    /// `claimDeliveryTimeout` (`REFUNDED`).
+    /// @dev F-110 / AC-107 / AC-108 / AC-109. Callable only by `arbitrator` — a single fixed
+    /// address configured at deployment (see `arbitrator`'s NatSpec), not an `AccessControl`
+    /// role: design.md's decision for stage one is a single trusted address, matching the
+    /// existing `authorizedSigner` pattern, not a multi-address/role-based scheme. The `status ==
+    /// DISPUTED` check alone makes this "一次性终态结算": once flipped to `RELEASED`/`REFUNDED`,
+    /// a second call reverts here before any transfer, so double-resolution is impossible.
+    /// Checks-Effects-Interactions: `status` is flipped and the event emitted before the external
+    /// `safeTransfer`.
+    function resolveDispute(bytes32 taskId, bool supportAgent) external nonReentrant {
+        if (msg.sender != arbitrator) revert NotArbitrator(msg.sender);
+        if (!_taskExists[taskId]) revert TaskNotFound(taskId);
+        Task storage task = _tasks[taskId];
+        if (task.status != TaskStatus.DISPUTED) revert TaskNotDisputed(taskId, task.status);
+
+        address recipient = supportAgent ? task.agent : task.requester;
+        uint256 budget = task.budget;
+        uint256 stake = task.stake;
+
+        task.status = supportAgent ? TaskStatus.RELEASED : TaskStatus.REFUNDED;
+
+        emit DisputeResolved(taskId, supportAgent);
+
+        supportedToken.safeTransfer(recipient, budget + stake);
     }
 }
