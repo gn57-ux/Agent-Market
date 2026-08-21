@@ -72,8 +72,9 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
     id: string,
     taskBudget: bigint,
     nonce: bigint,
+    deadlineOffsetSeconds: number = oneDay,
   ): Promise<void> => {
-    const deadline = await futureDeadline(oneDay);
+    const deadline = await futureDeadline(deadlineOffsetSeconds);
     await escrow.connect(requester).createTask(id, tokenAddress, taskBudget, deadline);
 
     const permit: AcceptancePermit = {
@@ -174,6 +175,36 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
       await expect(
         escrow.connect(agent).submitResult(id, resultHash),
       ).to.be.revertedWithCustomError(escrow, "TaskNotAccepted");
+    });
+
+    it("accepts submission right up to (but not at) the deliveryDeadline (AC-105)", async () => {
+      const id = taskId("task-submit-before-deadline");
+      await createAcceptedTask(id, budget, 3n, 120); // 2 minutes out
+
+      const resultHash = ethers.keccak256(ethers.toUtf8Bytes("result-in-time"));
+
+      // Still comfortably before deliveryDeadline.
+      await expect(escrow.connect(agent).submitResult(id, resultHash)).to.not.be.reverted;
+
+      const task = await escrow.getTask(id);
+      expect(task.status).to.equal(2n); // SUBMITTED
+    });
+
+    it("rejects submission at or after the deliveryDeadline (AC-105)", async () => {
+      const id = taskId("task-submit-after-deadline");
+      await createAcceptedTask(id, budget, 4n, 120); // 2 minutes out
+
+      await ethers.provider.send("evm_increaseTime", [180]); // past the 2-minute deadline
+      await ethers.provider.send("evm_mine", []);
+
+      const resultHash = ethers.keccak256(ethers.toUtf8Bytes("result-late"));
+
+      await expect(
+        escrow.connect(agent).submitResult(id, resultHash),
+      ).to.be.revertedWithCustomError(escrow, "DeliveryDeadlineAlreadyPassed");
+
+      const task = await escrow.getTask(id);
+      expect(task.status).to.equal(1n); // still ACCEPTED, not silently SUBMITTED
     });
   });
 

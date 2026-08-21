@@ -151,6 +151,7 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     error NotTaskRequester(bytes32 taskId, address caller);
     error TaskNotAccepted(bytes32 taskId, TaskStatus status);
     error TaskNotSubmitted(bytes32 taskId, TaskStatus status);
+    error DeliveryDeadlineAlreadyPassed(bytes32 taskId, uint64 deliveryDeadline, uint256 blockTimestamp);
 
     /// @param supportedToken_ The single ERC-20 this escrow accepts for task budgets (PRD §3.3).
     /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
@@ -319,11 +320,17 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     /// @dev F-105 / AC-105 / AC-112. Pure state/record function — no token transfer. The
     /// `reviewDeadline` is computed once here and emitted directly in `ResultSubmitted` so
     /// downstream consumers (Feature 9) never need to recompute it off-chain (design.md, AC-112).
+    /// A submission at or after `deliveryDeadline` is rejected: once the deadline has passed, the
+    /// task must go through `claimDeliveryTimeout` (T-105) rather than letting a late submission
+    /// silently pay out via the normal acceptance path.
     function submitResult(bytes32 taskId, bytes32 resultHash) external nonReentrant {
         if (!_taskExists[taskId]) revert TaskNotFound(taskId);
         Task storage task = _tasks[taskId];
         if (task.agent != msg.sender) revert NotTaskAgent(taskId, msg.sender);
         if (task.status != TaskStatus.ACCEPTED) revert TaskNotAccepted(taskId, task.status);
+        if (block.timestamp >= task.deliveryDeadline) {
+            revert DeliveryDeadlineAlreadyPassed(taskId, task.deliveryDeadline, block.timestamp);
+        }
 
         uint64 submittedAt = uint64(block.timestamp);
         uint64 reviewDeadline = submittedAt + reviewWindow;
