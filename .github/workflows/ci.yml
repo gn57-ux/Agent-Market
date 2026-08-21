@@ -34,6 +34,8 @@ jobs:
         run: pnpm --filter @agent-market/domain test
       - name: Build packages/domain
         run: pnpm --filter @agent-market/domain build
+      - name: Test apps/web
+        run: pnpm --filter @agent-market/web test
       - name: Build apps/web
         run: pnpm --filter @agent-market/web build
       - name: Build apps/api
