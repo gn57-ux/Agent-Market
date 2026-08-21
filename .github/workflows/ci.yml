@@ -28,6 +28,12 @@ jobs:
         run: pnpm --filter @agent-market/api typecheck
       - name: Typecheck apps/web
         run: pnpm --filter @agent-market/web typecheck
+      - name: Typecheck packages/domain
+        run: pnpm --filter @agent-market/domain typecheck
+      - name: Test packages/domain
+        run: pnpm --filter @agent-market/domain test
+      - name: Build packages/domain
+        run: pnpm --filter @agent-market/domain build
       - name: Build apps/web
         run: pnpm --filter @agent-market/web build
       - name: Build apps/api
