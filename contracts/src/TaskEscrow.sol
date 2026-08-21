@@ -520,4 +520,31 @@ contract TaskEscrow is ReentrancyGuard, EIP712, AccessControl {
 
         supportedToken.safeTransfer(recipient, budget + stake);
     }
+
+    /// @notice Requester-triggered cancellation of a still-`OPEN` (never-accepted) task: refunds
+    /// 100% of `budget` back to the requester, moving the task to the terminal `CANCELLED` state.
+    /// @dev F-111 / AC-111. Only the task's `requester` may cancel, and only while `status ==
+    /// OPEN` — once `acceptTask` has moved a task to `ACCEPTED` (or later), it is no longer
+    /// cancellable via this path (the agent has already locked a stake against it). There is no
+    /// `stake` to refund here: `acceptTask` is the only function that ever sets `task.stake`
+    /// away from its zero default, and it also flips `status` away from `OPEN`, so an `OPEN`
+    /// task's `stake` is always 0. Checks-Effects-Interactions: `status` is flipped and the event
+    /// emitted before the external `safeTransfer`, so a reentrant call during the transfer sees
+    /// `status == CANCELLED` and reverts via the `TaskNotOpen` check before it could double-pay
+    /// (AC-108); `nonReentrant` blocks reentrancy into this contract regardless (AC-109).
+    function cancelTask(bytes32 taskId) external nonReentrant {
+        if (!_taskExists[taskId]) revert TaskNotFound(taskId);
+        Task storage task = _tasks[taskId];
+        if (task.requester != msg.sender) revert NotTaskRequester(taskId, msg.sender);
+        if (task.status != TaskStatus.OPEN) revert TaskNotOpen(taskId, task.status);
+
+        address requester = task.requester;
+        uint256 budget = task.budget;
+
+        task.status = TaskStatus.CANCELLED;
+
+        emit TaskCancelled(taskId);
+
+        supportedToken.safeTransfer(requester, budget);
+    }
 }
