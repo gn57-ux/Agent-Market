@@ -7,23 +7,26 @@ export interface ActionSheetProps {
   open: boolean;
   onClose: () => void;
   /** The business content component. It must not know or care whether it's
-   * being rendered inside a Dialog or a Bottom Sheet — same content, same
-   * state, only the surrounding container differs. */
+   * being rendered as a centered Dialog or a Bottom Sheet — same content,
+   * same state, only the presentation differs. */
   content: ReactNode;
   titleForA11y: string;
 }
 
 /**
- * Desktop (>= DESKTOP_BREAKPOINT_QUERY): renders `content` inside a native
- * <dialog> (real modal semantics: focus trap, Escape-to-close, backdrop).
- * Mobile: renders the identical `content` inside a bottom-anchored panel.
+ * Always a single native <dialog> element — real modal semantics (focus
+ * trap, Escape-to-close, ::backdrop, background inert) on both desktop and
+ * mobile. Only `data-action-sheet-variant` (and CSS driven by it) changes
+ * with viewport: "dialog" (centered) on desktop, "bottom-sheet" (anchored
+ * to the bottom) on mobile. Using one element type for both means `content`
+ * never gets unmounted/remounted when the viewport crosses the breakpoint
+ * while open — its local state survives.
  */
 export function ActionSheet({ open, onClose, content, titleForA11y }: ActionSheetProps) {
   const isDesktop = useMediaQuery(DESKTOP_BREAKPOINT_QUERY);
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
-    if (!isDesktop) return;
     const dialog = dialogRef.current;
     if (!dialog) return;
     // Use the `open` attribute (not the `.open` IDL property) as the source
@@ -44,34 +47,21 @@ export function ActionSheet({ open, onClose, content, titleForA11y }: ActionShee
         dialog.removeAttribute("open");
       }
     }
-  }, [open, isDesktop]);
-
-  if (isDesktop) {
-    return (
-      <dialog
-        ref={dialogRef}
-        aria-label={titleForA11y}
-        onClose={onClose}
-        onCancel={onClose}
-        data-action-sheet-variant="dialog"
-      >
-        {content}
-      </dialog>
-    );
-  }
-
-  if (!open) {
-    return null;
-  }
+  }, [open]);
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
+    <dialog
+      ref={dialogRef}
       aria-label={titleForA11y}
-      data-action-sheet-variant="bottom-sheet"
+      // The native <dialog> fires exactly one 'close' event for every way
+      // it closes (Escape, our own .close() call, a <form method="dialog">
+      // submit) — a single handler here is the one notification path.
+      // Do NOT also bind 'cancel': Escape fires cancel-then-close, and
+      // binding onClose to both would invoke it twice for one keypress.
+      onClose={onClose}
+      data-action-sheet-variant={isDesktop ? "dialog" : "bottom-sheet"}
     >
       {content}
-    </div>
+    </dialog>
   );
 }
