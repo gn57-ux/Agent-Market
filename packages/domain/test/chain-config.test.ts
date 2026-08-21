@@ -52,6 +52,19 @@ describe("resolveChainConfig", () => {
     ).toThrow(/TASK_ESCROW_ADDRESS/);
   });
 
+  it("rejects the zero address (undeployed .env.example placeholder)", () => {
+    const zeroAddress = `0x${"0".repeat(40)}`;
+    expect(() => resolveChainConfig({ ...LOCAL_ENV, TASK_ESCROW_ADDRESS: zeroAddress })).toThrow(
+      /zero address/,
+    );
+  });
+
+  it("rejects a CHAIN_ID beyond Number.MAX_SAFE_INTEGER instead of silently rounding it", () => {
+    expect(() => resolveChainConfig({ ...LOCAL_ENV, CHAIN_ID: "9007199254740993" })).toThrow(
+      /safe integer/,
+    );
+  });
+
   it("KNOWN_CHAINS lists at least Local Hardhat and Sepolia", () => {
     expect(KNOWN_CHAINS[31337]?.name).toBe("Local Hardhat");
     expect(KNOWN_CHAINS[11155111]?.name).toBe("Sepolia");

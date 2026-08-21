@@ -37,6 +37,7 @@ export interface EnvSource {
 }
 
 const HEX_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_ADDRESS = `0x${"0".repeat(40)}`;
 
 function requireHexAddress(env: EnvSource, key: string): HexAddress {
   const value = env[key];
@@ -45,13 +46,21 @@ function requireHexAddress(env: EnvSource, key: string): HexAddress {
       `chain-config: ${key} must be a 0x-prefixed 40-hex-char address, got: ${value}`,
     );
   }
+  if (value.toLowerCase() === ZERO_ADDRESS) {
+    throw new Error(
+      `chain-config: ${key} is the zero address (undeployed placeholder from .env.example) — set a real deployed address`,
+    );
+  }
   return value as HexAddress;
 }
 
 /**
- * Resolves the current environment's ChainConfig from an env source
- * (e.g. `process.env` on the backend, or `import.meta.env` on the frontend
- * — this module stays isomorphic by never reading either directly).
+ * Resolves a ChainConfig from a normalized env record. This module reads
+ * exactly the keys `CHAIN_ID`, `TASK_ESCROW_ADDRESS`, `YD_TOKEN_ADDRESS`,
+ * `YD_FAUCET_ADDRESS` — it does NOT know about runtime-specific prefixes
+ * (e.g. Vite's `VITE_*`). Callers on the frontend must map their own env
+ * source (`import.meta.env.VITE_CHAIN_ID`, etc.) into this shape before
+ * calling; passing `import.meta.env` directly will not work as-is.
  */
 export function resolveChainConfig(env: EnvSource): ChainConfig {
   const chainIdRaw = env.CHAIN_ID;
@@ -59,8 +68,8 @@ export function resolveChainConfig(env: EnvSource): ChainConfig {
     throw new Error("chain-config: CHAIN_ID is required");
   }
   const chainId = Number(chainIdRaw);
-  if (!Number.isInteger(chainId) || chainId <= 0) {
-    throw new Error(`chain-config: CHAIN_ID must be a positive integer, got: ${chainIdRaw}`);
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) {
+    throw new Error(`chain-config: CHAIN_ID must be a positive safe integer, got: ${chainIdRaw}`);
   }
 
   const metadata: ChainMetadata = KNOWN_CHAINS[chainId] ?? { name: `Chain ${chainId}` };
