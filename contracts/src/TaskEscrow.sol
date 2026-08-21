@@ -153,6 +153,8 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     error TaskNotSubmitted(bytes32 taskId, TaskStatus status);
     error DeliveryDeadlineAlreadyPassed(bytes32 taskId, uint64 deliveryDeadline, uint256 blockTimestamp);
     error InvalidReviewWindow(uint64 reviewWindow);
+    error DeliveryDeadlineNotYetPassed(bytes32 taskId, uint64 deliveryDeadline, uint256 blockTimestamp);
+    error ReviewDeadlineNotYetPassed(bytes32 taskId, uint64 reviewDeadline, uint256 blockTimestamp);
 
     /// @notice Upper bound accepted for `reviewWindow_` at deployment: half of `type(uint64).max`
     /// seconds (~292 billion years), far beyond any realistic value, but small enough that
@@ -377,6 +379,66 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
         task.status = TaskStatus.RELEASED;
 
         emit ResultApproved(taskId, agent, budget, stake);
+
+        supportedToken.safeTransfer(agent, budget + stake);
+    }
+
+    /// @notice Requester-triggered refund when the agent fails to submit a result before
+    /// `deliveryDeadline`: both the budget and the agent's forfeited stake are paid to the
+    /// requester, moving the task to the terminal `REFUNDED` state.
+    /// @dev F-107. This function's time window (`block.timestamp >= deliveryDeadline`) is the
+    /// exact complement of `submitResult`'s own late-rejection check
+    /// (`block.timestamp >= deliveryDeadline` there rejects, so `submitResult` only succeeds for
+    /// `block.timestamp < deliveryDeadline`), so for an `ACCEPTED` task exactly one of
+    /// `submitResult` or `claimDeliveryTimeout` is ever valid at any given `block.timestamp` — no
+    /// gap, no overlap. Checks-Effects-Interactions: `status` is flipped and the event emitted
+    /// before the external `safeTransfer`.
+    function claimDeliveryTimeout(bytes32 taskId) external nonReentrant {
+        if (!_taskExists[taskId]) revert TaskNotFound(taskId);
+        Task storage task = _tasks[taskId];
+        if (task.requester != msg.sender) revert NotTaskRequester(taskId, msg.sender);
+        if (task.status != TaskStatus.ACCEPTED) revert TaskNotAccepted(taskId, task.status);
+        if (block.timestamp < task.deliveryDeadline) {
+            revert DeliveryDeadlineNotYetPassed(taskId, task.deliveryDeadline, block.timestamp);
+        }
+
+        address requester = task.requester;
+        uint256 budget = task.budget;
+        uint256 stake = task.stake;
+
+        task.status = TaskStatus.REFUNDED;
+
+        emit DeliveryTimeoutClaimed(taskId, requester, budget, stake);
+
+        supportedToken.safeTransfer(requester, budget + stake);
+    }
+
+    /// @notice Permissionless finalize for a submitted result whose review window has expired
+    /// without the requester approving (or disputing) it: pays `budget + stake` to the agent,
+    /// same payout as `approveResult`'s success path, just triggered by anyone once
+    /// `reviewDeadline` has passed instead of requester action. Moves the task to the terminal
+    /// `RELEASED` state.
+    /// @dev F-108. Callable by any address ("任意地址可调用") so a requester who never calls
+    /// `approveResult` cannot indefinitely block the agent from being paid. The `status ==
+    /// SUBMITTED` check naturally excludes a `DISPUTED` task once `openDispute` (T-106) exists,
+    /// since a disputed task's status will no longer equal `SUBMITTED` — no extra "not disputed"
+    /// condition is needed here. Checks-Effects-Interactions: `status` is flipped and the event
+    /// emitted before the external `safeTransfer`.
+    function finalizeReviewTimeout(bytes32 taskId) external nonReentrant {
+        if (!_taskExists[taskId]) revert TaskNotFound(taskId);
+        Task storage task = _tasks[taskId];
+        if (task.status != TaskStatus.SUBMITTED) revert TaskNotSubmitted(taskId, task.status);
+        if (block.timestamp < task.reviewDeadline) {
+            revert ReviewDeadlineNotYetPassed(taskId, task.reviewDeadline, block.timestamp);
+        }
+
+        address agent = task.agent;
+        uint256 budget = task.budget;
+        uint256 stake = task.stake;
+
+        task.status = TaskStatus.RELEASED;
+
+        emit ReviewTimeoutFinalized(taskId, agent, budget, stake);
 
         supportedToken.safeTransfer(agent, budget + stake);
     }

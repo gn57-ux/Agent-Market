@@ -289,6 +289,214 @@ describe("TaskEscrow.submitResult / approveResult (AC-105, AC-106, AC-112)", () 
     });
   });
 
+  describe("claimDeliveryTimeout", () => {
+    it("moves ACCEPTED -> REFUNDED after deliveryDeadline, pays budget+stake to requester, and emits DeliveryTimeoutClaimed (F-107)", async () => {
+      const id = taskId("task-claim-1");
+      await createAcceptedTask(id, budget, 10n, 120); // 2 minutes out
+
+      const task = await escrow.getTask(id);
+      const expectedStake = task.stake;
+
+      await ethers.provider.send("evm_increaseTime", [180]); // past the 2-minute deadline
+      await ethers.provider.send("evm_mine", []);
+
+      const requesterBalanceBefore = await token.balanceOf(requester.address);
+      const escrowBalanceBefore = await token.balanceOf(escrowAddress);
+
+      await expect(escrow.connect(requester).claimDeliveryTimeout(id))
+        .to.emit(escrow, "DeliveryTimeoutClaimed")
+        .withArgs(id, requester.address, budget, expectedStake);
+
+      const taskAfter = await escrow.getTask(id);
+      expect(taskAfter.status).to.equal(5n); // TaskStatus.REFUNDED
+
+      expect(await token.balanceOf(requester.address)).to.equal(
+        requesterBalanceBefore + budget + expectedStake,
+      );
+      expect(await token.balanceOf(escrowAddress)).to.equal(
+        escrowBalanceBefore - budget - expectedStake,
+      );
+    });
+
+    it("rejects a caller other than the task's requester", async () => {
+      const id = taskId("task-claim-wrong-caller");
+      await createAcceptedTask(id, budget, 11n, 120);
+
+      await ethers.provider.send("evm_increaseTime", [180]);
+      await ethers.provider.send("evm_mine", []);
+
+      await expect(escrow.connect(agent).claimDeliveryTimeout(id)).to.be.revertedWithCustomError(
+        escrow,
+        "NotTaskRequester",
+      );
+    });
+
+    it("rejects a claim while still before deliveryDeadline", async () => {
+      const id = taskId("task-claim-too-early");
+      await createAcceptedTask(id, budget, 12n, oneDay);
+
+      await expect(
+        escrow.connect(requester).claimDeliveryTimeout(id),
+      ).to.be.revertedWithCustomError(escrow, "DeliveryDeadlineNotYetPassed");
+    });
+
+    it("rejects a claim when the task is already SUBMITTED (agent delivered in time)", async () => {
+      const id = taskId("task-claim-already-submitted");
+      await createAcceptedTask(id, budget, 13n, 120);
+
+      const resultHash = ethers.keccak256(ethers.toUtf8Bytes("result-in-time"));
+      await escrow.connect(agent).submitResult(id, resultHash);
+
+      await ethers.provider.send("evm_increaseTime", [180]);
+      await ethers.provider.send("evm_mine", []);
+
+      await expect(
+        escrow.connect(requester).claimDeliveryTimeout(id),
+      ).to.be.revertedWithCustomError(escrow, "TaskNotAccepted");
+    });
+
+    it("succeeds exactly at the deliveryDeadline (>= boundary)", async () => {
+      const id = taskId("task-claim-exact-deadline");
+      await createAcceptedTask(id, budget, 14n, 120);
+
+      const task = await escrow.getTask(id);
+      const exactDeadline = task.deliveryDeadline;
+
+      await ethers.provider.send("evm_setNextBlockTimestamp", [Number(exactDeadline)]);
+
+      await expect(escrow.connect(requester).claimDeliveryTimeout(id)).to.not.be.reverted;
+
+      const taskAfter = await escrow.getTask(id);
+      expect(taskAfter.status).to.equal(5n); // REFUNDED
+    });
+
+    it("submitResult/claimDeliveryTimeout time windows do not overlap and leave no gap", async () => {
+      const idBeforeDeadline = taskId("task-window-before-deadline");
+      await createAcceptedTask(idBeforeDeadline, budget, 15n, 120);
+      const taskBefore = await escrow.getTask(idBeforeDeadline);
+      const deadlineBefore = taskBefore.deliveryDeadline;
+
+      // At deliveryDeadline - 1: submitResult succeeds, claimDeliveryTimeout is too early.
+      await ethers.provider.send("evm_setNextBlockTimestamp", [Number(deadlineBefore) - 1]);
+      await expect(
+        escrow
+          .connect(agent)
+          .submitResult(idBeforeDeadline, ethers.keccak256(ethers.toUtf8Bytes("r"))),
+      ).to.not.be.reverted;
+
+      await expect(
+        escrow.connect(requester).claimDeliveryTimeout(idBeforeDeadline),
+      ).to.be.revertedWithCustomError(escrow, "TaskNotAccepted"); // already SUBMITTED by the call above
+
+      const idAtDeadline = taskId("task-window-at-deadline");
+      await createAcceptedTask(idAtDeadline, budget, 16n, 120);
+      const taskAt = await escrow.getTask(idAtDeadline);
+      const deadlineAt = taskAt.deliveryDeadline;
+
+      // At exactly deliveryDeadline: submitResult must reject as too late, claimDeliveryTimeout succeeds.
+      await ethers.provider.send("evm_setNextBlockTimestamp", [Number(deadlineAt)]);
+      await expect(
+        escrow.connect(agent).submitResult(idAtDeadline, ethers.keccak256(ethers.toUtf8Bytes("r"))),
+      ).to.be.revertedWithCustomError(escrow, "DeliveryDeadlineAlreadyPassed");
+
+      await expect(escrow.connect(requester).claimDeliveryTimeout(idAtDeadline)).to.not.be.reverted;
+    });
+  });
+
+  describe("finalizeReviewTimeout", () => {
+    const submitFor = async (id: string, taskBudget: bigint, nonce: bigint): Promise<void> => {
+      await createAcceptedTask(id, taskBudget, nonce);
+      const resultHash = ethers.keccak256(ethers.toUtf8Bytes(`result-${id}`));
+      await escrow.connect(agent).submitResult(id, resultHash);
+    };
+
+    it("moves SUBMITTED -> RELEASED after reviewDeadline, pays budget+stake to agent, callable by any address (F-108)", async () => {
+      const id = taskId("task-finalize-1");
+      await submitFor(id, budget, 20n);
+
+      const task = await escrow.getTask(id);
+      const expectedStake = task.stake;
+
+      await ethers.provider.send("evm_increaseTime", [reviewWindow + 1]);
+      await ethers.provider.send("evm_mine", []);
+
+      const agentBalanceBefore = await token.balanceOf(agent.address);
+      const escrowBalanceBefore = await token.balanceOf(escrowAddress);
+
+      // Called by an arbitrary third party (otherAgent), not requester or agent, to prove it's permissionless.
+      await expect(escrow.connect(otherAgent).finalizeReviewTimeout(id))
+        .to.emit(escrow, "ReviewTimeoutFinalized")
+        .withArgs(id, agent.address, budget, expectedStake);
+
+      const taskAfter = await escrow.getTask(id);
+      expect(taskAfter.status).to.equal(4n); // TaskStatus.RELEASED
+
+      expect(await token.balanceOf(agent.address)).to.equal(
+        agentBalanceBefore + budget + expectedStake,
+      );
+      expect(await token.balanceOf(escrowAddress)).to.equal(
+        escrowBalanceBefore - budget - expectedStake,
+      );
+    });
+
+    it("rejects finalize while still before reviewDeadline", async () => {
+      const id = taskId("task-finalize-too-early");
+      await submitFor(id, budget, 21n);
+
+      await expect(
+        escrow.connect(otherAgent).finalizeReviewTimeout(id),
+      ).to.be.revertedWithCustomError(escrow, "ReviewDeadlineNotYetPassed");
+    });
+
+    it("rejects finalize when the task is still ACCEPTED (never submitted)", async () => {
+      const id = taskId("task-finalize-still-accepted");
+      await createAcceptedTask(id, budget, 22n);
+
+      await expect(
+        escrow.connect(otherAgent).finalizeReviewTimeout(id),
+      ).to.be.revertedWithCustomError(escrow, "TaskNotSubmitted");
+    });
+
+    it("rejects finalize when the task is already RELEASED (already approved)", async () => {
+      const id = taskId("task-finalize-already-released");
+      await submitFor(id, budget, 23n);
+      await escrow.connect(requester).approveResult(id);
+
+      await expect(
+        escrow.connect(otherAgent).finalizeReviewTimeout(id),
+      ).to.be.revertedWithCustomError(escrow, "TaskNotSubmitted");
+    });
+
+    it("rejects a second finalize once the task is already RELEASED via a prior finalize", async () => {
+      const id = taskId("task-finalize-twice");
+      await submitFor(id, budget, 24n);
+
+      await ethers.provider.send("evm_increaseTime", [reviewWindow + 1]);
+      await ethers.provider.send("evm_mine", []);
+
+      await escrow.connect(otherAgent).finalizeReviewTimeout(id);
+
+      await expect(
+        escrow.connect(otherAgent).finalizeReviewTimeout(id),
+      ).to.be.revertedWithCustomError(escrow, "TaskNotSubmitted");
+    });
+
+    it("succeeds exactly at the reviewDeadline (>= boundary)", async () => {
+      const id = taskId("task-finalize-exact-deadline");
+      await submitFor(id, budget, 25n);
+
+      const task = await escrow.getTask(id);
+      const exactReviewDeadline = task.reviewDeadline;
+
+      await ethers.provider.send("evm_setNextBlockTimestamp", [Number(exactReviewDeadline)]);
+
+      await expect(escrow.connect(otherAgent).finalizeReviewTimeout(id)).to.not.be.reverted;
+
+      const taskAfter = await escrow.getTask(id);
+      expect(taskAfter.status).to.equal(4n); // RELEASED
+    });
+  });
+
   describe("constructor reviewWindow validation", () => {
     it("reverts deployment with reviewWindow = 0", async () => {
       const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
