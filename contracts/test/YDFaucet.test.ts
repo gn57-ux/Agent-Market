@@ -98,4 +98,24 @@ describe("YDFaucet", () => {
       "OwnableUnauthorizedAccount",
     );
   });
+
+  it("allows the faucet owner to hand YDToken ownership to a new address, recovering mint control", async () => {
+    await faucet.connect(deployer).transferTokenOwnership(other.address);
+    expect(await token.owner()).to.equal(other.address);
+
+    // The faucet no longer owns the token, so it can no longer mint on claim.
+    await expect(faucet.connect(claimer).claim()).to.be.revertedWithCustomError(
+      token,
+      "OwnableUnauthorizedAccount",
+    );
+
+    // The new owner has full mint control again.
+    await expect(token.connect(other).mint(claimer.address, claimAmount)).to.not.be.reverted;
+  });
+
+  it("reverts when a non-owner attempts to transfer token ownership", async () => {
+    await expect(
+      faucet.connect(other).transferTokenOwnership(other.address),
+    ).to.be.revertedWithCustomError(faucet, "OwnableUnauthorizedAccount");
+  });
 });

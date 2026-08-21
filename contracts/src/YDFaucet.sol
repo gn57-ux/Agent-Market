@@ -64,4 +64,11 @@ contract YDFaucet is Ownable {
         cooldownPeriod = newCooldownPeriod;
         emit CooldownPeriodUpdated(newCooldownPeriod);
     }
+
+    /// @notice Hands YDToken ownership to `newTokenOwner`. Since the faucet holds
+    /// `onlyOwner` rights on the token to mint on claim, this is the only way to
+    /// retire, replace, or recover control of the token from this faucet.
+    function transferTokenOwnership(address newTokenOwner) external onlyOwner {
+        token.transferOwnership(newTokenOwner);
+    }
 }
