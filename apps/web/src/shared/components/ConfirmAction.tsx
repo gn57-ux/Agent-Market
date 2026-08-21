@@ -17,10 +17,18 @@ export function ConfirmAction({
 }: ConfirmActionProps) {
   const [pendingConfirmation, setPendingConfirmation] = useState(false);
 
+  function handleConfirm() {
+    // Reset (lock out further clicks) BEFORE invoking the callback, so a
+    // double-click or a re-render while onConfirm is still running can't
+    // re-invoke an irreversible action (duplicate dispute/transaction).
+    setPendingConfirmation(false);
+    onConfirm();
+  }
+
   if (pendingConfirmation) {
     return (
       <span>
-        <button type="button" onClick={onConfirm} disabled={disabled}>
+        <button type="button" onClick={handleConfirm} disabled={disabled}>
           {confirmLabel}
         </button>
         <button type="button" onClick={() => setPendingConfirmation(false)}>
