@@ -30,7 +30,7 @@ describe("TaskEscrow.createTask (AC-101)", () => {
     await token.waitForDeployment();
 
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
-    escrow = await escrowFactory.deploy(await token.getAddress());
+    escrow = await escrowFactory.deploy(await token.getAddress(), other.address);
     await escrow.waitForDeployment();
 
     await token.connect(requester).approve(await escrow.getAddress(), ethers.MaxUint256);
@@ -83,7 +83,7 @@ describe("TaskEscrow.createTask (AC-101)", () => {
     await feeToken.mint(requester.address, budget);
 
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
-    const feeEscrow = await escrowFactory.deploy(await feeToken.getAddress());
+    const feeEscrow = await escrowFactory.deploy(await feeToken.getAddress(), other.address);
     await feeEscrow.waitForDeployment();
     await feeToken.connect(requester).approve(await feeEscrow.getAddress(), ethers.MaxUint256);
 

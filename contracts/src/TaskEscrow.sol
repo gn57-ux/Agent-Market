@@ -4,6 +4,8 @@ pragma solidity 0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /// @title TaskEscrow
 /// @notice Sole owner of the Agent Market task-funding state machine: budget locking, agent
@@ -14,12 +16,47 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// `TaskStatus` enum, and event list already match the full final shape from design.md so that
 /// later Tasks (T-103..T-107) can add `acceptTask`/`submitResult`/etc. on top without changing
 /// this shell.
-contract TaskEscrow is ReentrancyGuard {
+contract TaskEscrow is ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
+    using ECDSA for bytes32;
 
     /// @notice The sole supported task-funding token for stage one (PRD §3.3: no native ETH or
     /// multi-token support). Bound at deployment; `createTask` rejects any other `token`.
     IERC20 public immutable supportedToken;
+
+    /// @notice Single authorized off-chain signer whose EIP-712 signature authorizes an
+    /// `acceptTask` call (design.md 决策 2: EIP-712 授权, single-signer — a multi-signer/
+    /// committee scheme is out of scope for this Feature). Fixed at deployment; stage one uses
+    /// version-pinned deploys rather than an upgrade path (PRD §3.3/§14.4), so there is no
+    /// setter — rotating the signer means deploying a new `TaskEscrow`.
+    address public immutable authorizedSigner;
+
+    /// @notice Stake rate applied to `budget` on acceptance, expressed in basis points
+    /// (PRD §6.1, 已确认决定: fixed at 600 = 6%).
+    uint256 public constant STAKE_RATE_BPS = 600;
+    uint256 private constant BPS_DENOMINATOR = 10_000;
+
+    /// @dev EIP-712 typehash for `AcceptancePermit`. Field order matches the struct exactly.
+    bytes32 private constant ACCEPTANCE_PERMIT_TYPEHASH = keccak256(
+        "AcceptancePermit(bytes32 taskId,address agent,uint256 nonce,uint256 expiry,uint256 chainId,address verifyingContract)"
+    );
+
+    /// @notice Off-chain-issued authorization for `agent` to accept task `taskId`, bound to a
+    /// specific chain/contract and expiring at `expiry`. `nonce` is scoped per-`agent` and is
+    /// consumed on first successful use (see `_usedNonces`), preventing replay of the same
+    /// authorization (AC-102).
+    struct AcceptancePermit {
+        bytes32 taskId;
+        address agent;
+        uint256 nonce;
+        uint256 expiry;
+        uint256 chainId;
+        address verifyingContract;
+    }
+
+    /// @notice Nonces already consumed by `acceptTask`, scoped per agent so two different
+    /// agents' nonce spaces never collide.
+    mapping(address agent => mapping(uint256 nonce => bool used)) private _usedNonces;
 
     /// @dev `DRAFT` does not exist on-chain (PRD §7.2); on-chain state machine starts at `OPEN`.
     enum TaskStatus {
@@ -91,10 +128,22 @@ contract TaskEscrow is ReentrancyGuard {
     error TaskNotFound(bytes32 taskId);
     error FeeOnTransferTokenNotSupported();
     error UnsupportedToken(address token);
+    error TaskNotOpen(bytes32 taskId, TaskStatus status);
+    error PermitExpired(uint256 expiry, uint256 blockTimestamp);
+    error PermitWrongChain(uint256 permitChainId, uint256 actualChainId);
+    error PermitWrongContract(address permitContract, address actualContract);
+    error PermitNonceAlreadyUsed(address agent, uint256 nonce);
+    error PermitAgentMismatch(address permitAgent, address caller);
+    error InvalidPermitSignature();
 
     /// @param supportedToken_ The single ERC-20 this escrow accepts for task budgets (PRD §3.3).
-    constructor(IERC20 supportedToken_) {
+    /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
+    constructor(
+        IERC20 supportedToken_,
+        address authorizedSigner_
+    ) EIP712("AgentMarketTaskEscrow", "1") {
         supportedToken = supportedToken_;
+        authorizedSigner = authorizedSigner_;
     }
 
     /// @notice Creates a new task and locks 100% of `budget` into escrow from `msg.sender`.
@@ -153,5 +202,79 @@ contract TaskEscrow is ReentrancyGuard {
     function getTask(bytes32 taskId) external view returns (Task memory) {
         if (!_taskExists[taskId]) revert TaskNotFound(taskId);
         return _tasks[taskId];
+    }
+
+    /// @notice Accepts an `OPEN` task on behalf of `permit.agent` (must equal `msg.sender`),
+    /// authorized off-chain by `authorizedSigner`'s EIP-712 signature over `permit`, and locks
+    /// a 6% stake (`STAKE_RATE_BPS`) of the task's budget from the caller into escrow.
+    /// @dev F-104 / AC-102 / AC-103 / AC-104.
+    ///
+    /// Concurrency (AC-103): the EVM executes transactions sequentially, so of two concurrent
+    /// `acceptTask` submissions for the same `taskId` (e.g. two agents each holding a validly
+    /// signed permit), whichever is mined first flips `status` to `ACCEPTED`; the second
+    /// transaction's status check below then reads the already-updated state and reverts with
+    /// `TaskNotOpen`. No additional locking is needed beyond this status check plus
+    /// `nonReentrant` (which only guards against reentrancy *within* one transaction, not across
+    /// two independent ones — ordering here comes from sequential EVM execution itself).
+    ///
+    /// Checks-Effects-Interactions: every check (domain binding, expiry, nonce, task status,
+    /// caller match) runs before any state mutation or external call; the nonce is marked used
+    /// and the task record is updated before the `safeTransferFrom` interaction, so a reentrant
+    /// call during the token transfer would see the nonce already consumed and the task already
+    /// `ACCEPTED`.
+    function acceptTask(AcceptancePermit calldata permit, bytes calldata signature) external nonReentrant {
+        if (permit.chainId != block.chainid) {
+            revert PermitWrongChain(permit.chainId, block.chainid);
+        }
+        if (permit.verifyingContract != address(this)) {
+            revert PermitWrongContract(permit.verifyingContract, address(this));
+        }
+        if (permit.expiry <= block.timestamp) {
+            revert PermitExpired(permit.expiry, block.timestamp);
+        }
+        if (permit.agent != msg.sender) {
+            revert PermitAgentMismatch(permit.agent, msg.sender);
+        }
+        if (_usedNonces[permit.agent][permit.nonce]) {
+            revert PermitNonceAlreadyUsed(permit.agent, permit.nonce);
+        }
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ACCEPTANCE_PERMIT_TYPEHASH,
+                permit.taskId,
+                permit.agent,
+                permit.nonce,
+                permit.expiry,
+                permit.chainId,
+                permit.verifyingContract
+            )
+        );
+        address recovered = _hashTypedDataV4(structHash).recover(signature);
+        if (recovered != authorizedSigner) revert InvalidPermitSignature();
+
+        if (!_taskExists[permit.taskId]) revert TaskNotFound(permit.taskId);
+        Task storage task = _tasks[permit.taskId];
+        if (task.status != TaskStatus.OPEN) revert TaskNotOpen(permit.taskId, task.status);
+
+        // 600 bps of `budget`, multiplication before division to preserve precision. `budget`
+        // is a token amount (realistically far below 2^256 / 10_000), so `budget * 600` cannot
+        // realistically overflow uint256. For `budget < 17` (i.e. `budget * 600 < 10_000`) the
+        // stake rounds down to 0: accepted as-is rather than rejected, because `createTask`
+        // already enforces `budget != 0` and stage one's real budgets (an 18-decimal ERC-20)
+        // make a sub-17-wei budget a non-scenario; a zero stake in that edge case only means no
+        // collateral is locked for a practically worthless task, not a fund-safety issue.
+        uint256 stake = (task.budget * STAKE_RATE_BPS) / BPS_DENOMINATOR;
+
+        _usedNonces[permit.agent][permit.nonce] = true;
+        task.agent = permit.agent;
+        task.stake = stake;
+        task.status = TaskStatus.ACCEPTED;
+
+        emit TaskAccepted(permit.taskId, permit.agent, stake);
+
+        if (stake > 0) {
+            supportedToken.safeTransferFrom(msg.sender, address(this), stake);
+        }
     }
 }
