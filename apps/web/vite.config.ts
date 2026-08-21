@@ -3,4 +3,7 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  // Load .env from the repo root instead of apps/web, so a single
+  // .env.example/.env at the root covers every module (README T-007).
+  envDir: "../../",
 });

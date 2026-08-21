@@ -23,6 +23,12 @@ pnpm install
 cp .env.example .env   # 按需修改各模块变量，.env 已被 git 忽略
 ```
 
+根目录 `.env` 是唯一的变量来源：
+
+- `apps/web`（Vite）通过 `envDir: "../../"` 自动从根目录加载 `VITE_*` 变量。
+- `apps/api` 的 `dev`/`start` 脚本通过 Node 原生 `--env-file-if-exists=../../.env` 自动加载。
+- `services/dispatch`（Go）和 `contracts`（Hardhat 部署）目前**不会**自动读取 `.env`；需要手动导出，例如：`export $(grep -v '^#' .env | xargs)`，或在命令前显式赋值（如 `DISPATCH_PORT=8081 go run ./cmd/server`）。
+
 ## 开发
 
 ```bash
