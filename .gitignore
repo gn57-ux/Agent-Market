@@ -3,6 +3,11 @@ dist/
 .DS_Store
 *.log
 
+# Environment
+.env
+.env.*
+!.env.example
+
 # Hardhat
 contracts/cache/
 contracts/artifacts/
