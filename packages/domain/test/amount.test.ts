@@ -50,8 +50,9 @@ describe("Amount parse/format (18 decimals)", () => {
   });
 
   it("rejects input with more fractional digits than the token's decimals instead of silently rounding", () => {
-    expect(() => parseAmount("0.0000000000000000009")).toThrow(/fractional digits/);
-    // exactly at the boundary (18 digits) is fine
-    expect(() => parseAmount("0.000000000000000001")).not.toThrow();
+    const oneExtraDigit = `0.${"0".repeat(18)}9`; // 19 fractional digits, 1 more than DEFAULT_DECIMALS
+    const atTheBoundary = `0.${"0".repeat(17)}1`; // exactly 18 fractional digits
+    expect(() => parseAmount(oneExtraDigit)).toThrow(/fractional digits/);
+    expect(() => parseAmount(atTheBoundary)).not.toThrow();
   });
 });
