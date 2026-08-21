@@ -1,0 +1,14 @@
+{
+  "name": "@agent-market/contracts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "commonjs",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test"
+  },
+  "devDependencies": {
+    "hardhat": "^2.22.6",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0"
+  }
+}
