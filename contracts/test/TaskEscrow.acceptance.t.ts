@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import type { TaskEscrow, YDToken } from "../typechain-types";
+import type { TaskEscrow, YDToken, FeeOnTransferMockToken } from "../typechain-types";
 import type { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 
 describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
@@ -30,11 +30,11 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
 
   // EIP-712 domain/types must mirror the contract's EIP712("AgentMarketTaskEscrow", "1") setup
   // and the AcceptancePermit struct field order exactly.
-  const domain = () => ({
+  const domain = (verifyingContract: string = escrowAddress) => ({
     name: "AgentMarketTaskEscrow",
     version: "1",
     chainId,
-    verifyingContract: escrowAddress,
+    verifyingContract,
   });
 
   const types = {
@@ -60,7 +60,8 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
   const signPermit = async (
     signer: HardhatEthersSigner,
     permit: AcceptancePermit,
-  ): Promise<string> => signer.signTypedData(domain(), types, permit);
+    verifyingContract: string = escrowAddress,
+  ): Promise<string> => signer.signTypedData(domain(verifyingContract), types, permit);
 
   const createOpenTask = async (id: string, taskBudget: bigint): Promise<void> => {
     const deadline = await futureDeadline(oneDay);
@@ -174,12 +175,16 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     expect(task.status).to.equal(0n); // still OPEN, not silently accepted
   });
 
-  it("does not overflow the stake computation for a very large budget", async () => {
-    // Mint a requester an enormous budget directly (bypassing the 1,000,000-token faucet-style
-    // setup) so createTask can lock in a budget close to a realistic "very large" upper bound
-    // without hitting this token's total-supply limits; the point is to prove `Math.mulDiv`
-    // handles a `budget * 600` product that a naive multiply-then-divide would overflow on.
-    const hugeBudget = ethers.parseUnits("1000000000000000000", 18); // 1e18 whole tokens
+  it("does not overflow the stake computation for a budget above type(uint256).max / 600", async () => {
+    // A naive `budget * STAKE_RATE_BPS` reverts (Solidity 0.8 overflow check) once `budget`
+    // exceeds `type(uint256).max / 600`; `Math.mulDiv` computes the same result via a 512-bit
+    // intermediate and must not overflow here. Use a budget just past that exact threshold —
+    // not merely "a very large number" — so this test actually exercises the overflow boundary
+    // instead of only a large-but-safe value.
+    const maxUint256 = 2n ** 256n - 1n;
+    const overflowThreshold = maxUint256 / 600n; // budgets above this overflow a naive multiply
+    const hugeBudget = overflowThreshold + 1_000n;
+
     await token.connect(requester).mint(requester.address, hugeBudget);
 
     const id = taskId("task-accept-huge-budget");
@@ -187,8 +192,9 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     await token.connect(requester).approve(escrowAddress, ethers.MaxUint256);
     await escrow.connect(requester).createTask(id, tokenAddress, hugeBudget, deadline);
 
-    const expectedStakePreview = (hugeBudget * 600n) / 10_000n;
-    await token.connect(requester).mint(agent.address, expectedStakePreview);
+    const expectedStakeBigInt = (hugeBudget * 600n) / 10_000n; // floor division, matches Math.mulDiv
+
+    await token.connect(requester).mint(agent.address, expectedStakeBigInt);
     await token.connect(agent).approve(escrowAddress, ethers.MaxUint256);
 
     const permit: AcceptancePermit = {
@@ -201,11 +207,71 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     };
     const signature = await signPermit(authorizedSigner, permit);
 
-    const expectedStake = (hugeBudget * 600n) / 10_000n;
-
     await expect(escrow.connect(agent).acceptTask(permit, signature))
       .to.emit(escrow, "TaskAccepted")
-      .withArgs(id, agent.address, expectedStake);
+      .withArgs(id, agent.address, expectedStakeBigInt);
+
+    const task = await escrow.getTask(id);
+    expect(task.stake).to.equal(expectedStakeBigInt);
+  });
+
+  it("rejects and fully rolls back acceptance when the stake transfer under-delivers", async () => {
+    // Bind a fresh escrow to a mock whose fee is mutable: fund the task at 0% fee (so
+    // createTask's own balance-delta check passes normally), then switch the fee on before
+    // calling acceptTask so only the stake leg under-delivers. This isolates acceptTask's own
+    // balance-delta guard (added alongside this fix) from T-102's createTask-side guard, and
+    // proves a shortfall there reverts the whole call, unwinding the nonce/task/event writes
+    // made earlier in the same transaction.
+    const mockFactory = await ethers.getContractFactory("FeeOnTransferMockToken", requester);
+    const feeToken = (await mockFactory.deploy(0n)) as FeeOnTransferMockToken;
+    await feeToken.waitForDeployment();
+    const feeTokenAddress = await feeToken.getAddress();
+
+    const feeEscrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
+    const feeEscrow = await feeEscrowFactory.deploy(feeTokenAddress, authorizedSigner.address);
+    await feeEscrow.waitForDeployment();
+    const feeEscrowAddress = await feeEscrow.getAddress();
+
+    await feeToken.mint(requester.address, budget);
+    await feeToken.connect(requester).approve(feeEscrowAddress, ethers.MaxUint256);
+
+    const id = taskId("task-stake-shortfall");
+    const deadline = await futureDeadline(oneDay);
+    await feeEscrow.connect(requester).createTask(id, feeTokenAddress, budget, deadline);
+
+    const expectedStake = (budget * 600n) / 10_000n;
+    await feeToken.mint(agent.address, expectedStake);
+    await feeToken.connect(agent).approve(feeEscrowAddress, ethers.MaxUint256);
+
+    // Switch the fee on now, so only the acceptTask stake transfer is affected.
+    await feeToken.setFeeBasisPoints(500n); // 5%
+
+    const permit: AcceptancePermit = {
+      taskId: id,
+      agent: agent.address,
+      nonce: 0n,
+      expiry: await futureDeadline(oneDay),
+      chainId,
+      verifyingContract: feeEscrowAddress,
+    };
+    const signature = await signPermit(authorizedSigner, permit, feeEscrowAddress);
+
+    await expect(
+      feeEscrow.connect(agent).acceptTask(permit, signature),
+    ).to.be.revertedWithCustomError(feeEscrow, "StakeTransferAmountMismatch");
+
+    // Full rollback: task must still be OPEN, unassigned, zero stake, and no TaskAccepted event
+    // should have been recorded.
+    const taskAfter = await feeEscrow.getTask(id);
+    expect(taskAfter.status).to.equal(0n); // OPEN
+    expect(taskAfter.agent).to.equal(ethers.ZeroAddress);
+    expect(taskAfter.stake).to.equal(0n);
+
+    // The same permit (same nonce) must still be usable once resubmitted with the fee off again
+    // — proving the nonce was never actually marked used by the reverted call.
+    await feeToken.setFeeBasisPoints(0n);
+    const retrySignature = await signPermit(authorizedSigner, permit, feeEscrowAddress);
+    await expect(feeEscrow.connect(agent).acceptTask(permit, retrySignature)).to.not.be.reverted;
   });
 
   it("rejects acceptance after the task's deliveryDeadline has passed", async () => {

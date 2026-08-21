@@ -140,6 +140,7 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     error StakeAmountZero(bytes32 taskId, uint256 budget);
     error ZeroAuthorizedSigner();
     error RequesterCannotAcceptOwnTask(bytes32 taskId, address requester);
+    error StakeTransferAmountMismatch(bytes32 taskId, uint256 expectedStake, uint256 actualReceived);
 
     /// @param supportedToken_ The single ERC-20 this escrow accepts for task budgets (PRD §3.3).
     /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
@@ -288,6 +289,15 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
 
         emit TaskAccepted(permit.taskId, permit.agent, stake);
 
+        // Same balance-delta guard as `createTask`'s fee-on-transfer protection: verify the
+        // escrow's actual token balance increased by exactly `stake`, not just that
+        // `safeTransferFrom` didn't revert. A revert here unwinds the nonce/task/event state
+        // already written above, since Solidity reverts undo the entire transaction.
+        uint256 balanceBefore = supportedToken.balanceOf(address(this));
         supportedToken.safeTransferFrom(msg.sender, address(this), stake);
+        uint256 balanceAfter = supportedToken.balanceOf(address(this));
+        if (balanceAfter - balanceBefore != stake) {
+            revert StakeTransferAmountMismatch(permit.taskId, stake, balanceAfter - balanceBefore);
+        }
     }
 }
