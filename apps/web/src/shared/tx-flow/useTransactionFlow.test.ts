@@ -209,6 +209,101 @@ describe("useTransactionFlow", () => {
     expect(retryResult).toEqual({ outcome: "confirmed", txHash: TX_HASH });
   });
 
+  it("retry() rejects and never calls buildTx from idle", async () => {
+    const buildTx = vi.fn().mockResolvedValue({ hash: TX_HASH });
+    const confirm = vi.fn().mockResolvedValue({ confirmations: 1 });
+    const verify = vi.fn().mockResolvedValue({ outcome: "confirmed" });
+
+    const { result } = renderHook(() => useTransactionFlow({ buildTx, confirm, verify }));
+    expect(result.current.status.kind).toBe("idle");
+
+    await expect(result.current.retry()).rejects.toThrow(/only valid from/);
+    expect(buildTx).not.toHaveBeenCalled();
+  });
+
+  // Note on "pending": it is not tested in isolation here. `start()` sets
+  // "pending" and then immediately (synchronously) hands off into
+  // confirmAndVerify, which sets "confirming" as its very first statement —
+  // there is no real async gate between the two, so "pending" cannot be
+  // frozen in a test without adding a production-only delay purely for
+  // testability (which this project's conventions rule against — see the
+  // comment at the `pending` transition in useTransactionFlow.ts). The
+  // retry() guard has no special case for "pending": it's a plain
+  // `if (rpcRecoveryPending) .. else if (failed) .. else throw`, so
+  // "pending" shares the exact same rejection branch that the "idle" and
+  // "confirming" tests below already exercise end-to-end.
+
+  it("retry() rejects and never calls buildTx again from confirming", async () => {
+    let resolveConfirm!: (value: { confirmations: number }) => void;
+    const confirm = vi
+      .fn()
+      .mockReturnValue(new Promise<{ confirmations: number }>((r) => (resolveConfirm = r)));
+    const buildTx = vi.fn().mockResolvedValue({ hash: TX_HASH });
+    const verify = vi.fn().mockResolvedValue({ outcome: "confirmed" });
+
+    const { result } = renderHook(() => useTransactionFlow({ buildTx, confirm, verify }));
+
+    let startPromise!: Promise<unknown>;
+    await act(async () => {
+      startPromise = result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.status.kind).toBe("confirming");
+
+    await expect(result.current.retry()).rejects.toThrow(/only valid from/);
+    expect(buildTx).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveConfirm({ confirmations: 1 });
+      await startPromise;
+    });
+  });
+
+  it("retry() rejects and never calls buildTx again from verifying", async () => {
+    let resolveVerify!: (value: { outcome: "confirmed" }) => void;
+    const verify = vi
+      .fn()
+      .mockReturnValue(new Promise<{ outcome: "confirmed" }>((r) => (resolveVerify = r)));
+    const buildTx = vi.fn().mockResolvedValue({ hash: TX_HASH });
+    const confirm = vi.fn().mockResolvedValue({ confirmations: 1 });
+
+    const { result } = renderHook(() => useTransactionFlow({ buildTx, confirm, verify }));
+
+    let startPromise!: Promise<unknown>;
+    await act(async () => {
+      startPromise = result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.status.kind).toBe("verifying");
+
+    await expect(result.current.retry()).rejects.toThrow(/only valid from/);
+    expect(buildTx).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveVerify({ outcome: "confirmed" });
+      await startPromise;
+    });
+  });
+
+  it("retry() rejects and never calls buildTx again from confirmed", async () => {
+    const buildTx = vi.fn().mockResolvedValue({ hash: TX_HASH });
+    const confirm = vi.fn().mockResolvedValue({ confirmations: 1 });
+    const verify = vi.fn().mockResolvedValue({ outcome: "confirmed" });
+
+    const { result } = renderHook(() => useTransactionFlow({ buildTx, confirm, verify }));
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.status.kind).toBe("confirmed");
+
+    await expect(result.current.retry()).rejects.toThrow(/only valid from/);
+    expect(buildTx).toHaveBeenCalledTimes(1);
+  });
+
   it("buildTx throwing maps to failed with the error message as reason", async () => {
     const buildTx = vi.fn().mockRejectedValue(new Error("user rejected signature"));
     const confirm = vi.fn();

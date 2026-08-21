@@ -110,6 +110,15 @@ export function useTransactionFlow(config: UseTransactionFlowConfig): UseTransac
     }
 
     setStatusTracked({ kind: "pending", txHash: hash });
+    // "pending" and the start of "confirming" are both set synchronously
+    // back-to-back here (no real async gate between them — broadcast
+    // immediately begins the confirmation wait), so they may commit as a
+    // single React render. That's fine: "pending" isn't waiting on anything
+    // itself, so there's no correctness reason to force it onto its own
+    // render (unlike "confirming", which genuinely waits on confirm() and
+    // must be observable — see below). Adding an artificial delay here
+    // purely for state-isolation in tests would be complexity with no
+    // production benefit.
     return confirmAndVerify(hash);
   }, [config, confirmAndVerify, setStatusTracked]);
 
@@ -118,8 +127,17 @@ export function useTransactionFlow(config: UseTransactionFlowConfig): UseTransac
     if (current.kind === "rpcRecoveryPending") {
       return confirmAndVerify(current.txHash);
     }
-    // failed (or any other state): start a fresh attempt from scratch.
-    return start();
+    if (current.kind === "failed") {
+      return start();
+    }
+    // idle / awaitingSignature / pending / confirming / verifying / confirmed:
+    // retry() is only meaningful once there's something to recover from
+    // (rpcRecoveryPending) or a fresh attempt to make (failed). Calling it
+    // from any other state is a caller bug — reject loudly instead of
+    // silently re-signing/re-broadcasting a transaction.
+    throw new Error(
+      `retry() is only valid from 'rpcRecoveryPending' or 'failed', current status: '${current.kind}'`,
+    );
   }, [confirmAndVerify, start]);
 
   return { status, start, retry };
