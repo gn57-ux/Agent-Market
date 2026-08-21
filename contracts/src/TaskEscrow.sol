@@ -17,6 +17,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 contract TaskEscrow is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    /// @notice The sole supported task-funding token for stage one (PRD §3.3: no native ETH or
+    /// multi-token support). Bound at deployment; `createTask` rejects any other `token`.
+    IERC20 public immutable supportedToken;
+
     /// @dev `DRAFT` does not exist on-chain (PRD §7.2); on-chain state machine starts at `OPEN`.
     enum TaskStatus {
         OPEN,
@@ -86,6 +90,12 @@ contract TaskEscrow is ReentrancyGuard {
     error TaskAlreadyExists(bytes32 taskId);
     error TaskNotFound(bytes32 taskId);
     error FeeOnTransferTokenNotSupported();
+    error UnsupportedToken(address token);
+
+    /// @param supportedToken_ The single ERC-20 this escrow accepts for task budgets (PRD §3.3).
+    constructor(IERC20 supportedToken_) {
+        supportedToken = supportedToken_;
+    }
 
     /// @notice Creates a new task and locks 100% of `budget` into escrow from `msg.sender`.
     /// @dev Requires `msg.sender` to have already `approve`d this contract for at least
@@ -107,11 +117,12 @@ contract TaskEscrow is ReentrancyGuard {
         uint256 budget,
         uint64 deliveryDeadline
     ) external nonReentrant {
+        if (token != address(supportedToken)) revert UnsupportedToken(token);
         if (budget == 0) revert ZeroBudget();
         if (deliveryDeadline <= block.timestamp) revert InvalidDeliveryDeadline();
         if (_taskExists[taskId]) revert TaskAlreadyExists(taskId);
 
-        IERC20 erc20 = IERC20(token);
+        IERC20 erc20 = supportedToken;
         uint256 balanceBefore = erc20.balanceOf(address(this));
         erc20.safeTransferFrom(msg.sender, address(this), budget);
         uint256 balanceAfter = erc20.balanceOf(address(this));

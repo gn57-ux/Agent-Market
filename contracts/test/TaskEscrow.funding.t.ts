@@ -30,7 +30,7 @@ describe("TaskEscrow.createTask (AC-101)", () => {
     await token.waitForDeployment();
 
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
-    escrow = await escrowFactory.deploy();
+    escrow = await escrowFactory.deploy(await token.getAddress());
     await escrow.waitForDeployment();
 
     await token.connect(requester).approve(await escrow.getAddress(), ethers.MaxUint256);
@@ -73,19 +73,40 @@ describe("TaskEscrow.createTask (AC-101)", () => {
     ).to.be.revertedWithCustomError(escrow, "ZeroBudget");
   });
 
-  it("rejects a fee-on-transfer / deflationary token", async () => {
+  it("rejects a fee-on-transfer / deflationary token bound as the supported token", async () => {
+    // The balance-delta check is defense-in-depth for whatever token ends up bound as
+    // `supportedToken` at deployment; exercise it directly against an escrow instance bound to
+    // a deflationary mock, since the production escrow only ever accepts its own bound token.
     const mockFactory = await ethers.getContractFactory("FeeOnTransferMockToken", requester);
     const feeToken = (await mockFactory.deploy(500n)) as FeeOnTransferMockToken; // 5% fee
     await feeToken.waitForDeployment();
     await feeToken.mint(requester.address, budget);
-    await feeToken.connect(requester).approve(await escrow.getAddress(), ethers.MaxUint256);
+
+    const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
+    const feeEscrow = await escrowFactory.deploy(await feeToken.getAddress());
+    await feeEscrow.waitForDeployment();
+    await feeToken.connect(requester).approve(await feeEscrow.getAddress(), ethers.MaxUint256);
 
     const id = taskId("task-fee-on-transfer");
     const deadline = await futureDeadline(oneDay);
 
     await expect(
-      escrow.connect(requester).createTask(id, await feeToken.getAddress(), budget, deadline),
-    ).to.be.revertedWithCustomError(escrow, "FeeOnTransferTokenNotSupported");
+      feeEscrow.connect(requester).createTask(id, await feeToken.getAddress(), budget, deadline),
+    ).to.be.revertedWithCustomError(feeEscrow, "FeeOnTransferTokenNotSupported");
+  });
+
+  it("rejects a token that does not match the escrow's bound supportedToken", async () => {
+    const otherTokenFactory = await ethers.getContractFactory("YDToken", requester);
+    const otherToken = await otherTokenFactory.deploy(requester.address, budget);
+    await otherToken.waitForDeployment();
+    await otherToken.connect(requester).approve(await escrow.getAddress(), ethers.MaxUint256);
+
+    const id = taskId("task-unsupported-token");
+    const deadline = await futureDeadline(oneDay);
+
+    await expect(
+      escrow.connect(requester).createTask(id, await otherToken.getAddress(), budget, deadline),
+    ).to.be.revertedWithCustomError(escrow, "UnsupportedToken");
   });
 
   it("rejects a deliveryDeadline that is not in the future", async () => {
