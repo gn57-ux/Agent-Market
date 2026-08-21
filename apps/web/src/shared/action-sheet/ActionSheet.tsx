@@ -1,7 +1,22 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import { useMediaQuery } from "./useMediaQuery.js";
 
 export const DESKTOP_BREAKPOINT_QUERY = "(min-width: 768px)";
+
+// Real positioning, not just a label: overrides the browser's default
+// centered-dialog placement to anchor the panel to the bottom edge, full
+// width, on mobile. Inline (not an external stylesheet) so it's directly
+// verifiable via getComputedStyle in both real browsers and jsdom, which
+// only reliably applies inline styles / doesn't fully implement stylesheet
+// cascade for computed style.
+const BOTTOM_SHEET_STYLE: CSSProperties = {
+  position: "fixed",
+  inset: "auto 0 0 0",
+  margin: 0,
+  width: "100%",
+  maxWidth: "100%",
+  borderRadius: "12px 12px 0 0",
+};
 
 export interface ActionSheetProps {
   open: boolean;
@@ -16,9 +31,9 @@ export interface ActionSheetProps {
 /**
  * Always a single native <dialog> element — real modal semantics (focus
  * trap, Escape-to-close, ::backdrop, background inert) on both desktop and
- * mobile. Only `data-action-sheet-variant` (and CSS driven by it) changes
- * with viewport: "dialog" (centered) on desktop, "bottom-sheet" (anchored
- * to the bottom) on mobile. Using one element type for both means `content`
+ * mobile. On mobile it's repositioned (BOTTOM_SHEET_STYLE: fixed, anchored
+ * to the bottom edge, full width) instead of the browser's default centered
+ * placement, which desktop keeps. Using one element type for both means `content`
  * never gets unmounted/remounted when the viewport crosses the breakpoint
  * while open — its local state survives.
  */
@@ -60,6 +75,7 @@ export function ActionSheet({ open, onClose, content, titleForA11y }: ActionShee
       // binding onClose to both would invoke it twice for one keypress.
       onClose={onClose}
       data-action-sheet-variant={isDesktop ? "dialog" : "bottom-sheet"}
+      style={isDesktop ? undefined : BOTTOM_SHEET_STYLE}
     >
       {content}
     </dialog>

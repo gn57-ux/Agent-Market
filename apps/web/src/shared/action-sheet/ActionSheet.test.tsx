@@ -84,6 +84,41 @@ describe("ActionSheet", () => {
     expect(screen.getByText("确认将预算 100 YD 锁入托管合约？")).toBeTruthy();
   });
 
+  it("mobile is actually positioned as a bottom sheet (real inline styles, not just a data attribute)", () => {
+    mockMatchMedia(false);
+    render(
+      <ActionSheet
+        open
+        onClose={vi.fn()}
+        titleForA11y="确认锁定预算"
+        content={<BusinessContent onDone={vi.fn()} />}
+      />,
+    );
+
+    const dialog = document.querySelector("dialog") as HTMLDialogElement;
+    expect(dialog.style.position).toBe("fixed");
+    expect(dialog.style.width).toBe("100%");
+    expect(dialog.style.margin).toBe("0px");
+    // Anchored to the bottom edge, not centered.
+    expect(dialog.style.inset).toContain("0");
+  });
+
+  it("desktop keeps the browser's default centered placement (no bottom-sheet positioning applied)", () => {
+    mockMatchMedia(true);
+    render(
+      <ActionSheet
+        open
+        onClose={vi.fn()}
+        titleForA11y="确认锁定预算"
+        content={<BusinessContent onDone={vi.fn()} />}
+      />,
+    );
+
+    const dialog = document.querySelector("dialog") as HTMLDialogElement;
+    expect(dialog.style.position).not.toBe("fixed");
+    expect(dialog.getAttribute("style")).toBeFalsy();
+  });
+
   it("the same content component behaves identically in both variants (button click fires the same callback)", () => {
     for (const isDesktopNow of [true, false]) {
       mockMatchMedia(isDesktopNow);
