@@ -23,15 +23,25 @@ const cleanCode = `export function isClean(value: string | undefined): number {
 const violatingResults = await eslint.lintText(violatingCode, {
   filePath: "verify-eslint-rules-fixture.ts",
 });
-const violatingRuleIds = violatingResults
-  .flatMap((result) => result.messages)
-  .map((message) => message.ruleId);
+const violatingMessages = violatingResults.flatMap((result) => result.messages);
 
-const mustFire = ["@typescript-eslint/no-explicit-any", "@typescript-eslint/no-non-null-assertion"];
-const missing = mustFire.filter((ruleId) => !violatingRuleIds.includes(ruleId));
+// ESLint message severity: 1 = warn, 2 = error. A rule silently downgraded
+// from "error" to "warn" would still produce a message with this ruleId,
+// but `eslint .` exits 0 on warnings alone — so checking ruleId presence
+// alone would NOT catch that regression. Require severity 2 explicitly.
+const mustFireAsError = [
+  "@typescript-eslint/no-explicit-any",
+  "@typescript-eslint/no-non-null-assertion",
+];
+const missing = mustFireAsError.filter(
+  (ruleId) =>
+    !violatingMessages.some((message) => message.ruleId === ruleId && message.severity === 2),
+);
 if (missing.length > 0) {
-  console.error(`FAIL: expected rule(s) did not fire on violating code: ${missing.join(", ")}`);
-  console.error(`Actual rule IDs reported: ${violatingRuleIds.join(", ") || "(none)"}`);
+  console.error(`FAIL: expected rule(s) did not fire at "error" severity: ${missing.join(", ")}`);
+  console.error(
+    `Actual messages: ${violatingMessages.map((m) => `${m.ruleId}(severity=${m.severity})`).join(", ") || "(none)"}`,
+  );
   process.exit(1);
 }
 
