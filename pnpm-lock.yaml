@@ -81,6 +81,10 @@ importers:
         version: 2.29.1(ts-node@10.9.2(@types/node@22.7.5)(typescript@5.9.3))(typescript@5.9.3)
 
   packages/domain:
+    dependencies:
+      viem:
+        specifier: ^2.19.0
+        version: 2.55.19(typescript@5.9.3)(zod@3.25.76)
     devDependencies:
       typescript:
         specifier: ^5.5.4

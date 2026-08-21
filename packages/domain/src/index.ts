@@ -15,3 +15,5 @@ export type {
   ChainConfig,
   EnvSource,
 } from "./chain-config.js";
+export { DEFAULT_DECIMALS, parseAmount, formatAmount } from "./amount.js";
+export type { Amount } from "./amount.js";
