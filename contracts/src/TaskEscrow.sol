@@ -6,6 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title TaskEscrow
 /// @notice Sole owner of the Agent Market task-funding state machine: budget locking, agent
@@ -135,6 +136,8 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     error PermitNonceAlreadyUsed(address agent, uint256 nonce);
     error PermitAgentMismatch(address permitAgent, address caller);
     error InvalidPermitSignature();
+    error DeliveryDeadlinePassed(bytes32 taskId, uint64 deliveryDeadline, uint256 blockTimestamp);
+    error StakeAmountZero(bytes32 taskId, uint256 budget);
 
     /// @param supportedToken_ The single ERC-20 this escrow accepts for task budgets (PRD §3.3).
     /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
@@ -256,15 +259,18 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
         if (!_taskExists[permit.taskId]) revert TaskNotFound(permit.taskId);
         Task storage task = _tasks[permit.taskId];
         if (task.status != TaskStatus.OPEN) revert TaskNotOpen(permit.taskId, task.status);
+        if (task.deliveryDeadline <= block.timestamp) {
+            revert DeliveryDeadlinePassed(permit.taskId, task.deliveryDeadline, block.timestamp);
+        }
 
-        // 600 bps of `budget`, multiplication before division to preserve precision. `budget`
-        // is a token amount (realistically far below 2^256 / 10_000), so `budget * 600` cannot
-        // realistically overflow uint256. For `budget < 17` (i.e. `budget * 600 < 10_000`) the
-        // stake rounds down to 0: accepted as-is rather than rejected, because `createTask`
-        // already enforces `budget != 0` and stage one's real budgets (an 18-decimal ERC-20)
-        // make a sub-17-wei budget a non-scenario; a zero stake in that edge case only means no
-        // collateral is locked for a practically worthless task, not a fund-safety issue.
-        uint256 stake = (task.budget * STAKE_RATE_BPS) / BPS_DENOMINATOR;
+        // 600 bps of `budget`, via `Math.mulDiv` (full-precision, does not overflow on the
+        // intermediate `budget * 600` product even for `budget` near `type(uint256).max`,
+        // unlike a direct `budget * STAKE_RATE_BPS / BPS_DENOMINATOR`). A stake that rounds down
+        // to 0 (`budget < 17`) is rejected below rather than silently accepted: task.tasks.md's
+        // AC-104 requires a real, non-zero stake to be locked before a task can be accepted, so
+        // a task with too small a budget to produce one simply cannot be accepted.
+        uint256 stake = Math.mulDiv(task.budget, STAKE_RATE_BPS, BPS_DENOMINATOR);
+        if (stake == 0) revert StakeAmountZero(permit.taskId, task.budget);
 
         _usedNonces[permit.agent][permit.nonce] = true;
         task.agent = permit.agent;
@@ -273,8 +279,6 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
 
         emit TaskAccepted(permit.taskId, permit.agent, stake);
 
-        if (stake > 0) {
-            supportedToken.safeTransferFrom(msg.sender, address(this), stake);
-        }
+        supportedToken.safeTransferFrom(msg.sender, address(this), stake);
     }
 }

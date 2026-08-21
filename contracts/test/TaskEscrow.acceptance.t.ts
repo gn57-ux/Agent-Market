@@ -150,9 +150,9 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     expect(task.stake).to.equal(expectedStake);
   });
 
-  it("accepts budget=1 with a stake that rounds down to zero (documented rounding decision)", async () => {
+  it("rejects acceptance when the computed stake would round down to zero (AC-104)", async () => {
     const id = taskId("task-accept-tiny-budget");
-    const tinyBudget = 1n;
+    const tinyBudget = 16n; // 16 * 600 / 10_000 = 0 (floor)
     await createOpenTask(id, tinyBudget);
 
     const permit: AcceptancePermit = {
@@ -165,16 +165,71 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     };
     const signature = await signPermit(authorizedSigner, permit);
 
-    const agentBalanceBefore = await token.balanceOf(agent.address);
+    await expect(escrow.connect(agent).acceptTask(permit, signature)).to.be.revertedWithCustomError(
+      escrow,
+      "StakeAmountZero",
+    );
+
+    const task = await escrow.getTask(id);
+    expect(task.status).to.equal(0n); // still OPEN, not silently accepted
+  });
+
+  it("does not overflow the stake computation for a very large budget", async () => {
+    // Mint a requester an enormous budget directly (bypassing the 1,000,000-token faucet-style
+    // setup) so createTask can lock in a budget close to a realistic "very large" upper bound
+    // without hitting this token's total-supply limits; the point is to prove `Math.mulDiv`
+    // handles a `budget * 600` product that a naive multiply-then-divide would overflow on.
+    const hugeBudget = ethers.parseUnits("1000000000000000000", 18); // 1e18 whole tokens
+    await token.connect(requester).mint(requester.address, hugeBudget);
+
+    const id = taskId("task-accept-huge-budget");
+    const deadline = await futureDeadline(oneDay);
+    await token.connect(requester).approve(escrowAddress, ethers.MaxUint256);
+    await escrow.connect(requester).createTask(id, tokenAddress, hugeBudget, deadline);
+
+    const expectedStakePreview = (hugeBudget * 600n) / 10_000n;
+    await token.connect(requester).mint(agent.address, expectedStakePreview);
+    await token.connect(agent).approve(escrowAddress, ethers.MaxUint256);
+
+    const permit: AcceptancePermit = {
+      taskId: id,
+      agent: agent.address,
+      nonce: 3n,
+      expiry: await futureDeadline(oneDay),
+      chainId,
+      verifyingContract: escrowAddress,
+    };
+    const signature = await signPermit(authorizedSigner, permit);
+
+    const expectedStake = (hugeBudget * 600n) / 10_000n;
 
     await expect(escrow.connect(agent).acceptTask(permit, signature))
       .to.emit(escrow, "TaskAccepted")
-      .withArgs(id, agent.address, 0n);
+      .withArgs(id, agent.address, expectedStake);
+  });
 
-    const task = await escrow.getTask(id);
-    expect(task.stake).to.equal(0n);
-    // No token transfer happens when the computed stake is zero.
-    expect(await token.balanceOf(agent.address)).to.equal(agentBalanceBefore);
+  it("rejects acceptance after the task's deliveryDeadline has passed", async () => {
+    const id = taskId("task-accept-after-deadline");
+    const deadline = await futureDeadline(60); // 1 minute out
+    await escrow.connect(requester).createTask(id, tokenAddress, budget, deadline);
+
+    await ethers.provider.send("evm_increaseTime", [120]);
+    await ethers.provider.send("evm_mine", []);
+
+    const permit: AcceptancePermit = {
+      taskId: id,
+      agent: agent.address,
+      nonce: 4n,
+      expiry: await futureDeadline(oneDay),
+      chainId,
+      verifyingContract: escrowAddress,
+    };
+    const signature = await signPermit(authorizedSigner, permit);
+
+    await expect(escrow.connect(agent).acceptTask(permit, signature)).to.be.revertedWithCustomError(
+      escrow,
+      "DeliveryDeadlinePassed",
+    );
   });
 
   it("rejects an expired permit", async () => {
