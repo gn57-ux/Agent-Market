@@ -32,6 +32,12 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     /// setter — rotating the signer means deploying a new `TaskEscrow`.
     address public immutable authorizedSigner;
 
+    /// @notice Review-window duration added to `submittedAt` to compute `reviewDeadline` in
+    /// `submitResult` (F-105). Configurable per deployment (PRD §2.4 "验收窗口默认 72 小时，作为
+    /// 合约可配置参数") rather than hardcoded, so different environments (e.g. tests using time
+    /// acceleration) can deploy with a shorter window without changing this contract.
+    uint64 public immutable reviewWindow;
+
     /// @notice Stake rate applied to `budget` on acceptance, expressed in basis points
     /// (PRD §6.1, 已确认决定: fixed at 600 = 6%).
     uint256 public constant STAKE_RATE_BPS = 600;
@@ -141,19 +147,27 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     error ZeroAuthorizedSigner();
     error RequesterCannotAcceptOwnTask(bytes32 taskId, address requester);
     error StakeTransferAmountMismatch(bytes32 taskId, uint256 expectedStake, uint256 actualReceived);
+    error NotTaskAgent(bytes32 taskId, address caller);
+    error NotTaskRequester(bytes32 taskId, address caller);
+    error TaskNotAccepted(bytes32 taskId, TaskStatus status);
+    error TaskNotSubmitted(bytes32 taskId, TaskStatus status);
 
     /// @param supportedToken_ The single ERC-20 this escrow accepts for task budgets (PRD §3.3).
     /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
+    /// @param reviewWindow_ Duration (seconds) added to `submittedAt` to compute `reviewDeadline`
+    /// in `submitResult` (PRD §2.4, default 72h = 259200s; tests may pass a shorter value).
     /// @dev `authorizedSigner_` can never be `address(0)`: `authorizedSigner` is immutable with no
     /// rotation path, and ECDSA.recover can never return the zero address for a valid signature,
     /// so a zero signer would make `acceptTask` permanently unusable for the life of this deploy.
     constructor(
         IERC20 supportedToken_,
-        address authorizedSigner_
+        address authorizedSigner_,
+        uint64 reviewWindow_
     ) EIP712("AgentMarketTaskEscrow", "1") {
         if (authorizedSigner_ == address(0)) revert ZeroAuthorizedSigner();
         supportedToken = supportedToken_;
         authorizedSigner = authorizedSigner_;
+        reviewWindow = reviewWindow_;
     }
 
     /// @notice Creates a new task and locks 100% of `budget` into escrow from `msg.sender`.
@@ -299,5 +313,50 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
         if (balanceAfter - balanceBefore != stake) {
             revert StakeTransferAmountMismatch(permit.taskId, stake, balanceAfter - balanceBefore);
         }
+    }
+
+    /// @notice Records the agent's delivered result and starts the review window.
+    /// @dev F-105 / AC-105 / AC-112. Pure state/record function — no token transfer. The
+    /// `reviewDeadline` is computed once here and emitted directly in `ResultSubmitted` so
+    /// downstream consumers (Feature 9) never need to recompute it off-chain (design.md, AC-112).
+    function submitResult(bytes32 taskId, bytes32 resultHash) external nonReentrant {
+        if (!_taskExists[taskId]) revert TaskNotFound(taskId);
+        Task storage task = _tasks[taskId];
+        if (task.agent != msg.sender) revert NotTaskAgent(taskId, msg.sender);
+        if (task.status != TaskStatus.ACCEPTED) revert TaskNotAccepted(taskId, task.status);
+
+        uint64 submittedAt = uint64(block.timestamp);
+        uint64 reviewDeadline = submittedAt + reviewWindow;
+
+        task.resultHash = resultHash;
+        task.submittedAt = submittedAt;
+        task.reviewDeadline = reviewDeadline;
+        task.status = TaskStatus.SUBMITTED;
+
+        emit ResultSubmitted(taskId, msg.sender, resultHash, submittedAt, reviewDeadline);
+    }
+
+    /// @notice Requester-approved acceptance of a submitted result: pays `budget` and refunds
+    /// `stake` to the agent in a single transfer, moving the task to its terminal `RELEASED`
+    /// state.
+    /// @dev F-106 / AC-106 (正常验收 branch only — timeout/dispute branches belong to later
+    /// Tasks). Checks-Effects-Interactions: `status` is flipped and the event emitted before the
+    /// external `safeTransfer`, so a reentrant call during the transfer sees `status ==
+    /// RELEASED` and reverts via the `TaskNotSubmitted` check before it could double-pay.
+    function approveResult(bytes32 taskId) external nonReentrant {
+        if (!_taskExists[taskId]) revert TaskNotFound(taskId);
+        Task storage task = _tasks[taskId];
+        if (task.requester != msg.sender) revert NotTaskRequester(taskId, msg.sender);
+        if (task.status != TaskStatus.SUBMITTED) revert TaskNotSubmitted(taskId, task.status);
+
+        address agent = task.agent;
+        uint256 budget = task.budget;
+        uint256 stake = task.stake;
+
+        task.status = TaskStatus.RELEASED;
+
+        emit ResultApproved(taskId, agent, budget, stake);
+
+        supportedToken.safeTransfer(agent, budget + stake);
     }
 }

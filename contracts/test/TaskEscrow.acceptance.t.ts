@@ -82,7 +82,7 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     tokenAddress = await token.getAddress();
 
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
-    escrow = await escrowFactory.deploy(tokenAddress, authorizedSigner.address);
+    escrow = await escrowFactory.deploy(tokenAddress, authorizedSigner.address, 259200n);
     await escrow.waitForDeployment();
     escrowAddress = await escrow.getAddress();
 
@@ -228,7 +228,11 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     const feeTokenAddress = await feeToken.getAddress();
 
     const feeEscrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
-    const feeEscrow = await feeEscrowFactory.deploy(feeTokenAddress, authorizedSigner.address);
+    const feeEscrow = await feeEscrowFactory.deploy(
+      feeTokenAddress,
+      authorizedSigner.address,
+      259200n,
+    );
     await feeEscrow.waitForDeployment();
     const feeEscrowAddress = await feeEscrow.getAddress();
 
@@ -506,7 +510,7 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
   it("reverts deployment with a zero-address authorized signer", async () => {
     const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
     await expect(
-      escrowFactory.deploy(tokenAddress, ethers.ZeroAddress),
+      escrowFactory.deploy(tokenAddress, ethers.ZeroAddress, 259200n),
     ).to.be.revertedWithCustomError(escrow, "ZeroAuthorizedSigner");
   });
 });
