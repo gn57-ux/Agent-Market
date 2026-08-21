@@ -24,4 +24,12 @@ export default tseslint.config(
       "@typescript-eslint/no-non-null-assertion": "error",
     },
   },
+  {
+    // Plain JS/MJS project scripts and configs (e.g. scripts/*.mjs,
+    // eslint.config.js itself) run under Node, not the browser.
+    files: ["**/*.{js,mjs,cjs}"],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
 );

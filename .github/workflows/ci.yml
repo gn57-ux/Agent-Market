@@ -22,6 +22,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Lint
         run: pnpm run lint
+      - name: Verify no-explicit-any/no-non-null-assertion actually fire (AC-1108)
+        run: pnpm run lint:verify-rules
       - name: Format check
         run: pnpm run format:check
       - name: Typecheck packages/domain

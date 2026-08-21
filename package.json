@@ -9,6 +9,7 @@
   "packageManager": "pnpm@9.0.0",
   "scripts": {
     "lint": "eslint .",
+    "lint:verify-rules": "node scripts/verify-eslint-rules.mjs",
     "format:check": "prettier --check ."
   },
   "devDependencies": {
