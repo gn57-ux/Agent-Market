@@ -17,6 +17,11 @@ contract MaliciousReentrantToken is ERC20 {
     bytes public attackCalldata;
     bool public attackArmed;
     bool public attackSucceeded;
+    /// @notice Raw revert data from the reentrant attempt, so a test can assert it decodes to
+    /// exactly `ReentrancyGuardReentrantCall()` — proving the failure came from `nonReentrant`
+    /// itself, not from some other check (e.g. a caller/status mismatch) that would fail anyway
+    /// even without the guard, which `attackSucceeded == false` alone cannot distinguish.
+    bytes public attackRevertData;
 
     constructor() ERC20("Malicious Reentrant Mock", "EVIL") {}
 
@@ -35,11 +40,13 @@ contract MaliciousReentrantToken is ERC20 {
     function transfer(address to, uint256 amount) public override returns (bool) {
         if (attackArmed) {
             attackArmed = false;
-            // Result deliberately ignored: this proves the reentrant call itself failed (it
-            // must revert with ReentrancyGuardReentrantCall) while the outer legitimate transfer
-            // below still completes, rather than making the whole test transaction revert.
-            (bool reentrySucceeded, ) = attackTarget.call(attackCalldata);
+            // Result deliberately ignored: this proves the reentrant call itself failed while
+            // the outer legitimate transfer below still completes, rather than making the whole
+            // test transaction revert. The revert data is captured so the test can pin the
+            // failure to `nonReentrant` specifically.
+            (bool reentrySucceeded, bytes memory revertData) = attackTarget.call(attackCalldata);
             attackSucceeded = reentrySucceeded;
+            attackRevertData = revertData;
         }
         return super.transfer(to, amount);
     }

@@ -205,6 +205,16 @@ describe("TaskEscrow.cancelTask (F-111, AC-108, AC-109, AC-111)", () => {
     await expect(evilEscrow.connect(requester).cancelTask(id)).to.not.be.reverted;
 
     expect(await evilToken.attackSucceeded()).to.equal(false);
+
+    // Pin the failure specifically to `nonReentrant`, not merely "the reentrant call failed for
+    // some reason" (e.g. NotTaskRequester/TaskNotOpen would also reject it, which would make
+    // attackSucceeded == false alone a false-positive test even without the guard). The
+    // ReentrancyGuard check runs first in every guarded function, before any of its own body
+    // logic, so the captured revert data must decode to exactly ReentrancyGuardReentrantCall().
+    const expectedSelector = ethers.id("ReentrancyGuardReentrantCall()").slice(0, 10);
+    const actualRevertData = await evilToken.attackRevertData();
+    expect(actualRevertData.slice(0, 10)).to.equal(expectedSelector);
+
     expect(await evilToken.balanceOf(requester.address)).to.equal(requesterBalanceBefore + budget);
 
     const task = await evilEscrow.getTask(id);
