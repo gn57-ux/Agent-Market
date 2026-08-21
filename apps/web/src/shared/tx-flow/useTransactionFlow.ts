@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import type { TransactionRunResult, TransactionStatus } from "@agent-market/domain";
 
 export type VerifyOutcome =
@@ -8,6 +8,12 @@ export type VerifyOutcome =
 
 export interface UseTransactionFlowConfig {
   buildTx: () => Promise<{ hash: `0x${string}` }>;
+  /**
+   * Waits for the broadcast transaction to reach chain confirmation
+   * (e.g. viem's `waitForTransactionReceipt`). Must not resolve before the
+   * transaction is actually mined — `verify` below assumes it has been.
+   */
+  confirm: (txHash: `0x${string}`) => Promise<{ confirmations: number }>;
   verify: (txHash: `0x${string}`) => Promise<VerifyOutcome>;
 }
 
@@ -15,6 +21,10 @@ export interface UseTransactionFlowResult {
   status: TransactionStatus;
   start: () => Promise<TransactionRunResult>;
   retry: () => Promise<TransactionRunResult>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -26,12 +36,34 @@ export interface UseTransactionFlowResult {
  */
 export function useTransactionFlow(config: UseTransactionFlowConfig): UseTransactionFlowResult {
   const [status, setStatus] = useState<TransactionStatus>({ kind: "idle" });
-  const lastTxHashRef = useRef<`0x${string}` | undefined>(undefined);
 
-  const runVerification = useCallback(
+  // Re-attempts confirm() + verify() for an already-broadcast hash. Both
+  // steps are safe to re-run: confirm() re-checking a receipt and verify()
+  // re-checking backend state are both idempotent reads, not new writes.
+  const confirmAndVerify = useCallback(
     async (txHash: `0x${string}`): Promise<TransactionRunResult> => {
+      let confirmations: number;
+      try {
+        ({ confirmations } = await config.confirm(txHash));
+      } catch (error) {
+        const lastError = errorMessage(error);
+        setStatus({ kind: "rpcRecoveryPending", txHash, lastError });
+        return { outcome: "rpcRecoveryPending", txHash, lastError };
+      }
+      setStatus({ kind: "confirming", txHash, confirmations });
+
       setStatus({ kind: "verifying", txHash });
-      const result = await config.verify(txHash);
+      let result: VerifyOutcome;
+      try {
+        result = await config.verify(txHash);
+      } catch (error) {
+        // A thrown/rejected verify() is treated as a transient failure
+        // (network/backend outage), not a definitive business rejection —
+        // the transaction may still be valid, so stay recoverable.
+        const lastError = errorMessage(error);
+        setStatus({ kind: "rpcRecoveryPending", txHash, lastError });
+        return { outcome: "rpcRecoveryPending", txHash, lastError };
+      }
 
       switch (result.outcome) {
         case "confirmed": {
@@ -57,28 +89,22 @@ export function useTransactionFlow(config: UseTransactionFlowConfig): UseTransac
     try {
       ({ hash } = await config.buildTx());
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = errorMessage(error);
       setStatus({ kind: "failed", reason });
       return { outcome: "failed", reason };
     }
 
-    lastTxHashRef.current = hash;
     setStatus({ kind: "pending", txHash: hash });
-    // Transient state representing "broadcast, awaiting confirmation" before
-    // the backend/event check; this Hook's minimal contract (buildTx/verify)
-    // doesn't report incremental confirmation counts.
-    setStatus({ kind: "confirming", txHash: hash, confirmations: 0 });
-
-    return runVerification(hash);
-  }, [config, runVerification]);
+    return confirmAndVerify(hash);
+  }, [config, confirmAndVerify]);
 
   const retry = useCallback(async (): Promise<TransactionRunResult> => {
     if (status.kind === "rpcRecoveryPending") {
-      return runVerification(status.txHash);
+      return confirmAndVerify(status.txHash);
     }
     // failed (or any other state): start a fresh attempt from scratch.
     return start();
-  }, [status, runVerification, start]);
+  }, [status, confirmAndVerify, start]);
 
   return { status, start, retry };
 }
