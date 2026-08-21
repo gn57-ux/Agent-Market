@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  node-quality-gates:
+    name: TypeScript / Lint / Format / Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm run lint
+      - name: Format check
+        run: pnpm run format:check
+      - name: Typecheck apps/api
+        run: pnpm --filter @agent-market/api typecheck
+      - name: Typecheck apps/web
+        run: pnpm --filter @agent-market/web typecheck
+      - name: Build apps/web
+        run: pnpm --filter @agent-market/web build
+      - name: Build apps/api
+        run: pnpm --filter @agent-market/api build
+
+  go-quality-gates:
+    name: Go build / vet / test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/dispatch
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  contracts-quality-gate:
+    name: Hardhat compile / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Compile contracts
+        run: pnpm --filter @agent-market/contracts compile
+      - name: Test contracts
+        run: pnpm --filter @agent-market/contracts test

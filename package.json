@@ -2,8 +2,20 @@
   "name": "agent-market",
   "private": true,
   "version": "0.0.0",
+  "type": "module",
   "engines": {
     "node": ">=20"
   },
-  "packageManager": "pnpm@9.0.0"
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "lint": "eslint .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "eslint": "^9",
+    "globals": "^15",
+    "prettier": "^3",
+    "typescript-eslint": "^8"
+  }
 }

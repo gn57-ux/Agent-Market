@@ -1,0 +1,11 @@
+node_modules
+dist
+pnpm-lock.yaml
+contracts/cache
+contracts/artifacts
+contracts/typechain-types
+
+# Non-code content: not part of the build/lint quality gate
+docs/
+specs/
+.claude/
