@@ -7,6 +7,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 /// @title TaskEscrow
 /// @notice Sole owner of the Agent Market task-funding state machine: budget locking, agent
@@ -17,7 +18,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 /// `TaskStatus` enum, and event list already match the full final shape from design.md so that
 /// later Tasks (T-103..T-107) can add `acceptTask`/`submitResult`/etc. on top without changing
 /// this shell.
-contract TaskEscrow is ReentrancyGuard, EIP712 {
+contract TaskEscrow is ReentrancyGuard, EIP712, AccessControl {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
 
@@ -38,11 +39,12 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     /// acceleration) can deploy with a shorter window without changing this contract.
     uint64 public immutable reviewWindow;
 
-    /// @notice Single address authorized to call `resolveDispute` (design.md 决策: 指定地址二选一
-    /// 裁决, 一期不做多签/委员会/`AccessControl` role — matching the existing single-trusted-address,
-    /// immutable, no-rotation pattern already used for `authorizedSigner`). Fixed at deployment;
-    /// rotating the arbitrator means deploying a new `TaskEscrow`.
-    address public immutable arbitrator;
+    /// @notice Role authorized to call `resolveDispute` (design.md 安全/兼容性: "`resolveDispute`
+    /// 仅 `ARBITRATOR_ROLE` 可调用；角色地址部署时配置，一期不做多签" — one holder at a time by
+    /// deployment/admin convention, not a hardcoded immutable address, so `DEFAULT_ADMIN_ROLE`
+    /// can grant/revoke it if a key is lost or compromised without redeploying and losing access
+    /// to funds already locked in already-DISPUTED tasks under the old contract instance.
+    bytes32 public constant ARBITRATOR_ROLE = keccak256("ARBITRATOR_ROLE");
 
     /// @notice Stake rate applied to `budget` on acceptance, expressed in basis points
     /// (PRD §6.1, 已确认决定: fixed at 600 = 6%).
@@ -176,17 +178,19 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
     /// @param reviewWindow_ Duration (seconds) added to `submittedAt` to compute `reviewDeadline`
     /// in `submitResult` (PRD §2.4, default 72h = 259200s; tests may pass a shorter value).
-    /// @param arbitrator_ The single address authorized to call `resolveDispute`.
+    /// @param arbitrator_ Initial holder of `ARBITRATOR_ROLE`, authorized to call
+    /// `resolveDispute`. `DEFAULT_ADMIN_ROLE` (granted to the deployer) can later grant/revoke
+    /// this role — e.g. to rotate away from a lost or compromised arbitrator key without
+    /// redeploying and losing access to funds already locked in disputed tasks.
     /// @dev `authorizedSigner_` can never be `address(0)`: `authorizedSigner` is immutable with no
     /// rotation path, and ECDSA.recover can never return the zero address for a valid signature,
     /// so a zero signer would make `acceptTask` permanently unusable for the life of this deploy.
     /// `reviewWindow_` must be nonzero (a real review period) and bounded by `MAX_REVIEW_WINDOW`,
     /// since an unvalidated huge value would make `submittedAt + reviewWindow` overflow uint64 on
     /// every `submitResult` call — permanently bricking the deploy with no way to fix it, `reviewWindow`
-    /// being immutable. `arbitrator_` can never be `address(0)` for the same reason as
-    /// `authorizedSigner_`: `arbitrator` is immutable with no rotation path, so a zero arbitrator
-    /// would permanently brick `resolveDispute` (and therefore any disputed task) for the life of
-    /// this deploy.
+    /// being immutable. `arbitrator_` can never be `address(0)`: granting `ARBITRATOR_ROLE` to the
+    /// zero address would leave `resolveDispute` with no usable caller until the admin grants the
+    /// role elsewhere.
     constructor(
         IERC20 supportedToken_,
         address authorizedSigner_,
@@ -201,7 +205,8 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
         supportedToken = supportedToken_;
         authorizedSigner = authorizedSigner_;
         reviewWindow = reviewWindow_;
-        arbitrator = arbitrator_;
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(ARBITRATOR_ROLE, arbitrator_);
     }
 
     /// @notice Creates a new task and locks 100% of `budget` into escrow from `msg.sender`.
@@ -491,16 +496,16 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     /// true` pays `budget + stake` to the agent (`RELEASED`); `supportAgent == false` pays
     /// `budget + stake` to the requester, i.e. the agent forfeits their stake exactly as in
     /// `claimDeliveryTimeout` (`REFUNDED`).
-    /// @dev F-110 / AC-107 / AC-108 / AC-109. Callable only by `arbitrator` — a single fixed
-    /// address configured at deployment (see `arbitrator`'s NatSpec), not an `AccessControl`
-    /// role: design.md's decision for stage one is a single trusted address, matching the
-    /// existing `authorizedSigner` pattern, not a multi-address/role-based scheme. The `status ==
-    /// DISPUTED` check alone makes this "一次性终态结算": once flipped to `RELEASED`/`REFUNDED`,
-    /// a second call reverts here before any transfer, so double-resolution is impossible.
+    /// @dev F-110 / AC-107 / AC-108 / AC-109. Callable only by a holder of `ARBITRATOR_ROLE` (see
+    /// that role's NatSpec) — design.md's decision for stage one is one holder at a time, not a
+    /// multi-signer/committee scheme, but the role stays admin-rotatable so a lost or compromised
+    /// arbitrator key doesn't permanently strand disputed tasks' funds. The `status == DISPUTED`
+    /// check alone makes this "一次性终态结算": once flipped to `RELEASED`/`REFUNDED`, a second
+    /// call reverts here before any transfer, so double-resolution is impossible.
     /// Checks-Effects-Interactions: `status` is flipped and the event emitted before the external
     /// `safeTransfer`.
     function resolveDispute(bytes32 taskId, bool supportAgent) external nonReentrant {
-        if (msg.sender != arbitrator) revert NotArbitrator(msg.sender);
+        if (!hasRole(ARBITRATOR_ROLE, msg.sender)) revert NotArbitrator(msg.sender);
         if (!_taskExists[taskId]) revert TaskNotFound(taskId);
         Task storage task = _tasks[taskId];
         if (task.status != TaskStatus.DISPUTED) revert TaskNotDisputed(taskId, task.status);

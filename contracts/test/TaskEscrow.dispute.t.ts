@@ -328,4 +328,43 @@ describe("TaskEscrow.openDispute / resolveDispute (AC-107)", () => {
       ).to.be.revertedWithCustomError(escrow, "ZeroArbitrator");
     });
   });
+
+  describe("ARBITRATOR_ROLE rotation", () => {
+    it("lets the deployer (DEFAULT_ADMIN_ROLE) revoke the initial arbitrator and grant a new one", async () => {
+      const arbitratorRole = await escrow.ARBITRATOR_ROLE();
+      expect(await escrow.hasRole(arbitratorRole, arbitrator.address)).to.equal(true);
+      expect(await escrow.hasRole(arbitratorRole, otherAgent.address)).to.equal(false);
+
+      // Simulates rotating away from a lost/compromised arbitrator key without redeploying.
+      await escrow.connect(requester).revokeRole(arbitratorRole, arbitrator.address);
+      await escrow.connect(requester).grantRole(arbitratorRole, otherAgent.address);
+
+      expect(await escrow.hasRole(arbitratorRole, arbitrator.address)).to.equal(false);
+      expect(await escrow.hasRole(arbitratorRole, otherAgent.address)).to.equal(true);
+
+      const id = taskId("task-resolve-after-rotation");
+      await createSubmittedTask(id, budget, 20n);
+      const evidenceHash = ethers.keccak256(ethers.toUtf8Bytes(`evidence-${id}`));
+      await escrow.connect(requester).openDispute(id, evidenceHash);
+
+      // The old arbitrator can no longer resolve disputes...
+      await expect(
+        escrow.connect(arbitrator).resolveDispute(id, true),
+      ).to.be.revertedWithCustomError(escrow, "NotArbitrator");
+
+      // ...but the newly-granted address can, against the same still-live escrow instance (no
+      // redeploy, no loss of access to funds already locked for this or any other disputed task).
+      await expect(escrow.connect(otherAgent).resolveDispute(id, true))
+        .to.emit(escrow, "DisputeResolved")
+        .withArgs(id, true);
+    });
+
+    it("rejects a non-admin attempting to grant or revoke ARBITRATOR_ROLE", async () => {
+      const arbitratorRole = await escrow.ARBITRATOR_ROLE();
+
+      await expect(escrow.connect(agent).grantRole(arbitratorRole, agent.address)).to.be.reverted;
+      await expect(escrow.connect(agent).revokeRole(arbitratorRole, arbitrator.address)).to.be
+        .reverted;
+    });
+  });
 });
