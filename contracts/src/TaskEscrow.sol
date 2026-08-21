@@ -138,13 +138,19 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
     error InvalidPermitSignature();
     error DeliveryDeadlinePassed(bytes32 taskId, uint64 deliveryDeadline, uint256 blockTimestamp);
     error StakeAmountZero(bytes32 taskId, uint256 budget);
+    error ZeroAuthorizedSigner();
+    error RequesterCannotAcceptOwnTask(bytes32 taskId, address requester);
 
     /// @param supportedToken_ The single ERC-20 this escrow accepts for task budgets (PRD §3.3).
     /// @param authorizedSigner_ The single off-chain signer authorized to issue `AcceptancePermit`s.
+    /// @dev `authorizedSigner_` can never be `address(0)`: `authorizedSigner` is immutable with no
+    /// rotation path, and ECDSA.recover can never return the zero address for a valid signature,
+    /// so a zero signer would make `acceptTask` permanently unusable for the life of this deploy.
     constructor(
         IERC20 supportedToken_,
         address authorizedSigner_
     ) EIP712("AgentMarketTaskEscrow", "1") {
+        if (authorizedSigner_ == address(0)) revert ZeroAuthorizedSigner();
         supportedToken = supportedToken_;
         authorizedSigner = authorizedSigner_;
     }
@@ -261,6 +267,9 @@ contract TaskEscrow is ReentrancyGuard, EIP712 {
         if (task.status != TaskStatus.OPEN) revert TaskNotOpen(permit.taskId, task.status);
         if (task.deliveryDeadline <= block.timestamp) {
             revert DeliveryDeadlinePassed(permit.taskId, task.deliveryDeadline, block.timestamp);
+        }
+        if (permit.agent == task.requester) {
+            revert RequesterCannotAcceptOwnTask(permit.taskId, task.requester);
         }
 
         // 600 bps of `budget`, via `Math.mulDiv` (full-precision, does not overflow on the

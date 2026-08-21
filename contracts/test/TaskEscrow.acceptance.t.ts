@@ -415,4 +415,32 @@ describe("TaskEscrow.acceptTask (AC-102, AC-103, AC-104)", () => {
     expect(task.agent).to.equal(agent.address);
     expect(task.status).to.equal(1n); // still ACCEPTED, not overwritten
   });
+
+  it("rejects the task's own requester from accepting it as the agent", async () => {
+    const id = taskId("task-requester-self-accept");
+    await createOpenTask(id, budget);
+
+    await token.connect(requester).approve(escrowAddress, ethers.MaxUint256);
+
+    const permit: AcceptancePermit = {
+      taskId: id,
+      agent: requester.address,
+      nonce: 0n,
+      expiry: await futureDeadline(oneDay),
+      chainId,
+      verifyingContract: escrowAddress,
+    };
+    const signature = await signPermit(authorizedSigner, permit);
+
+    await expect(
+      escrow.connect(requester).acceptTask(permit, signature),
+    ).to.be.revertedWithCustomError(escrow, "RequesterCannotAcceptOwnTask");
+  });
+
+  it("reverts deployment with a zero-address authorized signer", async () => {
+    const escrowFactory = await ethers.getContractFactory("TaskEscrow", requester);
+    await expect(
+      escrowFactory.deploy(tokenAddress, ethers.ZeroAddress),
+    ).to.be.revertedWithCustomError(escrow, "ZeroAuthorizedSigner");
+  });
 });
