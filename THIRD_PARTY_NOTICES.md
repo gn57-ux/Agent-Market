@@ -10,27 +10,32 @@
 
 ## 运行时依赖
 
-| 名称 | 版本 | 许可证 | 用途 | 来源 |
-|---|---|---|---|---|
-| React | ^18.3.1 | MIT | 前端 UI 框架（`apps/web`） | https://github.com/facebook/react |
-| React DOM | ^18.3.1 | MIT | React 浏览器渲染 | https://github.com/facebook/react |
-| viem | ^2.19.0 | MIT | 前端钱包/链交互（`apps/web`） | https://github.com/wevm/viem |
-| Fastify | ^4.28.1 | MIT | 后端 HTTP 框架（`apps/api`） | https://github.com/fastify/fastify |
-| Zod | ^3.23.8 | MIT | 后端/前端运行时校验 | https://github.com/colinhacks/zod |
+| 名称      | 版本    | 许可证 | 用途                          | 来源                               |
+| --------- | ------- | ------ | ----------------------------- | ---------------------------------- |
+| React     | ^18.3.1 | MIT    | 前端 UI 框架（`apps/web`）    | https://github.com/facebook/react  |
+| React DOM | ^18.3.1 | MIT    | React 浏览器渲染              | https://github.com/facebook/react  |
+| viem      | ^2.19.0 | MIT    | 前端钱包/链交互（`apps/web`） | https://github.com/wevm/viem       |
+| Fastify   | ^4.28.1 | MIT    | 后端 HTTP 框架（`apps/api`）  | https://github.com/fastify/fastify |
+| Zod       | ^3.23.8 | MIT    | 后端/前端运行时校验           | https://github.com/colinhacks/zod  |
 
 ## 开发/构建依赖
 
-| 名称 | 版本 | 许可证 | 用途 | 来源 |
-|---|---|---|---|---|
-| Vite | ^5.4.0 | MIT | 前端构建工具（`apps/web`） | https://github.com/vitejs/vite |
-| @vitejs/plugin-react | ^4.3.1 | MIT | Vite 的 React 插件 | https://github.com/vitejs/vite-plugin-react |
-| TypeScript | ^5.5.4 | Apache-2.0 | 类型检查与编译 | https://github.com/microsoft/TypeScript |
-| tsx | ^4.16.2 | MIT | 后端本地开发运行时（`apps/api` dev） | https://github.com/privatenumber/tsx |
-| Hardhat | ^2.22.6 | MIT | 合约编译/测试/部署（`contracts`） | https://github.com/NomicFoundation/hardhat |
-| @nomicfoundation/hardhat-toolbox | ^5.0.0 | MIT | Hardhat 常用插件集合（ethers、chai matcher 等） | https://github.com/NomicFoundation/hardhat |
-| ESLint | ^9 | MIT | 代码静态检查（根目录） | https://github.com/eslint/eslint |
-| typescript-eslint | ^8 | MIT | TypeScript 的 ESLint 规则集 | https://github.com/typescript-eslint/typescript-eslint |
-| Prettier | ^3 | MIT | 代码格式化 | https://github.com/prettier/prettier |
+| 名称                             | 版本      | 许可证     | 用途                                            | 来源                                                   |
+| -------------------------------- | --------- | ---------- | ----------------------------------------------- | ------------------------------------------------------ |
+| Vite                             | ^5.4.0    | MIT        | 前端构建工具（`apps/web`）                      | https://github.com/vitejs/vite                         |
+| @vitejs/plugin-react             | ^4.3.1    | MIT        | Vite 的 React 插件                              | https://github.com/vitejs/vite-plugin-react            |
+| TypeScript                       | ^5.5.4    | Apache-2.0 | 类型检查与编译                                  | https://github.com/microsoft/TypeScript                |
+| tsx                              | ^4.16.2   | MIT        | 后端本地开发运行时（`apps/api` dev）            | https://github.com/privatenumber/tsx                   |
+| Hardhat                          | ^2.22.6   | MIT        | 合约编译/测试/部署（`contracts`）               | https://github.com/NomicFoundation/hardhat             |
+| @nomicfoundation/hardhat-toolbox | ^5.0.0    | MIT        | Hardhat 常用插件集合（ethers、chai matcher 等） | https://github.com/NomicFoundation/hardhat             |
+| ESLint                           | ^9        | MIT        | 代码静态检查（根目录）                          | https://github.com/eslint/eslint                       |
+| @eslint/js                       | ^9        | MIT        | ESLint 官方推荐规则集                           | https://github.com/eslint/eslint                       |
+| typescript-eslint                | ^8        | MIT        | TypeScript 的 ESLint 规则集                     | https://github.com/typescript-eslint/typescript-eslint |
+| globals                          | ^15       | MIT        | ESLint 配置用的全局变量定义                     | https://github.com/sindresorhus/globals                |
+| Prettier                         | ^3        | MIT        | 代码格式化                                      | https://github.com/prettier/prettier                   |
+| @types/node                      | ^20.14.10 | MIT        | Node.js 类型定义（`apps/api`）                  | https://github.com/DefinitelyTyped/DefinitelyTyped     |
+| @types/react                     | ^18.3.3   | MIT        | React 类型定义（`apps/web`）                    | https://github.com/DefinitelyTyped/DefinitelyTyped     |
+| @types/react-dom                 | ^18.3.0   | MIT        | React DOM 类型定义（`apps/web`）                | https://github.com/DefinitelyTyped/DefinitelyTyped     |
 
 ## Go 依赖（`services/dispatch`）
 
