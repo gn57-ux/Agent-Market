@@ -5,12 +5,13 @@ import { WalletConnectionStatus, WalletProvider } from "./WalletProvider.js";
 import { useWalletGuard } from "./useWalletGuard.js";
 
 const ADDRESS = "0x1234567890123456789012345678901234567890" as const;
+const YD_TOKEN_ADDRESS = "0x1111111111111111111111111111111111111111" as const;
 const TARGET_CHAIN: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
   addresses: {
     taskEscrow: "0x2222222222222222222222222222222222222222",
-    ydToken: "0x1111111111111111111111111111111111111111",
+    ydToken: YD_TOKEN_ADDRESS,
     ydFaucet: "0x3333333333333333333333333333333333333333",
   },
 };
@@ -51,6 +52,7 @@ describe("useWalletGuard", () => {
     expect(
       await screen.findByText("当前网络不正确。请切换到 Local Hardhat 后再提交交易。"),
     ).toBeTruthy();
+    expect(request.mock.calls.every(([rpcRequest]) => rpcRequest.method !== "eth_call")).toBe(true);
     const switchButton = screen.getByRole("button", { name: "切换网络" });
     fireEvent.click(screen.getByRole("button", { name: "提交交易" }));
     expect(transactionAction).not.toHaveBeenCalled();

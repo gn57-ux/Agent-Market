@@ -4,13 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WalletConnectionStatus, WalletProvider } from "./WalletProvider.js";
 
 const ADDRESS = "0x1234567890123456789012345678901234567890" as const;
-const YD_TOKEN = "0x1111111111111111111111111111111111111111" as const;
+const YD_TOKEN_ADDRESS = "0x1111111111111111111111111111111111111111" as const;
 const TARGET_CHAIN: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
   addresses: {
     taskEscrow: "0x2222222222222222222222222222222222222222",
-    ydToken: YD_TOKEN,
+    ydToken: YD_TOKEN_ADDRESS,
     ydFaucet: "0x3333333333333333333333333333333333333333",
   },
 };
@@ -65,7 +65,7 @@ describe("WalletProvider", () => {
     expect(
       request.mock.calls.some(
         ([rpcRequest]) =>
-          rpcRequest.method === "eth_call" && JSON.stringify(rpcRequest).includes(YD_TOKEN),
+          rpcRequest.method === "eth_call" && JSON.stringify(rpcRequest).includes(YD_TOKEN_ADDRESS),
       ),
     ).toBe(true);
   });
