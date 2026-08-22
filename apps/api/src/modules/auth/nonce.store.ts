@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Pool } from "pg";
+import type { Queryable } from "../../db/pool.js";
 
 const ETH_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 const NONCE_TTL_INTERVAL_SQL = "10 minutes";
@@ -113,7 +114,7 @@ export interface ActiveNonce {
  * itself provides no replay protection by itself.
  */
 export async function getActiveNonce(
-  pool: Pool,
+  pool: Queryable,
   rawAddress: string,
   nonce: string,
 ): Promise<ActiveNonce | null> {
@@ -142,9 +143,16 @@ export type ConsumeNonceResult =
  * not_found / already_consumed / expired — so T-404's routes.ts can log or
  * respond precisely without re-deriving nonce-state logic itself (this
  * module owns that knowledge; CLAUDE.md 原则 6: 设计知识只能有一个归属).
+ *
+ * Accepts `Queryable` (a plain `Pool` or an already-checked-out
+ * `PoolClient`) rather than `Pool` specifically, so `completeLogin.ts` can
+ * call this as one statement inside a larger transaction alongside
+ * `recordLogin`/`issueSession` (Codex review, T-404 round 2, P2) — this
+ * function itself has no opinion about transactions, it just runs whatever
+ * query interface it's given.
  */
 export async function consumeNonce(
-  pool: Pool,
+  pool: Queryable,
   rawAddress: string,
   nonce: string,
 ): Promise<ConsumeNonceResult> {

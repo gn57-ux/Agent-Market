@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { Pool } from "pg";
+import type { Queryable } from "../../db/pool.js";
 import { normalizeAddress } from "./nonce.store.js";
 
 const SESSION_TTL_INTERVAL_SQL = "24 hours";
@@ -47,7 +47,7 @@ export interface IssuedSession {
  * Chose B: it is the simpler design once revocation is a real requirement
  * (AC-404), not just cheaper to build first.
  */
-export async function issueSession(pool: Pool, rawAddress: string): Promise<IssuedSession> {
+export async function issueSession(pool: Queryable, rawAddress: string): Promise<IssuedSession> {
   const address = normalizeAddress(rawAddress);
   const token = randomBytes(32).toString("hex");
   const tokenHash = hashToken(token);

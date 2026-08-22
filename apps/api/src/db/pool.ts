@@ -1,4 +1,16 @@
-import { Pool, type PoolConfig } from "pg";
+import { Pool, type PoolClient, type PoolConfig } from "pg";
+
+/**
+ * Shared type for "anything with pg's `.query()` method" — a plain `Pool`
+ * (auto-acquires/releases a client per call) or a `PoolClient` already
+ * checked out for a manually-managed transaction. Store functions
+ * (nonce.store.ts, users.store.ts, session.service.ts) accept this instead
+ * of `Pool` specifically so a caller that needs several of them to commit
+ * or roll back together (T-404's completeLogin.ts) can pass the same
+ * `PoolClient` through all of them, without those modules needing to know
+ * anything about transactions themselves.
+ */
+export type Queryable = Pick<Pool | PoolClient, "query">;
 
 let pool: Pool | undefined;
 

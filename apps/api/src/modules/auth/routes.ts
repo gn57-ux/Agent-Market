@@ -1,11 +1,10 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
-import { getActiveNonce, consumeNonce, issueNonce } from "./nonce.store.js";
+import { completeLogin } from "./completeLogin.js";
+import { getActiveNonce, issueNonce } from "./nonce.store.js";
 import { nonceRequestSchema, verifyRequestSchema } from "./schema.js";
 import { buildSignInMessage, verifySignInSignature } from "./signInMessage.js";
-import { issueSession } from "./session.service.js";
-import { recordLogin } from "./users.store.js";
 
 /** Domain field embedded in the sign-in message (F-404, design.md). Not
  * secret, just an anti-phishing binding (the same purpose EIP-4361's
@@ -15,6 +14,23 @@ import { recordLogin } from "./users.store.js";
  * deployment domain exists; revisit when this ships behind a real host. */
 function authDomain(): string {
   return process.env.AUTH_DOMAIN ?? "localhost";
+}
+
+/**
+ * Whether the session cookie should carry `Secure`. Codex review (T-404
+ * round 2, P1): gating this on `NODE_ENV === "production"` was fragile —
+ * nothing in this project's `start` script or `.env.example` actually sets
+ * `NODE_ENV`, so a real deployment run the normal way would silently ship
+ * an insecure cookie. Inverted to fail safe: `Secure` is ON by default,
+ * and only OFF when `COOKIE_INSECURE_LOCAL_DEV=1` is explicitly set — which
+ * is what local dev's own `.env.example` sets, since `pnpm dev` runs the
+ * API over plain HTTP (where a `Secure` cookie would never be sent back at
+ * all; this is not a relaxation, there's no transit to protect locally). A
+ * misconfigured/unconfigured real deployment now defaults to secure rather
+ * than to insecure.
+ */
+function cookieShouldBeSecure(): boolean {
+  return process.env.COOKIE_INSECURE_LOCAL_DEV !== "1";
 }
 
 // Typed against @agent-market/domain's ErrorCode (the PRD §11.4 single
@@ -84,32 +100,26 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
       });
     }
 
-    // Atomic one-time-use enforcement: a concurrent /auth/verify for the
-    // same nonce could have consumed it between the lookup above and here
-    // (e.g. two requests racing with the same replayed valid signature);
-    // consumeNonce's UPDATE ... WHERE consumed = false is what actually
-    // guarantees only one of them wins.
-    const consumed = await consumeNonce(pool, address, nonce);
-    if (!consumed.ok) {
+    // Atomic one-time-use enforcement + session issuance: a concurrent
+    // /auth/verify for the same nonce could have consumed it between the
+    // lookup above and here (e.g. two requests racing with the same
+    // replayed valid signature) — completeLogin's UPDATE ... WHERE
+    // consumed = false is what actually guarantees only one of them wins.
+    // Consuming the nonce, recording the login, and issuing the session all
+    // happen in one transaction (Codex review, T-404 round 2, P2), so a
+    // failure issuing the session doesn't leave the nonce burned with no
+    // session to show for it.
+    const result = await completeLogin(pool, address, nonce);
+    if (!result.ok) {
       return reply.status(401).send({
         error: { code: WALLET_SIGNATURE_INVALID, message: "Nonce was already used." },
       });
     }
-
-    await recordLogin(pool, address);
-    const session = await issueSession(pool, address);
+    const session = result.session;
 
     reply.setCookie("session_token", session.token, {
       httpOnly: true,
-      // Codex review (T-404 P2): without `secure`, a bearer-token cookie
-      // could still be sent over a plain HTTP request to the same host
-      // even when the deployment is normally HTTPS (a downgrade/legacy
-      // request), leaking it in transit. `NODE_ENV` gates this rather than
-      // hardcoding `true` because local dev (`pnpm dev`) runs the API over
-      // plain HTTP, where a `secure` cookie would never be sent back at
-      // all — this is not a security relaxation, `secure` protects the
-      // cookie in transit and local dev has no such transit to protect.
-      secure: process.env.NODE_ENV === "production",
+      secure: cookieShouldBeSecure(),
       sameSite: "lax",
       path: "/",
       expires: session.expiresAt,

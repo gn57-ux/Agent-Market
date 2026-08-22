@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Queryable } from "../../db/pool.js";
 import { normalizeAddress } from "./nonce.store.js";
 
 export interface UserRow {
@@ -27,7 +27,7 @@ function toUserRow(row: UserQueryRow): UserRow {
  * CONFLICT DO UPDATE`) or earlier. If T-404 needs different semantics, add a
  * separate function here rather than overloading `recordLogin`.
  */
-export async function recordLogin(pool: Pool, rawAddress: string): Promise<UserRow> {
+export async function recordLogin(pool: Queryable, rawAddress: string): Promise<UserRow> {
   const address = normalizeAddress(rawAddress);
   const { rows } = await pool.query<UserQueryRow>(
     `INSERT INTO users (address, last_login_at)
@@ -43,7 +43,10 @@ export async function recordLogin(pool: Pool, rawAddress: string): Promise<UserR
   return toUserRow(row);
 }
 
-export async function findUserByAddress(pool: Pool, rawAddress: string): Promise<UserRow | null> {
+export async function findUserByAddress(
+  pool: Queryable,
+  rawAddress: string,
+): Promise<UserRow | null> {
   const address = normalizeAddress(rawAddress);
   const { rows } = await pool.query<UserQueryRow>(
     `SELECT address, created_at, last_login_at FROM users WHERE address = $1`,

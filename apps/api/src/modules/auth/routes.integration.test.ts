@@ -213,7 +213,15 @@ runIfOptedIn("POST /auth/nonce, /auth/verify (integration, AC-402)", () => {
     expect(response.headers["access-control-allow-credentials"]).toBe("true");
   });
 
-  it("sets the session cookie as Secure in production, not in development (Codex P2)", async () => {
+  it("defaults the session cookie to Secure, opting out only via COOKIE_INSECURE_LOCAL_DEV=1 (Codex P1)", async () => {
+    // Codex round 2 P1: gating on NODE_ENV was fragile since nothing sets
+    // it; the fix fails safe (Secure by default, insecure only via an
+    // explicit local-dev opt-out env var) — this proves BOTH directions,
+    // including that simply leaving the var unset (as a real, unconfigured
+    // deployment would) still produces a Secure cookie.
+    const previousOptOut = process.env.COOKIE_INSECURE_LOCAL_DEV;
+    delete process.env.COOKIE_INSECURE_LOCAL_DEV;
+
     const { nonce, issuedAt, expiresAt } = await requestNonce();
     const message = buildSignInMessage({
       domain: "localhost",
@@ -224,19 +232,21 @@ runIfOptedIn("POST /auth/nonce, /auth/verify (integration, AC-402)", () => {
     });
     const signature = await account.signMessage({ message });
 
-    const previousNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "production";
-    let productionResponse;
+    let defaultResponse;
     try {
-      productionResponse = await app.inject({
+      defaultResponse = await app.inject({
         method: "POST",
         url: "/auth/verify",
         payload: { address: account.address, signature, nonce },
       });
     } finally {
-      process.env.NODE_ENV = previousNodeEnv;
+      if (previousOptOut === undefined) {
+        delete process.env.COOKIE_INSECURE_LOCAL_DEV;
+      } else {
+        process.env.COOKIE_INSECURE_LOCAL_DEV = previousOptOut;
+      }
     }
-    expect(String(productionResponse.headers["set-cookie"])).toContain("Secure");
+    expect(String(defaultResponse.headers["set-cookie"])).toContain("Secure");
 
     // A fresh nonce/signature: the previous one was already consumed above.
     const second = await requestNonce();
@@ -248,11 +258,23 @@ runIfOptedIn("POST /auth/nonce, /auth/verify (integration, AC-402)", () => {
       expiresAt: new Date(second.expiresAt),
     });
     const secondSignature = await account.signMessage({ message: secondMessage });
-    const devResponse = await app.inject({
-      method: "POST",
-      url: "/auth/verify",
-      payload: { address: account.address, signature: secondSignature, nonce: second.nonce },
-    });
+
+    const previousOptOut2 = process.env.COOKIE_INSECURE_LOCAL_DEV;
+    process.env.COOKIE_INSECURE_LOCAL_DEV = "1";
+    let devResponse;
+    try {
+      devResponse = await app.inject({
+        method: "POST",
+        url: "/auth/verify",
+        payload: { address: account.address, signature: secondSignature, nonce: second.nonce },
+      });
+    } finally {
+      if (previousOptOut2 === undefined) {
+        delete process.env.COOKIE_INSECURE_LOCAL_DEV;
+      } else {
+        process.env.COOKIE_INSECURE_LOCAL_DEV = previousOptOut2;
+      }
+    }
     expect(String(devResponse.headers["set-cookie"])).not.toContain("Secure");
   });
 });
