@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { Pool } from "pg";
 import { getPool } from "./db/pool.js";
+import { registerAgentsRoutes } from "./modules/agents/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerSessionMiddleware } from "./modules/auth/session.middleware.js";
 
@@ -46,6 +47,15 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   });
 
   registerAuthRoutes(app, pool);
+
+  // Wrapped in its own app.register(...) (not called directly like
+  // registerAuthRoutes above): POST /agents uses `app.requireSession` as a
+  // preHandler, and that decorator is only guaranteed to exist once
+  // registerSessionMiddleware's own registration above has finished — see
+  // session.middleware.ts's doc comment.
+  void app.register(async (instance) => {
+    registerAgentsRoutes(instance, pool);
+  });
 
   return app;
 }
