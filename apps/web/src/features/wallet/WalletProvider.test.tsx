@@ -243,6 +243,28 @@ describe("WalletProvider", () => {
     expect(await screen.findByText(/当前网络不正确/)).toBeTruthy();
   });
 
+  it("ignores a malformed chainChanged payload instead of applying garbage as chainId", async () => {
+    // Regression for Codex review round 3 P2: Number.parseInt("0x", 16) is
+    // NaN and Number.parseInt("0xZZ", 16) silently parses just the "0x"
+    // prefix as 0 — either would previously have been accepted as a real
+    // chainId change. The wallet's `chainChanged` payload is untrusted
+    // input from the injected provider and must be validated as a
+    // complete, well-formed hex quantity before being applied.
+    const { emit } = installWallet(TARGET_CHAIN.chainId);
+    renderWallet();
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByText("当前网络：Local Hardhat");
+
+    emit("chainChanged", "0x");
+    emit("chainChanged", "0xZZ");
+    emit("chainChanged", "garbage");
+
+    // Still on the original, correct network — none of the malformed
+    // payloads were accepted as a real chain change.
+    expect(screen.getByText("当前网络：Local Hardhat")).toBeTruthy();
+    expect(screen.queryByText(/当前网络不正确/)).toBeNull();
+  });
+
   it("composes an accountsChanged and a chainChanged event fired back-to-back in the same tick without dropping either update", async () => {
     // Regression for Codex review round 1 P1: reading a ref synced by a
     // separate effect could let the second handler in a same-tick batch

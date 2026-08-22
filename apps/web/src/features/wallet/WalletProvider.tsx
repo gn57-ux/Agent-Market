@@ -86,10 +86,11 @@ export interface WalletContextValue {
   disconnect: () => void;
   switchNetwork: () => Promise<void>;
   /**
-   * Monotonically increasing "wallet identity generation" — see
-   * `requestVersion.ts`'s `useRequestVersion`/`useVersionedAsync` for the
-   * consumer-facing staleness API built on top of this. Bumped synchronously
-   * by `WalletProvider` itself, at the exact moment address/chainId actually
+   * Monotonically increasing "wallet identity generation" as of the last
+   * render — a snapshot value, suitable for display or as a React
+   * dependency, but NOT for a point-in-time staleness check (see
+   * `getIdentityGeneration` for that). Bumped synchronously by
+   * `WalletProvider` itself, at the exact moment address/chainId actually
    * changes, from plain function bodies only (event handlers, connect/
    * disconnect/switchNetwork) — never from inside a `setConnection` updater
    * callback. React may invoke a state updater function more than once for
@@ -105,6 +106,21 @@ export interface WalletContextValue {
    * whether React ever schedules a render for it, has no such gap.
    */
   identityGeneration: number;
+  /**
+   * Live read of the same counter `identityGeneration` snapshots at render
+   * time — call this instead of using a value mirrored from
+   * `identityGeneration` inside a ref, for any check that must not wait for
+   * a React render. Codex review (P1): `useVersionedAsync`'s staleness
+   * check previously mirrored `identityGeneration` into its own `useRef`
+   * during render; if the identity changed and the async operation settled
+   * in the window before that consumer's next render committed, the
+   * mirrored ref still held the stale value and the check incorrectly
+   * passed. `getIdentityGeneration()` reads the provider's own ref
+   * directly — always current, independent of whether or when this
+   * consumer re-renders. A stable function identity across renders (never
+   * needs to appear in a dependency array to stay fresh).
+   */
+  getIdentityGeneration: () => number;
 }
 
 export interface WalletProviderProps {
@@ -139,6 +155,22 @@ function resolveFrontendChainConfig(): ChainConfigResolution {
       message: `应用尚未正确配置链上参数（${detail}）。请检查 .env 中的 VITE_CHAIN_ID / VITE_TASK_ESCROW_ADDRESS / VITE_YD_TOKEN_ADDRESS / VITE_YD_FAUCET_ADDRESS 是否已填入真实部署地址。`,
     };
   }
+}
+
+/** MetaMask's `chainChanged` payload is an untrusted string from the
+ * injected provider. Codex review (P2): `Number.parseInt(payload, 16)`
+ * silently accepts malformed input like `"0x"` (NaN) or `"0xZZ"` (parses
+ * the valid hex prefix and ignores the rest), which would then get applied
+ * as a real `chainId` and advance the identity generation on garbage.
+ * Requires a complete, non-empty `0x`-prefixed hex quantity, and that the
+ * parsed value is a finite safe integer (chain IDs fit comfortably within
+ * that range; anything else indicates a malformed or hostile payload). */
+function parseHexChainId(payload: unknown): number | undefined {
+  if (typeof payload !== "string" || !/^0x[0-9a-fA-F]+$/.test(payload)) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(payload, 16);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 function providerErrorCode(error: unknown): number | undefined {
@@ -314,6 +346,12 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
     latestChainIdRef.current = nextChainId;
     identityGenerationRef.current += 1;
   }
+
+  // Stable across renders (empty deps; reads the ref directly at call time)
+  // — see WalletContextValue.getIdentityGeneration's doc comment for why a
+  // point-in-time staleness check needs this instead of a render-snapshotted
+  // value.
+  const getIdentityGeneration = useCallback(() => identityGenerationRef.current, []);
 
   const connect = useCallback(async () => {
     setConnection({ status: "connecting" });
@@ -493,7 +531,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
     const handleChainChanged = (payload: unknown) => {
       if (latestAddressRef.current === undefined) return;
 
-      const nextChainId = typeof payload === "string" ? Number.parseInt(payload, 16) : undefined;
+      const nextChainId = parseHexChainId(payload);
       if (nextChainId === undefined || nextChainId === latestChainIdRef.current) return;
 
       // Same rationale as handleAccountsChanged: a wallet-driven change
@@ -551,6 +589,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       disconnect,
       switchNetwork,
       identityGeneration: identityGenerationRef.current,
+      getIdentityGeneration,
     }),
     [
       address,
@@ -561,6 +600,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       disconnect,
       errorMessage,
       switchNetwork,
+      getIdentityGeneration,
       // `connection` above already changes on every real identity
       // transition (each one has a corresponding `recordIdentityIfChanged`
       // call), so this recomputes whenever the generation could have

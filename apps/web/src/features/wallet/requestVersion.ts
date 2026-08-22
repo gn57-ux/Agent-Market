@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback } from "react";
 import { useWallet } from "./WalletProvider.js";
 
 /**
@@ -71,23 +71,25 @@ export interface VersionedAsync<T> {
  * and it cannot be gotten wrong the way a hand-written comparison can.
  */
 export function useVersionedAsync<T>(): VersionedAsync<T> {
-  // Read synchronously during render: `version` reflects
-  // `WalletProvider`'s `identityGeneration` as of this render's
-  // already-committed context state, which is itself bumped synchronously
-  // at the moment of each real transition (not derived from this
-  // consumer's own render) — see `useRequestVersion`'s doc comment.
-  const version = useRequestVersion();
-  const versionRef = useRef(version);
-  versionRef.current = version;
+  // Uses `getIdentityGeneration()` — a live read of WalletProvider's own
+  // counter — rather than mirroring `useRequestVersion()`'s render-time
+  // snapshot into a ref. Codex review (P1): a ref mirrored during render
+  // only updates when THIS consumer re-renders; if the identity changes
+  // and the async operation settles in the window before that render
+  // commits, the mirrored ref is still stale and the check would
+  // incorrectly pass. Reading the provider's ref directly has no such
+  // window — it reflects every real transition the instant it happens,
+  // regardless of whether or when this consumer re-renders.
+  const { getIdentityGeneration } = useWallet();
 
   const run = useCallback(
     async (fn: (isStale: () => boolean) => Promise<T>): Promise<T | undefined> => {
-      const startVersion = versionRef.current;
-      const isStale = () => versionRef.current !== startVersion;
+      const startVersion = getIdentityGeneration();
+      const isStale = () => getIdentityGeneration() !== startVersion;
       const result = await fn(isStale);
       return isStale() ? undefined : result;
     },
-    [],
+    [getIdentityGeneration],
   );
 
   return { run };
