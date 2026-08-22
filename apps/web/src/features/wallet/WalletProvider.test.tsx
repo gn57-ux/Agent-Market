@@ -93,10 +93,18 @@ describe("WalletProvider", () => {
   });
 
   it("shows a readable Chinese config error instead of crashing when chain config is invalid", () => {
-    // No chainConfig prop supplied: falls through to resolveChainConfig
-    // reading import.meta.env, which is unset in the test environment (no
-    // .env file at the repo root) and therefore throws inside the domain
-    // package — this must not propagate as an uncaught render exception.
+    // Explicitly clear the env vars WalletProvider reads (rather than relying
+    // on no .env existing at the repo root, which a developer/CI environment
+    // could supply) so this test's failure mode is deterministic.
+    vi.stubEnv("VITE_CHAIN_ID", "");
+    vi.stubEnv("VITE_TASK_ESCROW_ADDRESS", "");
+    vi.stubEnv("VITE_YD_TOKEN_ADDRESS", "");
+    vi.stubEnv("VITE_YD_FAUCET_ADDRESS", "");
+
+    // No chainConfig prop supplied: falls through to resolveFrontendChainConfig
+    // reading import.meta.env, which is now guaranteed empty — resolveChainConfig
+    // throws inside the domain package, and that must not propagate as an
+    // uncaught render exception.
     render(
       <WalletProvider>
         <WalletConnectionStatus />
@@ -105,18 +113,24 @@ describe("WalletProvider", () => {
 
     expect(screen.getByRole("alert").textContent).toContain("应用尚未正确配置链上参数");
     expect(screen.queryByRole("button", { name: "连接钱包" })).toBeNull();
+
+    vi.unstubAllEnvs();
   });
 
   it("falls back to wallet_addEthereumChain when the wallet has not registered the target chain (4902)", async () => {
     vi.stubEnv("VITE_WALLET_RPC_URL", "http://127.0.0.1:8545");
     const wrongChainId = 1;
-    const addChain = vi.fn(async () => null);
+    let activeChainId = wrongChainId;
+    const addChain = vi.fn(async () => {
+      activeChainId = TARGET_CHAIN.chainId;
+      return null;
+    });
     const switchChain = vi.fn(async () => {
       throw { code: 4902 };
     });
     const request = vi.fn(async ({ method, params }: { method: string; params?: unknown }) => {
       if (method === "eth_requestAccounts") return [ADDRESS];
-      if (method === "eth_chainId") return `0x${wrongChainId.toString(16)}`;
+      if (method === "eth_chainId") return `0x${activeChainId.toString(16)}`;
       if (method === "eth_call") {
         const call = Array.isArray(params) ? params[0] : undefined;
         const calldata =
@@ -144,6 +158,34 @@ describe("WalletProvider", () => {
     await waitFor(() => expect(addChain).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("当前网络：Local Hardhat")).toBeTruthy();
     expect(await screen.findByText("YD 余额：100 YD")).toBeTruthy();
+
+    vi.unstubAllEnvs();
+  });
+
+  it("does not mark the network as switched when wallet_addEthereumChain adds but does not activate the target chain", async () => {
+    vi.stubEnv("VITE_WALLET_RPC_URL", "http://127.0.0.1:8545");
+    const wrongChainId = 1;
+    // Simulates a wallet that accepts wallet_addEthereumChain but (per
+    // EIP-3085, which does not require it) leaves the previously active
+    // chain selected instead of switching to the newly added one.
+    const request = vi.fn(async ({ method }: { method: string }) => {
+      if (method === "eth_requestAccounts") return [ADDRESS];
+      if (method === "eth_chainId") return `0x${wrongChainId.toString(16)}`;
+      if (method === "wallet_switchEthereumChain") throw { code: 4902 };
+      if (method === "wallet_addEthereumChain") return null;
+      throw new Error(`Unexpected test RPC method: ${method}`);
+    });
+    window.ethereum = { request };
+
+    renderWallet();
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByText(/当前网络不正确/);
+
+    fireEvent.click(screen.getByRole("button", { name: "切换网络" }));
+
+    expect(await screen.findByText(/网络已添加，但钱包仍停留在原网络/)).toBeTruthy();
+    // Still shows the wrong-network warning — did not optimistically flip to connected.
+    expect(screen.getByText(/当前网络不正确/)).toBeTruthy();
 
     vi.unstubAllEnvs();
   });

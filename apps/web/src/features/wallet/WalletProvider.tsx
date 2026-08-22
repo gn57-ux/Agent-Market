@@ -152,6 +152,14 @@ function requireInjectedProvider(): InjectedWalletProvider {
   return provider;
 }
 
+async function readActiveChainId(provider: InjectedWalletProvider): Promise<number> {
+  const result = await provider.request({ method: "eth_chainId" });
+  if (typeof result !== "string") {
+    throw new ActionableWalletError("无法读取钱包当前网络，请重试。");
+  }
+  return Number.parseInt(result, 16);
+}
+
 async function readYdBalance(
   provider: InjectedWalletProvider,
   chainConfig: ChainConfig,
@@ -268,13 +276,23 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
         if (providerErrorCode(switchError) !== 4902) throw switchError;
         // Target chain isn't registered in the wallet yet (fresh MetaMask
         // install against local Hardhat, most commonly) — register it.
+        // EIP-3085 does not guarantee wallet_addEthereumChain also makes the
+        // new chain active, so this alone is not enough to consider the
+        // switch done — verify the actual active chain below regardless of
+        // which branch ran.
         await addTargetChainToWallet(provider, chainConfig);
+      }
+      const activeChainId = await readActiveChainId(provider);
+      if (activeChainId !== chainConfig.chainId) {
+        throw new ActionableWalletError(
+          `网络已添加，但钱包仍停留在原网络。请在 MetaMask 中手动切换到 ${chainConfig.name} 后重试。`,
+        );
       }
       const ydBalance = await readYdBalance(provider, chainConfig, connection.address);
       setConnection({
         status: "connected",
         address: connection.address,
-        chainId: chainConfig.chainId,
+        chainId: activeChainId,
         ydBalance,
       });
     } catch (error) {
