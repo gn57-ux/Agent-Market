@@ -1,0 +1,222 @@
+import type { ChainConfig } from "@agent-market/domain";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WalletConnectionStatus, WalletProvider } from "./WalletProvider.js";
+import { useRequestVersion, useVersionedAsync } from "./requestVersion.js";
+
+const ADDRESS_A = "0x1234567890123456789012345678901234567890" as const;
+const ADDRESS_B = "0x9876543210987654321098765432109876543210" as const;
+const YD_TOKEN_ADDRESS = "0x1111111111111111111111111111111111111111" as const;
+const TASK_ESCROW_ADDRESS = "0x2222222222222222222222222222222222222222" as const;
+const YD_FAUCET_ADDRESS = "0x3333333333333333333333333333333333333333" as const;
+
+const TARGET_CHAIN: ChainConfig = {
+  chainId: 31337,
+  name: "Local Hardhat",
+  addresses: {
+    taskEscrow: TASK_ESCROW_ADDRESS,
+    ydToken: YD_TOKEN_ADDRESS,
+    ydFaucet: YD_FAUCET_ADDRESS,
+  },
+};
+const WRONG_CHAIN_ID = 1;
+
+function uint256Result(value: bigint): `0x${string}` {
+  return `0x${value.toString(16).padStart(64, "0")}`;
+}
+
+function installWallet(address: `0x${string}`, chainId: number) {
+  const request = vi.fn(async ({ method, params }: { method: string; params?: unknown }) => {
+    if (method === "eth_requestAccounts") return [address];
+    if (method === "eth_chainId") return `0x${chainId.toString(16)}`;
+    if (method === "wallet_switchEthereumChain") return null;
+    if (method === "eth_call") {
+      const call = Array.isArray(params) ? params[0] : undefined;
+      const calldata =
+        typeof call === "object" && call !== null && "data" in call && typeof call.data === "string"
+          ? call.data
+          : "";
+      if (calldata.startsWith("0x313ce567")) return uint256Result(6n);
+      if (calldata.startsWith("0x70a08231")) return uint256Result(1_000_000n);
+    }
+    throw new Error(`Unexpected test RPC method: ${method}`);
+  });
+  window.ethereum = { request };
+}
+
+afterEach(() => {
+  delete window.ethereum;
+});
+
+/** Exposes the current request version as text so tests can assert on it. */
+function VersionProbe() {
+  const version = useRequestVersion();
+  return <span data-testid="version">{version}</span>;
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+/** Starts a versioned async op backed by an externally-controlled deferred
+ * promise, and reports whether the result was kept (defined) or discarded
+ * as stale (undefined) once `run` settles. */
+function VersionedAsyncProbe({
+  deferred,
+  onSettled,
+}: {
+  deferred: Deferred<string>;
+  onSettled: (result: string | undefined) => void;
+}) {
+  const { run } = useVersionedAsync<string>();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void run((isStale) => {
+          expect(isStale()).toBe(false); // not stale at the moment fn starts
+          return deferred.promise;
+        }).then(onSettled);
+      }}
+    >
+      start-async
+    </button>
+  );
+}
+
+describe("useRequestVersion", () => {
+  it("changes identity when the connected address changes", async () => {
+    installWallet(ADDRESS_A, TARGET_CHAIN.chainId);
+    render(
+      <WalletProvider chainConfig={TARGET_CHAIN}>
+        <WalletConnectionStatus />
+        <VersionProbe />
+      </WalletProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    const connectedAsA = await screen.findByRole("button", { name: "0x1234…7890" });
+    const versionAfterA = screen.getByTestId("version").textContent;
+    expect(versionAfterA).toContain(ADDRESS_A);
+
+    // Disconnect, then reconnect as a different address (simulates the user
+    // switching MetaMask accounts and the app re-establishing connection).
+    fireEvent.click(connectedAsA);
+    await waitFor(() => expect(screen.getByTestId("version").textContent).not.toBe(versionAfterA));
+
+    installWallet(ADDRESS_B, TARGET_CHAIN.chainId);
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x9876…3210" });
+
+    const versionAfterB = screen.getByTestId("version").textContent;
+    expect(versionAfterB).toContain(ADDRESS_B);
+    expect(versionAfterB).not.toBe(versionAfterA);
+  });
+
+  it("changes identity when the active chainId changes", async () => {
+    let activeChainId: number = WRONG_CHAIN_ID;
+    const request = vi.fn(async ({ method, params }: { method: string; params?: unknown }) => {
+      if (method === "eth_requestAccounts") return [ADDRESS_A];
+      if (method === "eth_chainId") return `0x${activeChainId.toString(16)}`;
+      if (method === "wallet_switchEthereumChain") {
+        activeChainId = TARGET_CHAIN.chainId;
+        return null;
+      }
+      if (method === "eth_call") {
+        const call = Array.isArray(params) ? params[0] : undefined;
+        const calldata =
+          typeof call === "object" &&
+          call !== null &&
+          "data" in call &&
+          typeof call.data === "string"
+            ? call.data
+            : "";
+        if (calldata.startsWith("0x313ce567")) return uint256Result(6n);
+        if (calldata.startsWith("0x70a08231")) return uint256Result(1_000_000n);
+      }
+      throw new Error(`Unexpected test RPC method: ${method}`);
+    });
+    window.ethereum = { request };
+    render(
+      <WalletProvider chainConfig={TARGET_CHAIN}>
+        <WalletConnectionStatus />
+        <VersionProbe />
+      </WalletProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByText(/当前网络不正确/);
+    const versionOnWrongChain = screen.getByTestId("version").textContent;
+    expect(versionOnWrongChain).toContain(String(WRONG_CHAIN_ID));
+
+    fireEvent.click(screen.getByRole("button", { name: "切换网络" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("version").textContent).not.toBe(versionOnWrongChain),
+    );
+
+    const versionOnTargetChain = screen.getByTestId("version").textContent;
+    expect(versionOnTargetChain).toContain(String(TARGET_CHAIN.chainId));
+  });
+});
+
+describe("useVersionedAsync", () => {
+  it("discards a result that resolves after the account changed while it was in flight", async () => {
+    installWallet(ADDRESS_A, TARGET_CHAIN.chainId);
+    const deferred = createDeferred<string>();
+    const onSettled = vi.fn();
+
+    render(
+      <WalletProvider chainConfig={TARGET_CHAIN}>
+        <WalletConnectionStatus />
+        <VersionedAsyncProbe deferred={deferred} onSettled={onSettled} />
+      </WalletProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    const connectedAsA = await screen.findByRole("button", { name: "0x1234…7890" });
+
+    fireEvent.click(screen.getByRole("button", { name: "start-async" }));
+
+    // Switch accounts while the async op is still pending.
+    fireEvent.click(connectedAsA);
+    installWallet(ADDRESS_B, TARGET_CHAIN.chainId);
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x9876…3210" });
+
+    deferred.resolve("result-for-address-a");
+
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1));
+    expect(onSettled).toHaveBeenCalledWith(undefined);
+  });
+
+  it("keeps a result that resolves while the identity is still current", async () => {
+    installWallet(ADDRESS_A, TARGET_CHAIN.chainId);
+    const deferred = createDeferred<string>();
+    const onSettled = vi.fn();
+
+    render(
+      <WalletProvider chainConfig={TARGET_CHAIN}>
+        <WalletConnectionStatus />
+        <VersionedAsyncProbe deferred={deferred} onSettled={onSettled} />
+      </WalletProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x1234…7890" });
+
+    fireEvent.click(screen.getByRole("button", { name: "start-async" }));
+    deferred.resolve("result-for-address-a");
+
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1));
+    expect(onSettled).toHaveBeenCalledWith("result-for-address-a");
+  });
+});

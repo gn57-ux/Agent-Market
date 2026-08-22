@@ -19,7 +19,10 @@ function uint256Result(value: bigint): `0x${string}` {
   return `0x${value.toString(16).padStart(64, "0")}`;
 }
 
+type ProviderEvent = "accountsChanged" | "chainChanged";
+
 function installWallet(chainId: number) {
+  const listeners = new Map<ProviderEvent, Set<(payload: unknown) => void>>();
   const request = vi.fn(async ({ method, params }: { method: string; params?: unknown }) => {
     if (method === "eth_requestAccounts") return [ADDRESS];
     if (method === "eth_chainId") return `0x${chainId.toString(16)}`;
@@ -35,8 +38,19 @@ function installWallet(chainId: number) {
     if (method === "wallet_switchEthereumChain") return null;
     throw new Error(`Unexpected test RPC method: ${method}`);
   });
-  window.ethereum = { request };
-  return request;
+  const on = (event: ProviderEvent, listener: (payload: unknown) => void) => {
+    const set = listeners.get(event) ?? new Set();
+    set.add(listener);
+    listeners.set(event, set);
+  };
+  const removeListener = (event: ProviderEvent, listener: (payload: unknown) => void) => {
+    listeners.get(event)?.delete(listener);
+  };
+  const emit = (event: ProviderEvent, payload: unknown) => {
+    for (const listener of listeners.get(event) ?? []) listener(payload);
+  };
+  window.ethereum = { request, on, removeListener };
+  return { request, emit };
 }
 
 afterEach(() => {
@@ -53,7 +67,7 @@ function renderWallet() {
 
 describe("WalletProvider", () => {
   it("connects through the injected EIP-1193 wallet and displays address, network, and YD balance", async () => {
-    const request = installWallet(TARGET_CHAIN.chainId);
+    const { request } = installWallet(TARGET_CHAIN.chainId);
     renderWallet();
 
     fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
@@ -188,5 +202,44 @@ describe("WalletProvider", () => {
     expect(screen.getByText(/当前网络不正确/)).toBeTruthy();
 
     vi.unstubAllEnvs();
+  });
+
+  it("reflects an account switched directly inside the wallet (accountsChanged), not just app-initiated connects", async () => {
+    const OTHER_ADDRESS = "0x9999999999999999999999999999999999999999" as const;
+    const { emit } = installWallet(TARGET_CHAIN.chainId);
+    renderWallet();
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x1234…7890" });
+    await screen.findByText("YD 余额：123.45 YD");
+
+    emit("accountsChanged", [OTHER_ADDRESS]);
+
+    expect(await screen.findByRole("button", { name: "0x9999…9999" })).toBeTruthy();
+    // The balance re-fetch for the new account is guarded and re-runs — still resolves
+    // (the mock returns the same fixed balance regardless of address).
+    expect(await screen.findByText("YD 余额：123.45 YD")).toBeTruthy();
+  });
+
+  it("disconnects the app session when the wallet reports no accounts (accountsChanged: [])", async () => {
+    const { emit } = installWallet(TARGET_CHAIN.chainId);
+    renderWallet();
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x1234…7890" });
+
+    emit("accountsChanged", []);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "连接钱包" })).toBeTruthy());
+  });
+
+  it("reflects a network switched directly inside the wallet (chainChanged), not just app-initiated switches", async () => {
+    const OTHER_CHAIN_ID = 1;
+    const { emit } = installWallet(TARGET_CHAIN.chainId);
+    renderWallet();
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByText("当前网络：Local Hardhat");
+
+    emit("chainChanged", `0x${OTHER_CHAIN_ID.toString(16)}`);
+
+    expect(await screen.findByText(/当前网络不正确/)).toBeTruthy();
   });
 });

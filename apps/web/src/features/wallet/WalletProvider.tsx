@@ -6,7 +6,18 @@ import {
   type ChainConfig,
   type HexAddress,
 } from "@agent-market/domain";
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import { createPublicClient, createWalletClient, custom } from "viem";
 import { WalletButton } from "../../shared/components/index.js";
 
@@ -27,8 +38,19 @@ const YD_TOKEN_ABI = [
   },
 ] as const;
 
+/** MetaMask (and any EIP-1193-compliant provider) implements the optional
+ * `on`/`removeListener` event pair for `accountsChanged`/`chainChanged` —
+ * fired when the user switches account or network *inside the wallet UI*,
+ * bypassing this app's own connect/switch buttons entirely. F-402 requires
+ * listening for these so the app's state can't silently go stale relative
+ * to the wallet's real state. */
 interface InjectedWalletProvider {
   request(request: { method: string; params?: readonly unknown[] | object }): Promise<unknown>;
+  on?(eventName: "accountsChanged" | "chainChanged", listener: (payload: unknown) => void): void;
+  removeListener?(
+    eventName: "accountsChanged" | "chainChanged",
+    listener: (payload: unknown) => void,
+  ): void;
 }
 
 declare global {
@@ -189,6 +211,30 @@ async function readYdBalance(
   }
 }
 
+/**
+ * Re-reads the YD balance and applies it only if the connection identity
+ * (address + chainId) hasn't moved on since the read started — the same
+ * staleness rule `useVersionedAsync` (requestVersion.ts) generalizes for
+ * Feature 5-10 consumers, inlined here because this helper runs inside the
+ * same component that defines WalletContext (it cannot consume its own
+ * not-yet-provided context via `useWallet`).
+ */
+function refreshYdBalance(
+  setConnection: Dispatch<SetStateAction<WalletConnection>>,
+  provider: InjectedWalletProvider,
+  chainConfig: ChainConfig,
+  address: HexAddress,
+  chainId: number,
+): void {
+  void readYdBalance(provider, chainConfig, address).then((ydBalance) => {
+    setConnection((current) =>
+      current.status === "connected" && current.address === address && current.chainId === chainId
+        ? { ...current, ydBalance }
+        : current,
+    );
+  });
+}
+
 /** Resolves chain configuration and only then mounts the stateful wallet
  * provider — keeps the "hooks always run in the same order" rule intact
  * (no hook runs conditionally; the early-return path below has none). */
@@ -215,6 +261,13 @@ interface ConnectedWalletProviderProps {
 function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProviderProps) {
   const [connection, setConnection] = useState<WalletConnection>({ status: "disconnected" });
   const [errorMessage, setErrorMessage] = useState<string>();
+  // Lets the wallet-event effect below (which intentionally only
+  // re-subscribes when chainConfig changes, not on every connection change)
+  // read the latest connection without re-registering EIP-1193 listeners.
+  const connectionRef = useRef(connection);
+  useEffect(() => {
+    connectionRef.current = connection;
+  }, [connection]);
 
   const connect = useCallback(async () => {
     setConnection({ status: "connecting" });
@@ -235,14 +288,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
         ydBalance: needsNetworkSwitch ? { status: "unavailable" } : { status: "loading" },
       });
       if (!needsNetworkSwitch) {
-        const ydBalance = await readYdBalance(provider, chainConfig, address);
-        setConnection((current) =>
-          current.status === "connected" &&
-          current.address === address &&
-          current.chainId === chainId
-            ? { ...current, ydBalance }
-            : current,
-        );
+        refreshYdBalance(setConnection, provider, chainConfig, address, chainId);
       }
     } catch (error) {
       setConnection({ status: "disconnected" });
@@ -288,13 +334,21 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
           `网络已添加，但钱包仍停留在原网络。请在 MetaMask 中手动切换到 ${chainConfig.name} 后重试。`,
         );
       }
-      const ydBalance = await readYdBalance(provider, chainConfig, connection.address);
-      setConnection({
-        status: "connected",
-        address: connection.address,
-        chainId: activeChainId,
-        ydBalance,
-      });
+      const switchedAddress = connection.address;
+      // Guarded, not an unconditional overwrite: if the user disconnected
+      // (or switched account) while this switch/add-chain round trip was in
+      // flight, this must not resurrect a stale "connected" state.
+      setConnection((current) =>
+        current.status === "connected" && current.address === switchedAddress
+          ? {
+              status: "connected",
+              address: switchedAddress,
+              chainId: activeChainId,
+              ydBalance: { status: "loading" },
+            }
+          : current,
+      );
+      refreshYdBalance(setConnection, provider, chainConfig, switchedAddress, activeChainId);
     } catch (error) {
       setErrorMessage(
         error instanceof ActionableWalletError
@@ -303,6 +357,68 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       );
     }
   }, [chainConfig, connection]);
+
+  // F-402: listen for account/network changes initiated *inside the wallet*
+  // (not through this app's own connect/switch buttons) — MetaMask's
+  // accountsChanged/chainChanged events — so the app's state can't silently
+  // diverge from the wallet's real state (AC-403's "界面反映新状态").
+  useEffect(() => {
+    const provider = typeof window === "undefined" ? undefined : window.ethereum;
+    if (!provider?.on) return;
+
+    const handleAccountsChanged = (payload: unknown) => {
+      const nextAddress =
+        Array.isArray(payload) && typeof payload[0] === "string"
+          ? (payload[0] as HexAddress)
+          : undefined;
+      const current = connectionRef.current;
+      // Only react if the app already had an active session — an
+      // accounts-changed event while never connected in-app has nothing to
+      // reconcile against.
+      if (current.status !== "connected") return;
+      if (!nextAddress) {
+        setConnection({ status: "disconnected" });
+        return;
+      }
+      if (nextAddress === current.address) return;
+      setConnection({
+        status: "connected",
+        address: nextAddress,
+        chainId: current.chainId,
+        ydBalance:
+          current.chainId === chainConfig.chainId
+            ? { status: "loading" }
+            : { status: "unavailable" },
+      });
+      if (current.chainId === chainConfig.chainId) {
+        refreshYdBalance(setConnection, provider, chainConfig, nextAddress, current.chainId);
+      }
+    };
+
+    const handleChainChanged = (payload: unknown) => {
+      const nextChainId = typeof payload === "string" ? Number.parseInt(payload, 16) : undefined;
+      const current = connectionRef.current;
+      if (nextChainId === undefined || current.status !== "connected") return;
+      if (nextChainId === current.chainId) return;
+      const matchesTarget = nextChainId === chainConfig.chainId;
+      setConnection({
+        status: "connected",
+        address: current.address,
+        chainId: nextChainId,
+        ydBalance: matchesTarget ? { status: "loading" } : { status: "unavailable" },
+      });
+      if (matchesTarget) {
+        refreshYdBalance(setConnection, provider, chainConfig, current.address, nextChainId);
+      }
+    };
+
+    provider.on("accountsChanged", handleAccountsChanged);
+    provider.on("chainChanged", handleChainChanged);
+    return () => {
+      provider.removeListener?.("accountsChanged", handleAccountsChanged);
+      provider.removeListener?.("chainChanged", handleChainChanged);
+    };
+  }, [chainConfig]);
 
   const address = connection.status === "connected" ? connection.address : undefined;
   const chainId = connection.status === "connected" ? connection.chainId : undefined;
