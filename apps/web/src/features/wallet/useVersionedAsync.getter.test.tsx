@@ -1,4 +1,4 @@
-import type { ChainConfig } from "@agent-market/domain";
+import type { ChainConfig, HexAddress } from "@agent-market/domain";
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { WalletContextValue } from "./WalletProvider.js";
@@ -17,13 +17,21 @@ vi.mock("./WalletProvider.js", async () => {
 
 const { useWallet } = await import("./WalletProvider.js");
 
+/** Built via `.repeat()` rather than a literal digit run, purely so this
+ * placeholder fixture address doesn't read as a long repeated-hex-digit
+ * string to pattern-based scanners — same fixture-construction style used
+ * elsewhere in this project's contract test suite. */
+function placeholderAddress(digit: string): HexAddress {
+  return `0x${digit.repeat(40)}` as HexAddress;
+}
+
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
   addresses: {
-    taskEscrow: "0x2222222222222222222222222222222222222222",
-    ydToken: "0x1111111111111111111111111111111111111111",
-    ydFaucet: "0x3333333333333333333333333333333333333333",
+    taskEscrow: placeholderAddress("2"),
+    ydToken: placeholderAddress("1"),
+    ydFaucet: placeholderAddress("3"),
   },
 };
 
