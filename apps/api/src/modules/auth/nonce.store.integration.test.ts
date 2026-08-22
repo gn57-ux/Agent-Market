@@ -9,7 +9,7 @@ import { findUserByAddress, recordLogin } from "./users.store.js";
 
 // See migrate.integration.test.ts's header comment: skipped unless a human
 // opts in with RUN_DB_INTEGRATION_TESTS=1 against a confirmed-safe
-// DATABASE_URL. This suite proves F-405 ("nonce 一次性使用") and the
+// TEST_DATABASE_URL. This suite proves F-405 ("nonce 一次性使用") and the
 // migration-runner's schema once opted into.
 const runIfOptedIn = process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
 

@@ -8,7 +8,12 @@
 -- nonce can both attempt the UPDATE, but only one will find a row still
 -- matching `consumed = false` thanks to Postgres row-level locking, and the
 -- second gets zero rows back.
-CREATE TABLE IF NOT EXISTS auth_nonces (
+--
+-- Deliberately no IF NOT EXISTS (see 0001_create_users.sql's comment for
+-- the full rationale — an already-existing, unverified `auth_nonces` table
+-- must fail the migration loudly, not be silently accepted and recorded as
+-- applied).
+CREATE TABLE auth_nonces (
   id BIGSERIAL PRIMARY KEY,
   address TEXT NOT NULL,
   nonce TEXT NOT NULL,

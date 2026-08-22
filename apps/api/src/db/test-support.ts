@@ -1,19 +1,36 @@
 /**
  * Shared guard for the two `*.integration.test.ts` suites, which run real
- * DDL/DML (including dropping tables in `afterAll`) against
- * `process.env.DATABASE_URL`. Both suites must call this — not construct
- * `pg.Pool` directly with `process.env.DATABASE_URL` — so "refuse to run
- * destructively without an explicit, confirmed target database" is single-
- * sourced here rather than reimplemented per suite (CLAUDE.md 原则 6).
+ * DDL/DML (including dropping tables in `afterAll`) against a real
+ * PostgreSQL database. Both suites must call this — not construct
+ * `pg.Pool` directly from an env var themselves — so "refuse to run
+ * destructively without an explicit, confirmed-safe target database" is
+ * single-sourced here rather than reimplemented per suite (CLAUDE.md 原则
+ * 6).
  *
- * Codex review (T-403 round 1, P1): the previous version let
- * `RUN_DB_INTEGRATION_TESTS=1` opt in without also requiring `DATABASE_URL`
- * — `pg` would then silently fall back to `PG*` env vars or a local Unix
- * socket default, meaning the destructive `afterAll` cleanup could hit
- * whatever database that fallback happened to resolve to. This throws
- * instead, so an operator who sets `RUN_DB_INTEGRATION_TESTS=1` without
- * `DATABASE_URL` gets a loud, explicit failure rather than a silent
- * connection to an unintended database.
+ * Codex review (T-403 round 1, P1): the original version let
+ * `RUN_DB_INTEGRATION_TESTS=1` opt in without also requiring an explicit
+ * connection string, so `pg` could silently fall back to `PG*` env vars or
+ * a local Unix socket default.
+ *
+ * Codex review (T-403 round 2, P1, still unresolved after round 1's fix):
+ * requiring `DATABASE_URL` specifically isn't enough either — this
+ * package's `vitest.config.ts` sets `envDir: "../../"`, which auto-loads
+ * the repo root `.env`. That file's whole purpose is to hold the app's
+ * normal, real `DATABASE_URL` (per `.env.example`'s documented convention)
+ * — so on any machine where a developer has that configured for actually
+ * running the API, opting into these tests via `RUN_DB_INTEGRATION_TESTS=1`
+ * alone would point the destructive `afterAll` DROP TABLE at that same
+ * real database, not a throwaway one.
+ *
+ * Fixed by requiring a SEPARATE `TEST_DATABASE_URL` env var, which nothing
+ * else in this project ever auto-populates — an operator has to set it
+ * deliberately and specifically for this purpose, so there is no path by
+ * which the app's ordinary dev-database configuration silently satisfies
+ * it. As a second, independent line of defense (not merely trusting the
+ * variable name), the target database's name itself must also look like a
+ * test database (see `isLikelyTestDatabaseName`) — catching the case where
+ * an operator points `TEST_DATABASE_URL` at the wrong database by copy-paste
+ * mistake.
  *
  * Callers must invoke this lazily (inside a `beforeAll`, not at
  * describe-body top level) — Vitest's `describe.skip` still executes the
@@ -22,16 +39,39 @@
  * genuinely opted in and about to run.
  */
 export function requireTestDatabaseUrl(): string {
-  const url = process.env.DATABASE_URL;
+  const url = process.env.TEST_DATABASE_URL;
   if (!url) {
     throw new Error(
-      "RUN_DB_INTEGRATION_TESTS=1 requires an explicit DATABASE_URL pointing at a " +
+      "RUN_DB_INTEGRATION_TESTS=1 requires an explicit TEST_DATABASE_URL pointing at a " +
         "database you have confirmed is safe to write to and have data dropped from " +
-        "(a local throwaway/test database, not a shared or production one). Refusing " +
-        "to fall back to pg's default connection resolution (PG* env vars or a local " +
-        "Unix socket), which could silently run destructive DDL against an unintended " +
-        "database.",
+        "(a dedicated local throwaway/test database — NOT this project's regular " +
+        "DATABASE_URL, even if you have that configured; that's your real dev database, " +
+        "and this suite will DROP TABLE against whatever it points at).",
+    );
+  }
+  const databaseName = parseDatabaseName(url);
+  if (!databaseName || !isLikelyTestDatabaseName(databaseName)) {
+    throw new Error(
+      `TEST_DATABASE_URL's database name ("${databaseName ?? "(unparseable)"}") doesn't look ` +
+        'like a dedicated test database (expected it to contain "test", e.g. ' +
+        '"agent_market_test"). Refusing to run destructive DDL against a database that ' +
+        "wasn't clearly named for this purpose — if this really is a disposable test " +
+        "database, rename it to make that unambiguous.",
     );
   }
   return url;
+}
+
+function parseDatabaseName(connectionString: string): string | undefined {
+  try {
+    const pathname = new URL(connectionString).pathname;
+    const name = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    return name || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isLikelyTestDatabaseName(databaseName: string): boolean {
+  return /test/i.test(databaseName);
 }

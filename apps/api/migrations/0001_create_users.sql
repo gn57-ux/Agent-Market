@@ -7,7 +7,17 @@
 -- produce two rows here. The CHECK constraint enforces that invariant at the
 -- data layer as a second line of defense against a caller that forgets to
 -- normalize.
-CREATE TABLE IF NOT EXISTS users (
+--
+-- Deliberately no IF NOT EXISTS here (Codex review, T-403 round 2, P2): the
+-- migration runner's own `schema_migrations` bookkeeping is what makes a
+-- re-run idempotent (see migrate.ts) — this statement running a second
+-- time for real would mean `schema_migrations` was desynced from the
+-- database's actual state, and a same-named table already existing then is
+-- exactly the case that must fail loudly rather than silently succeed:
+-- an unverified pre-existing `users` table could be missing this
+-- constraint, have different columns, or otherwise not match what every
+-- later Feature querying this table assumes.
+CREATE TABLE users (
   address TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_login_at TIMESTAMPTZ,

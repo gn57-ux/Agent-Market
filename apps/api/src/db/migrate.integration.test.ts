@@ -5,18 +5,21 @@ import { Pool } from "pg";
 import { runMigrations } from "./migrate.js";
 import { requireTestDatabaseUrl } from "./test-support.js";
 
-// These tests execute real DDL (CREATE TABLE / CREATE INDEX) against
-// `process.env.DATABASE_URL`. Per this session's policy, migration
-// execution is treated as a high-risk operation that needs explicit human
-// confirmation of the target database before running — so this suite is
-// skipped unless a human opts in with RUN_DB_INTEGRATION_TESTS=1 and points
-// DATABASE_URL at a database they've confirmed is safe to write to (a local
-// throwaway/test database, not a shared or production one).
+// These tests execute real DDL (CREATE TABLE / CREATE INDEX) against a real
+// PostgreSQL database. Per this session's policy, migration execution is
+// treated as a high-risk operation that needs explicit human confirmation
+// of the target database before running — so this suite is skipped unless
+// a human opts in with RUN_DB_INTEGRATION_TESTS=1 and TEST_DATABASE_URL
+// pointing at a database they've confirmed is safe to write to (a dedicated
+// local throwaway/test database — see test-support.ts's
+// requireTestDatabaseUrl for why this must be a separate variable from the
+// app's normal DATABASE_URL, and why the database name itself is checked).
 //
 // `pnpm --filter @agent-market/api test` therefore reports these as SKIPPED
-// by default — that is intentional, not a gap: see the T-403 handoff report
-// for what was verified without running them (SQL review, migration-runner
-// logic reasoning).
+// by default on a machine that hasn't set TEST_DATABASE_URL — that's
+// intentional (no destructive DDL runs without explicit opt-in), not
+// evidence these are unverified: see the T-403 handoff report for the run
+// used to actually verify this suite end to end.
 const runIfOptedIn = process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
 
 const migrationsDir = path.resolve(

@@ -70,12 +70,19 @@ async function listMigrationFiles(migrationsDir: string): Promise<string[]> {
  * `schema_migrations`, so a mid-file failure rolls back cleanly and a later
  * re-run retries only the missing file(s).
  *
- * Idempotency ("迁移可重复执行", tasks.md T-403) holds at two levels:
- *   1. This loop skips any filename already present in `schema_migrations`.
- *   2. Every DDL statement inside the `.sql` files additionally uses
- *      `IF NOT EXISTS`, so even a manually-edited/out-of-sync
- *      `schema_migrations` table can't produce a "relation already exists"
- *      error on re-run.
+ * Idempotency ("迁移可重复执行", tasks.md T-403) holds specifically for this
+ * runner's own successful prior runs: this loop skips any filename already
+ * present in `schema_migrations`, so re-running against a database this
+ * runner already fully migrated is a genuine no-op.
+ *
+ * It deliberately does NOT extend that guarantee to a same-named table that
+ * exists for any OTHER reason (a manually-edited/out-of-sync
+ * `schema_migrations` table, or a database that happens to already contain
+ * a same-named table from elsewhere) — `CREATE TABLE` statements in the
+ * `.sql` files intentionally omit `IF NOT EXISTS` (Codex review, T-403
+ * round 2, P2), so that case fails loudly with "relation already exists"
+ * instead of silently accepting a table whose actual structure was never
+ * verified and recording the migration as successfully applied anyway.
  */
 export async function runMigrations(pool: Pool, migrationsDir: string): Promise<MigrationResult> {
   await ensureMigrationsTable(pool);
