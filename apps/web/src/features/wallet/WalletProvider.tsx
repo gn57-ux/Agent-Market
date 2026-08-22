@@ -121,6 +121,17 @@ export interface WalletContextValue {
    * needs to appear in a dependency array to stay fresh).
    */
   getIdentityGeneration: () => number;
+  /**
+   * Requests a plain-text signature from the connected wallet (EIP-191
+   * personal_sign, via viem's `signMessage`) — the one place wallet-client
+   * construction for signing lives, so Feature 5's session/login module
+   * doesn't need to know how to talk to `window.ethereum` itself. Throws
+   * if no wallet is connected. Used for the backend's SIWE-style sign-in
+   * message (`/auth/nonce` → sign → `/auth/verify`, Feature 4's
+   * `signInMessage.ts`) — this function only performs the signature, it
+   * has no knowledge of that protocol.
+   */
+  signMessage: (message: string) => Promise<string>;
 }
 
 export interface WalletProviderProps {
@@ -458,6 +469,18 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
     }
   }, [chainConfig, connection]);
 
+  const signMessage = useCallback(
+    async (message: string): Promise<string> => {
+      if (connection.status !== "connected") {
+        throw new ActionableWalletError("请先连接 MetaMask 钱包，再签名登录。");
+      }
+      const provider = requireInjectedProvider();
+      const walletClient = createWalletClient({ transport: custom(provider) });
+      return walletClient.signMessage({ account: connection.address, message });
+    },
+    [connection],
+  );
+
   // F-402: listen for account/network changes initiated *inside the wallet*
   // (not through this app's own connect/switch buttons) — MetaMask's
   // accountsChanged/chainChanged events — so the app's state can't silently
@@ -590,6 +613,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       switchNetwork,
       identityGeneration: identityGenerationRef.current,
       getIdentityGeneration,
+      signMessage,
     }),
     [
       address,
@@ -601,6 +625,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       errorMessage,
       switchNetwork,
       getIdentityGeneration,
+      signMessage,
       // `connection` above already changes on every real identity
       // transition (each one has a corresponding `recordIdentityIfChanged`
       // call), so this recomputes whenever the generation could have

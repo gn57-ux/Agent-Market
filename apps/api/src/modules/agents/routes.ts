@@ -19,7 +19,11 @@ import {
 /** Shared response shape for both the list and detail endpoints (F-502).
  * `referencePrice` comes back from `pg` as a string (NUMERIC columns aren't
  * safely representable as JS `number`) — passed through as-is rather than
- * `Number()`-coerced, so a caller doesn't silently lose precision. */
+ * `Number()`-coerced, so a caller doesn't silently lose precision.
+ * `payoutAddress` is included (not secret — the owner's own public
+ * address, same visibility as `ownerAddress`) so T-505's edit page can
+ * pre-fill it; there is no `PATCH` that omits it from the form without a
+ * way to read the current value first. */
 function toAgentSummaryJson(agent: AgentRow) {
   return {
     agentId: agent.id,
@@ -30,6 +34,7 @@ function toAgentSummaryJson(agent: AgentRow) {
     skillTags: agent.skillTags,
     authorBio: agent.authorBio,
     invocationUrl: agent.invocationUrl,
+    payoutAddress: agent.payoutAddress,
     pricingModel: agent.pricingModel,
     referencePrice: agent.referencePrice,
     status: agent.status,

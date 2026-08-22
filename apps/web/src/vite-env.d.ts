@@ -5,6 +5,11 @@
 // falling back to vite/client's default `any`-ish ImportMetaEnv.
 interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
+  /** Must match apps/api's AUTH_DOMAIN (defaults to "localhost" on both
+   * sides) — embedded in the sign-in message the wallet signs; a mismatch
+   * makes every login attempt fail signature verification. See
+   * features/session/signInMessage.ts. */
+  readonly VITE_AUTH_DOMAIN?: string;
   readonly VITE_CHAIN_ID?: string;
   readonly VITE_WALLET_RPC_URL?: string;
   readonly VITE_DISPATCH_API_BASE_URL?: string;

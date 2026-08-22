@@ -201,6 +201,9 @@ runIfOptedIn("GET /agents, GET /agents/:agentId (integration, F-502)", () => {
     expect(body.successCount).toBe(0);
     expect(body.overdueCount).toBe(0);
     expect(body.qualityScore).toBeNull();
+    // T-505 needs this to pre-fill the edit form with the current payout
+    // address — regression for a response shape that originally omitted it.
+    expect(body.payoutAddress).toBe("0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3");
   });
 
   it("returns 404 for a well-formed but nonexistent agentId", async () => {

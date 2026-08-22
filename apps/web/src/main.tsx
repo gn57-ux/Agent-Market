@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { WalletProvider } from "./features/wallet/WalletProvider.js";
+import { SessionProvider } from "./features/session/SessionProvider.js";
 
 const container = document.getElementById("root");
 if (!container) {
@@ -11,7 +12,9 @@ if (!container) {
 createRoot(container).render(
   <StrictMode>
     <WalletProvider>
-      <App />
+      <SessionProvider>
+        <App />
+      </SessionProvider>
     </WalletProvider>
   </StrictMode>,
 );
