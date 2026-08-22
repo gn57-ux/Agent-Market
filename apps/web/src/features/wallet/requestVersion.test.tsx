@@ -106,7 +106,6 @@ describe("useRequestVersion", () => {
     fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
     const connectedAsA = await screen.findByRole("button", { name: "0x1234…7890" });
     const versionAfterA = screen.getByTestId("version").textContent;
-    expect(versionAfterA).toContain(ADDRESS_A);
 
     // Disconnect, then reconnect as a different address (simulates the user
     // switching MetaMask accounts and the app re-establishing connection).
@@ -118,7 +117,6 @@ describe("useRequestVersion", () => {
     await screen.findByRole("button", { name: "0x9876…3210" });
 
     const versionAfterB = screen.getByTestId("version").textContent;
-    expect(versionAfterB).toContain(ADDRESS_B);
     expect(versionAfterB).not.toBe(versionAfterA);
   });
 
@@ -156,15 +154,11 @@ describe("useRequestVersion", () => {
     fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
     await screen.findByText(/当前网络不正确/);
     const versionOnWrongChain = screen.getByTestId("version").textContent;
-    expect(versionOnWrongChain).toContain(String(WRONG_CHAIN_ID));
 
     fireEvent.click(screen.getByRole("button", { name: "切换网络" }));
     await waitFor(() =>
       expect(screen.getByTestId("version").textContent).not.toBe(versionOnWrongChain),
     );
-
-    const versionOnTargetChain = screen.getByTestId("version").textContent;
-    expect(versionOnTargetChain).toContain(String(TARGET_CHAIN.chainId));
   });
 });
 
@@ -191,6 +185,45 @@ describe("useVersionedAsync", () => {
     installWallet(ADDRESS_B, TARGET_CHAIN.chainId);
     fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
     await screen.findByRole("button", { name: "0x9876…3210" });
+
+    deferred.resolve("result-for-address-a");
+
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1));
+    expect(onSettled).toHaveBeenCalledWith(undefined);
+  });
+
+  it("discards a stale result even if the wallet round-trips back to the original address (ABA)", async () => {
+    // Regression for Codex review round 1 P2: a version derived only from
+    // (address, chainId) would treat A -> B -> A as "unchanged" by the time
+    // the request settles, incorrectly accepting a result that was issued
+    // against a since-superseded identity. The generation counter must
+    // treat this as stale even though the identity value coincides again.
+    installWallet(ADDRESS_A, TARGET_CHAIN.chainId);
+    const deferred = createDeferred<string>();
+    const onSettled = vi.fn();
+
+    render(
+      <WalletProvider chainConfig={TARGET_CHAIN}>
+        <WalletConnectionStatus />
+        <VersionedAsyncProbe deferred={deferred} onSettled={onSettled} />
+      </WalletProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    const connectedAsA = await screen.findByRole("button", { name: "0x1234…7890" });
+
+    fireEvent.click(screen.getByRole("button", { name: "start-async" }));
+
+    // Round-trip A -> B -> A, all before the async op settles.
+    fireEvent.click(connectedAsA);
+    installWallet(ADDRESS_B, TARGET_CHAIN.chainId);
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    const connectedAsB = await screen.findByRole("button", { name: "0x9876…3210" });
+
+    fireEvent.click(connectedAsB);
+    installWallet(ADDRESS_A, TARGET_CHAIN.chainId);
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x1234…7890" });
 
     deferred.resolve("result-for-address-a");
 

@@ -242,4 +242,26 @@ describe("WalletProvider", () => {
 
     expect(await screen.findByText(/当前网络不正确/)).toBeTruthy();
   });
+
+  it("composes an accountsChanged and a chainChanged event fired back-to-back in the same tick without dropping either update", async () => {
+    // Regression for Codex review round 1 P1: reading a ref synced by a
+    // separate effect could let the second handler in a same-tick batch
+    // overwrite the first handler's update with a stale snapshot. Both
+    // handlers must land when React composes the two functional updates.
+    const OTHER_ADDRESS = "0x9999999999999999999999999999999999999999" as const;
+    const OTHER_CHAIN_ID = 1;
+    const { emit } = installWallet(TARGET_CHAIN.chainId);
+    renderWallet();
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x1234…7890" });
+
+    // No `await` between these two: dispatched synchronously in one tick,
+    // exactly as a wallet emitting both events for one user action would.
+    emit("accountsChanged", [OTHER_ADDRESS]);
+    emit("chainChanged", `0x${OTHER_CHAIN_ID.toString(16)}`);
+
+    // Both updates must be reflected — the new address is NOT lost.
+    expect(await screen.findByRole("button", { name: "0x9999…9999" })).toBeTruthy();
+    expect(await screen.findByText(/当前网络不正确/)).toBeTruthy();
+  });
 });

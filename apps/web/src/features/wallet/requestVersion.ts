@@ -1,56 +1,76 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useRef } from "react";
 import { useWallet } from "./WalletProvider.js";
 
 /**
- * Opaque identity token for "which account+network was active when a
- * request started". Two tokens are only ever compared for equality, never
- * ordered or arithmetically combined — so this is a string key derived from
- * (address, chainId), not a numeric counter.
- *
- * Design call (two approaches considered, per project rule requiring a
- * comparison for new shared interfaces):
- *
- * 1. A `useRef` counter bumped by mutating the ref during render whenever
- *    (address, chainId) differs from the previous render's identity.
- *    Rejected: mutating a ref as a side effect of the render function body
- *    is unsound under concurrent React — a render can be started and then
- *    discarded (e.g. superseded by a higher-priority update) without ever
- *    committing, and a ref mutation is not rolled back with it. That would
- *    let the counter drift ahead of what was actually ever displayed,
- *    silently marking still-current requests as stale.
- * 2. Derive the identity as a pure, referentially-meaningless string key
- *    from the already-canonical (address, chainId) pair the WalletProvider
- *    context exposes, and update a ref that mirrors it from a `useEffect`
- *    (which React only runs after a render actually commits). No render-time
- *    side effects; the ref is always in sync with what was actually shown.
- *
- * Chose (2): it stays pure during render (matches React's rules), and needs
- * no ordering semantics — request-staleness only ever asks "is this the same
- * identity as when I started?", which a string key answers just as well as a
- * monotonic integer would, without the correctness risk in (1).
+ * Opaque "which wallet identity generation was active" token. Two tokens are
+ * only ever compared for equality by consumers, but internally this is a
+ * monotonically increasing generation counter, NOT a value derived solely
+ * from the current (address, chainId) pair — see the ABA note below for why
+ * that distinction matters.
  */
-export type RequestVersion = string;
+export type RequestVersion = number;
 
 const NO_ADDRESS = "disconnected";
 const NO_CHAIN = "unknown";
 
-function currentRequestVersion(
-  address: string | undefined,
-  chainId: number | undefined,
-): RequestVersion {
+function walletIdentityKey(address: string | undefined, chainId: number | undefined): string {
   return `${address ?? NO_ADDRESS}:${chainId ?? NO_CHAIN}`;
+}
+
+interface VersionState {
+  identityKey: string;
+  generation: RequestVersion;
 }
 
 /**
  * Returns a value that changes identity exactly when the connected wallet's
- * address or active chain changes. Consumers that need to compare versions
- * themselves (rather than use `useVersionedAsync` below) can depend on this
- * directly, e.g. in a `useEffect` dependency array to re-run a fetch, or by
- * capturing it in a closure and comparing later.
+ * address or active chain changes, and never repeats even if the wallet
+ * returns to a previously-seen (address, chainId) pair.
+ *
+ * Design call (two approaches considered, per project rule requiring a
+ * comparison for new shared interfaces):
+ *
+ * 1. A pure string key derived from `${address}:${chainId}` — two identical
+ *    pairs always compare equal. REJECTED after Codex review round 1
+ *    surfaced an ABA hazard: a request starts on (A, X), the wallet switches
+ *    to (B, Y) and back to (A, X) before the request settles, and the key
+ *    equals its start value again — `useVersionedAsync` would then treat an
+ *    objectively stale result (issued against an intervening, different
+ *    identity) as fresh. Acceptable for a single hand-rolled call site that
+ *    can reason about its own request shape, but this is a *shared*
+ *    primitive future Feature 5-10 consumers won't have that context for,
+ *    so silently reintroducing an ABA bug for them is not acceptable.
+ * 2. A monotonically increasing generation counter, bumped every time the
+ *    identity key changes (never reused, never revisited). Chosen: this
+ *    closes the ABA case structurally — going A→B→A produces generations
+ *    0→1→2, so a request started at generation 0 is correctly still
+ *    considered stale even after the wallet returns to address A.
+ *
+ * Synchronous-update note (also from Codex review round 1): the previous
+ * implementation synced a ref from a `useEffect`, which only flushes *after*
+ * commit — a promise already resolved and queued on the microtask queue can
+ * run before a deferred passive effect, so a request settling in that window
+ * would read the pre-switch version and incorrectly pass the staleness
+ * check. Fixed by mutating the ref synchronously in the render body instead.
+ * That is safe here specifically because `identityKey`/`generation` are
+ * derived only from `address`/`chainId`, which is itself already-committed
+ * WalletProvider context state for any given render (React always reads the
+ * latest committed state during render, even a later-discarded/speculative
+ * one) — so even a discarded render just recomputes the same generation a
+ * subsequent real render would, with no drift. This differs from mutating a
+ * ref that held independent, order-dependent history during render, which
+ * would be unsound under concurrent rendering.
  */
 export function useRequestVersion(): RequestVersion {
   const { address, chainId } = useWallet();
-  return currentRequestVersion(address, chainId);
+  const identityKey = walletIdentityKey(address, chainId);
+  const stateRef = useRef<VersionState>({ identityKey, generation: 0 });
+
+  if (stateRef.current.identityKey !== identityKey) {
+    stateRef.current = { identityKey, generation: stateRef.current.generation + 1 };
+  }
+
+  return stateRef.current.generation;
 }
 
 export interface VersionedAsync<T> {
@@ -59,9 +79,10 @@ export interface VersionedAsync<T> {
    * long-running work to bail out early. Regardless of whether `fn` checks
    * `isStale()` itself, the resolved value is only returned if the request's
    * version is still current when `fn` settles — if the wallet's account or
-   * network changed while `fn` was in flight, `run` resolves to `undefined`
-   * instead, so a stale result can never be applied to state that now
-   * represents a different account/network.
+   * network changed while `fn` was in flight (including an A→B→A round
+   * trip), `run` resolves to `undefined` instead, so a stale result can
+   * never be applied to state that now represents a different account or
+   * network, or that already moved on and back.
    */
   run(fn: (isStale: () => boolean) => Promise<T>): Promise<T | undefined>;
 }
@@ -101,15 +122,12 @@ export interface VersionedAsync<T> {
  * and it cannot be gotten wrong the way a hand-written comparison can.
  */
 export function useVersionedAsync<T>(): VersionedAsync<T> {
+  // Read synchronously during render (see useRequestVersion's doc comment
+  // for why this is safe): `version` always reflects the wallet identity
+  // generation as of this render's already-committed context state.
   const version = useRequestVersion();
   const versionRef = useRef(version);
-
-  // Sync the ref from a commit-phase effect, not during render: see the
-  // RequestVersion doc comment above for why a render-time mutation would
-  // be unsound under concurrent rendering.
-  useEffect(() => {
-    versionRef.current = version;
-  }, [version]);
+  versionRef.current = version;
 
   const run = useCallback(
     async (fn: (isStale: () => boolean) => Promise<T>): Promise<T | undefined> => {
