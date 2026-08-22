@@ -1,7 +1,14 @@
 import type { Pool } from "pg";
+import type { Queryable } from "../../db/pool.js";
 import { normalizeAddress } from "../auth/nonce.store.js";
-import { insertAgent, type AgentRow } from "./repository.js";
-import type { CreateAgentInput } from "./schema.js";
+import {
+  getAgentById,
+  insertAgent,
+  listAgents,
+  type AgentRow,
+  type ListAgentsResult,
+} from "./repository.js";
+import type { CreateAgentInput, ListAgentsQuery } from "./schema.js";
 
 /**
  * F-501/F-506: creates an Agent owned by `sessionAddress` (the caller's
@@ -40,4 +47,25 @@ export async function createAgent(
     referencePrice: input.referencePrice,
     skillTags,
   });
+}
+
+/** F-502: thin pass-through to the repository — pagination/filter parsing
+ * already happened in schema.ts, there's no ownership or default-value
+ * logic to apply for a read-only listing. */
+export async function listAgentsForMarket(
+  pool: Queryable,
+  query: ListAgentsQuery,
+): Promise<ListAgentsResult> {
+  return listAgents(pool, {
+    category: query.category,
+    skillTag: query.skillTag,
+    page: query.page,
+    pageSize: query.pageSize,
+  });
+}
+
+/** F-502/F-508: `null` when no Agent exists with this id — routes.ts turns
+ * that into a 404, this layer just reports absence. */
+export async function getAgentDetail(pool: Queryable, agentId: string): Promise<AgentRow | null> {
+  return getAgentById(pool, agentId);
 }

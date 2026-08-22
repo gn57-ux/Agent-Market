@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { Queryable } from "../../db/pool.js";
 
 export type AgentStatus = "ACTIVE" | "INACTIVE";
 
@@ -132,4 +133,86 @@ export async function insertAgent(pool: Pool, input: InsertAgentInput): Promise<
   } finally {
     client.release();
   }
+}
+
+export interface ListAgentsFilter {
+  category?: string;
+  skillTag?: string;
+  page: number;
+  pageSize: number;
+}
+
+export interface ListAgentsResult {
+  items: AgentRow[];
+  total: number;
+}
+
+interface AgentListQueryRow extends AgentQueryRow {
+  skill_tags: string[];
+  total_count: string;
+}
+
+/**
+ * F-502: paginated/filtered Agent listing. `total_count` comes from a
+ * `count(*) OVER()` window — computed after the `GROUP BY`/`WHERE`
+ * filtering and before `LIMIT`/`OFFSET`, so it's the true match count
+ * across all pages, not just the page returned. `skillTag` filters via an
+ * `EXISTS` subquery rather than joining on it directly, so the separate
+ * `LEFT JOIN agent_skills` used to collect each agent's full tag list isn't
+ * narrowed down to only the matching tag.
+ */
+export async function listAgents(
+  pool: Queryable,
+  filter: ListAgentsFilter,
+): Promise<ListAgentsResult> {
+  const offset = (filter.page - 1) * filter.pageSize;
+  const { rows } = await pool.query<AgentListQueryRow>(
+    `SELECT a.id, a.owner_address, a.name, a.description, a.category, a.author_bio,
+            a.invocation_url, a.payout_address, a.pricing_model, a.reference_price,
+            a.status, a.completed_task_count, a.success_count, a.overdue_count,
+            a.quality_score, a.created_at, a.updated_at,
+            COALESCE(
+              array_agg(s.skill_tag) FILTER (WHERE s.skill_tag IS NOT NULL),
+              '{}'
+            ) AS skill_tags,
+            count(*) OVER() AS total_count
+     FROM agents a
+     LEFT JOIN agent_skills s ON s.agent_id = a.id
+     WHERE ($1::text IS NULL OR a.category = $1)
+       AND (
+         $2::text IS NULL
+         OR EXISTS (
+           SELECT 1 FROM agent_skills s2 WHERE s2.agent_id = a.id AND s2.skill_tag = $2
+         )
+       )
+     GROUP BY a.id
+     ORDER BY a.created_at DESC
+     LIMIT $3 OFFSET $4`,
+    [filter.category ?? null, filter.skillTag ?? null, filter.pageSize, offset],
+  );
+
+  const items = rows.map((row) => toAgentRow(row, row.skill_tags));
+  const total = rows.length > 0 ? Number(rows[0]?.total_count) : 0;
+  return { items, total };
+}
+
+/** F-502/F-508: single Agent detail lookup, `null` if no such id exists. */
+export async function getAgentById(pool: Queryable, agentId: string): Promise<AgentRow | null> {
+  const { rows } = await pool.query<AgentQueryRow & { skill_tags: string[] }>(
+    `SELECT a.id, a.owner_address, a.name, a.description, a.category, a.author_bio,
+            a.invocation_url, a.payout_address, a.pricing_model, a.reference_price,
+            a.status, a.completed_task_count, a.success_count, a.overdue_count,
+            a.quality_score, a.created_at, a.updated_at,
+            COALESCE(
+              array_agg(s.skill_tag) FILTER (WHERE s.skill_tag IS NOT NULL),
+              '{}'
+            ) AS skill_tags
+     FROM agents a
+     LEFT JOIN agent_skills s ON s.agent_id = a.id
+     WHERE a.id = $1
+     GROUP BY a.id`,
+    [agentId],
+  );
+  const row = rows[0];
+  return row ? toAgentRow(row, row.skill_tags) : null;
 }

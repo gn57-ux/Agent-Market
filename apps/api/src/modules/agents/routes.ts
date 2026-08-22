@@ -1,16 +1,45 @@
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
-import { createAgent } from "./service.js";
-import { createAgentSchema } from "./schema.js";
+import type { AgentRow } from "./repository.js";
+import { createAgent, getAgentDetail, listAgentsForMarket } from "./service.js";
+import { agentIdParamSchema, createAgentSchema, listAgentsQuerySchema } from "./schema.js";
+
+/** Shared response shape for both the list and detail endpoints (F-502).
+ * `referencePrice` comes back from `pg` as a string (NUMERIC columns aren't
+ * safely representable as JS `number`) — passed through as-is rather than
+ * `Number()`-coerced, so a caller doesn't silently lose precision. */
+function toAgentSummaryJson(agent: AgentRow) {
+  return {
+    agentId: agent.id,
+    ownerAddress: agent.ownerAddress,
+    name: agent.name,
+    description: agent.description,
+    category: agent.category,
+    skillTags: agent.skillTags,
+    authorBio: agent.authorBio,
+    invocationUrl: agent.invocationUrl,
+    pricingModel: agent.pricingModel,
+    referencePrice: agent.referencePrice,
+    status: agent.status,
+    completedTaskCount: agent.completedTaskCount,
+    successCount: agent.successCount,
+    overdueCount: agent.overdueCount,
+    qualityScore: agent.qualityScore,
+    createdAt: agent.createdAt.toISOString(),
+    updatedAt: agent.updatedAt.toISOString(),
+  };
+}
 
 /**
- * Registers `POST /agents` (F-501). Must be added via `app.register(...)`
- * (see app.ts) rather than called directly after `buildApp()` returns:
- * `{ preHandler: app.requireSession }` depends on the `requireSession`
- * decorator that `registerSessionMiddleware` adds, and avvio only
- * guarantees that decorator exists once that plugin's own registration has
- * finished — the same boot-order constraint `session.middleware.ts`'s doc
- * comment describes.
+ * Registers the full F-501/F-502 Agent route surface. Wrapped in its own
+ * `app.register(...)` at the call site (see app.ts), not called directly
+ * after `buildApp()` returns: `POST /agents` uses `app.requireSession` as a
+ * preHandler, and that decorator is only guaranteed to exist once
+ * `registerSessionMiddleware`'s own registration has finished — see
+ * session.middleware.ts's doc comment. `GET /agents` and `GET
+ * /agents/:agentId` don't need a session (public Agent-market browsing,
+ * design.md's interface contract) but are registered here alongside POST
+ * for one discoverable module surface rather than splitting across files.
  */
 export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
   app.post("/agents", { preHandler: app.requireSession }, async (request, reply) => {
@@ -37,5 +66,33 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
       completedTaskCount: agent.completedTaskCount,
       qualityScore: agent.qualityScore,
     });
+  });
+
+  app.get("/agents", async (request, reply) => {
+    const parsed = listAgentsQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: { message: parsed.error.message } });
+    }
+
+    const { items, total } = await listAgentsForMarket(pool, parsed.data);
+    return reply.send({
+      items: items.map(toAgentSummaryJson),
+      total,
+      page: parsed.data.page,
+      pageSize: parsed.data.pageSize,
+    });
+  });
+
+  app.get("/agents/:agentId", async (request, reply) => {
+    const parsed = agentIdParamSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: { message: parsed.error.message } });
+    }
+
+    const agent = await getAgentDetail(pool, parsed.data.agentId);
+    if (!agent) {
+      return reply.status(404).send({ error: { message: "未找到该 Agent。" } });
+    }
+    return reply.send(toAgentSummaryJson(agent));
   });
 }

@@ -37,3 +37,25 @@ export const createAgentSchema = z.object({
 });
 
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
+
+/**
+ * F-502: `GET /agents` query params. `page`/`pageSize` arrive as strings
+ * (query strings have no native number type) — `z.coerce.number()` parses
+ * them, and `int().min(1)` rejects `0`, negative, or non-integer values
+ * rather than silently clamping them into something plausible-looking.
+ * `pageSize` is capped at 20 ("分页默认每页不超过 20 条", F-502) — this is a hard
+ * ceiling, not just the default, so a client can't request an unbounded
+ * page and defeat the point of pagination.
+ */
+export const listAgentsQuerySchema = z.object({
+  category: z.string().trim().min(1).max(100).optional(),
+  skillTag: z.string().trim().min(1).max(50).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(20).default(20),
+});
+
+export type ListAgentsQuery = z.infer<typeof listAgentsQuerySchema>;
+
+export const agentIdParamSchema = z.object({
+  agentId: z.string().uuid("agentId 必须是合法的 UUID"),
+});
