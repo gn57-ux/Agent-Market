@@ -91,4 +91,60 @@ describe("WalletProvider", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "连接钱包" })).toBeTruthy());
     expect(screen.queryByText(/当前网络：/)).toBeNull();
   });
+
+  it("shows a readable Chinese config error instead of crashing when chain config is invalid", () => {
+    // No chainConfig prop supplied: falls through to resolveChainConfig
+    // reading import.meta.env, which is unset in the test environment (no
+    // .env file at the repo root) and therefore throws inside the domain
+    // package — this must not propagate as an uncaught render exception.
+    render(
+      <WalletProvider>
+        <WalletConnectionStatus />
+      </WalletProvider>,
+    );
+
+    expect(screen.getByRole("alert").textContent).toContain("应用尚未正确配置链上参数");
+    expect(screen.queryByRole("button", { name: "连接钱包" })).toBeNull();
+  });
+
+  it("falls back to wallet_addEthereumChain when the wallet has not registered the target chain (4902)", async () => {
+    vi.stubEnv("VITE_WALLET_RPC_URL", "http://127.0.0.1:8545");
+    const wrongChainId = 1;
+    const addChain = vi.fn(async () => null);
+    const switchChain = vi.fn(async () => {
+      throw { code: 4902 };
+    });
+    const request = vi.fn(async ({ method, params }: { method: string; params?: unknown }) => {
+      if (method === "eth_requestAccounts") return [ADDRESS];
+      if (method === "eth_chainId") return `0x${wrongChainId.toString(16)}`;
+      if (method === "eth_call") {
+        const call = Array.isArray(params) ? params[0] : undefined;
+        const calldata =
+          typeof call === "object" &&
+          call !== null &&
+          "data" in call &&
+          typeof call.data === "string"
+            ? call.data
+            : "";
+        if (calldata.startsWith("0x313ce567")) return uint256Result(6n);
+        if (calldata.startsWith("0x70a08231")) return uint256Result(100_000_000n);
+      }
+      if (method === "wallet_switchEthereumChain") return switchChain();
+      if (method === "wallet_addEthereumChain") return addChain();
+      throw new Error(`Unexpected test RPC method: ${method}`);
+    });
+    window.ethereum = { request };
+
+    renderWallet();
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByText(/当前网络不正确/);
+
+    fireEvent.click(screen.getByRole("button", { name: "切换网络" }));
+
+    await waitFor(() => expect(addChain).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("当前网络：Local Hardhat")).toBeTruthy();
+    expect(await screen.findByText("YD 余额：100 YD")).toBeTruthy();
+
+    vi.unstubAllEnvs();
+  });
 });

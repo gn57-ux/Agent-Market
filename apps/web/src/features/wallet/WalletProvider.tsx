@@ -73,13 +73,30 @@ export interface WalletProviderProps {
 
 const WalletContext = createContext<WalletContextValue | undefined>(undefined);
 
-function resolveFrontendChainConfig(): ChainConfig {
-  return resolveChainConfig({
-    CHAIN_ID: import.meta.env.VITE_CHAIN_ID,
-    TASK_ESCROW_ADDRESS: import.meta.env.VITE_TASK_ESCROW_ADDRESS,
-    YD_TOKEN_ADDRESS: import.meta.env.VITE_YD_TOKEN_ADDRESS,
-    YD_FAUCET_ADDRESS: import.meta.env.VITE_YD_FAUCET_ADDRESS,
-  });
+class ActionableWalletError extends Error {}
+
+type ChainConfigResolution = { ok: true; config: ChainConfig } | { ok: false; message: string };
+
+/** Never throws: a misconfigured deployment (e.g. the zero-address
+ * placeholders shipped in .env.example) must surface as a readable Chinese
+ * message, not crash the whole app before any UI — including the wallet
+ * error UI itself — has a chance to render. */
+function resolveFrontendChainConfig(): ChainConfigResolution {
+  try {
+    const config = resolveChainConfig({
+      CHAIN_ID: import.meta.env.VITE_CHAIN_ID,
+      TASK_ESCROW_ADDRESS: import.meta.env.VITE_TASK_ESCROW_ADDRESS,
+      YD_TOKEN_ADDRESS: import.meta.env.VITE_YD_TOKEN_ADDRESS,
+      YD_FAUCET_ADDRESS: import.meta.env.VITE_YD_FAUCET_ADDRESS,
+    });
+    return { ok: true, config };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      message: `应用尚未正确配置链上参数（${detail}）。请检查 .env 中的 VITE_CHAIN_ID / VITE_TASK_ESCROW_ADDRESS / VITE_YD_TOKEN_ADDRESS / VITE_YD_FAUCET_ADDRESS 是否已填入真实部署地址。`,
+    };
+  }
 }
 
 function providerErrorCode(error: unknown): number | undefined {
@@ -98,10 +115,39 @@ function walletErrorMessage(error: unknown, operation: "connect" | "switch"): st
     : "网络切换失败。请在 MetaMask 中手动切换到目标网络后重试。";
 }
 
+/** MetaMask returns error code 4902 from wallet_switchEthereumChain when the
+ * target chain was never added to the wallet (common for a fresh install
+ * against the local Hardhat network). Falls back to wallet_addEthereumChain,
+ * which both registers and switches to it in one wallet-side confirmation. */
+async function addTargetChainToWallet(
+  provider: InjectedWalletProvider,
+  chainConfig: ChainConfig,
+): Promise<void> {
+  const rpcUrl = import.meta.env.VITE_WALLET_RPC_URL;
+  if (!rpcUrl) {
+    throw new ActionableWalletError(
+      "未配置 VITE_WALLET_RPC_URL，无法自动添加目标网络；请在 MetaMask 中手动添加后重试。",
+    );
+  }
+  await provider.request({
+    method: "wallet_addEthereumChain",
+    params: [
+      {
+        chainId: `0x${chainConfig.chainId.toString(16)}`,
+        chainName: chainConfig.name,
+        rpcUrls: [rpcUrl],
+        nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+      },
+    ],
+  });
+}
+
 function requireInjectedProvider(): InjectedWalletProvider {
   const provider = typeof window === "undefined" ? undefined : window.ethereum;
   if (!provider) {
-    throw new Error("未检测到 MetaMask。请先安装并启用 MetaMask 浏览器扩展，然后重试。");
+    throw new ActionableWalletError(
+      "未检测到 MetaMask。请先安装并启用 MetaMask 浏览器扩展，然后重试。",
+    );
   }
   return provider;
 }
@@ -135,11 +181,30 @@ async function readYdBalance(
   }
 }
 
+/** Resolves chain configuration and only then mounts the stateful wallet
+ * provider — keeps the "hooks always run in the same order" rule intact
+ * (no hook runs conditionally; the early-return path below has none). */
 export function WalletProvider({ children, chainConfig: configuredChain }: WalletProviderProps) {
-  const chainConfig = useMemo(
-    () => configuredChain ?? resolveFrontendChainConfig(),
+  const resolution = useMemo<ChainConfigResolution>(
+    () => (configuredChain ? { ok: true, config: configuredChain } : resolveFrontendChainConfig()),
     [configuredChain],
   );
+
+  if (!resolution.ok) {
+    return <div role="alert">{resolution.message}</div>;
+  }
+
+  return (
+    <ConnectedWalletProvider chainConfig={resolution.config}>{children}</ConnectedWalletProvider>
+  );
+}
+
+interface ConnectedWalletProviderProps {
+  children: ReactNode;
+  chainConfig: ChainConfig;
+}
+
+function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProviderProps) {
   const [connection, setConnection] = useState<WalletConnection>({ status: "disconnected" });
   const [errorMessage, setErrorMessage] = useState<string>();
 
@@ -151,7 +216,7 @@ export function WalletProvider({ children, chainConfig: configuredChain }: Walle
       const walletClient = createWalletClient({ transport: custom(provider) });
       const [address] = await walletClient.requestAddresses();
       if (!address) {
-        throw new Error("MetaMask 未返回可用账户。请在钱包中选择一个账户后重试。");
+        throw new ActionableWalletError("MetaMask 未返回可用账户。请在钱包中选择一个账户后重试。");
       }
       const chainId = await walletClient.getChainId();
       const needsNetworkSwitch = chainId !== chainConfig.chainId;
@@ -174,7 +239,7 @@ export function WalletProvider({ children, chainConfig: configuredChain }: Walle
     } catch (error) {
       setConnection({ status: "disconnected" });
       setErrorMessage(
-        error instanceof Error && error.message.startsWith("未检测到")
+        error instanceof ActionableWalletError
           ? error.message
           : walletErrorMessage(error, "connect"),
       );
@@ -194,10 +259,17 @@ export function WalletProvider({ children, chainConfig: configuredChain }: Walle
     setErrorMessage(undefined);
     try {
       const provider = requireInjectedProvider();
-      await provider.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: `0x${chainConfig.chainId.toString(16)}` }],
-      });
+      try {
+        await provider.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: `0x${chainConfig.chainId.toString(16)}` }],
+        });
+      } catch (switchError) {
+        if (providerErrorCode(switchError) !== 4902) throw switchError;
+        // Target chain isn't registered in the wallet yet (fresh MetaMask
+        // install against local Hardhat, most commonly) — register it.
+        await addTargetChainToWallet(provider, chainConfig);
+      }
       const ydBalance = await readYdBalance(provider, chainConfig, connection.address);
       setConnection({
         status: "connected",
@@ -206,7 +278,11 @@ export function WalletProvider({ children, chainConfig: configuredChain }: Walle
         ydBalance,
       });
     } catch (error) {
-      setErrorMessage(walletErrorMessage(error, "switch"));
+      setErrorMessage(
+        error instanceof ActionableWalletError
+          ? error.message
+          : walletErrorMessage(error, "switch"),
+      );
     }
   }, [chainConfig, connection]);
 
