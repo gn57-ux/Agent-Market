@@ -184,6 +184,17 @@ runIfOptedIn("POST /agents (integration, AC-501/AC-502/AC-504)", () => {
     expect(response.statusCode).toBe(400);
   });
 
+  it("rejects a non-http(s) invocationUrl scheme (Codex round 1 P2, stored-XSS risk)", async () => {
+    const token = await login();
+    const response = await app.inject({
+      method: "POST",
+      url: "/agents",
+      cookies: { session_token: token },
+      payload: { ...VALID_PAYLOAD, invocationUrl: "javascript:alert(1)" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
   it("rejects an overlong description (AC-504)", async () => {
     const token = await login();
     const response = await app.inject({

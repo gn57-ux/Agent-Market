@@ -20,7 +20,17 @@ export const createAgentSchema = z.object({
   category: z.string().trim().min(1, "分类不能为空").max(100),
   skillTags: z.array(SKILL_TAG_SCHEMA).max(20).default([]),
   authorBio: z.string().trim().max(2000).optional(),
-  invocationUrl: z.string().trim().url("调用地址必须是合法 URL").max(2000).optional(),
+  // Restricted to http(s) (Codex review, T-502 round 1, P2): this is a
+  // plain display field (design.md — "仅作为展示字段"), but an unrestricted
+  // URL scheme (e.g. `javascript:`) stored here would become a stored-XSS
+  // vector the moment T-505's frontend renders it as a clickable link.
+  invocationUrl: z
+    .string()
+    .trim()
+    .url("调用地址必须是合法 URL")
+    .max(2000)
+    .refine((value) => /^https?:\/\//i.test(value), "调用地址必须是 http(s) URL")
+    .optional(),
   payoutAddress: ETH_ADDRESS_SCHEMA,
   pricingModel: z.string().trim().max(100).optional(),
   referencePrice: z.number().finite().nonnegative().optional(),
