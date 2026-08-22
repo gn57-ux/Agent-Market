@@ -52,11 +52,16 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     // regardless of whether there's anything to parse — a bodyless POST
     // (activateAgent/deactivateAgent, /auth/logout) that still claimed
     // "application/json" made Fastify reject an empty body as invalid
-    // JSON, a 400 before the request ever reached the route handler. The
-    // caller's own `init.headers` still wins over this default (spread
-    // last), so an explicit override is unaffected.
+    // JSON, a 400 before the request ever reached the route handler.
+    // `!= null` (not `!== undefined`) — Codex review, T-505 round 2, P2:
+    // `RequestInit.body` also accepts an explicit `null`, which is just as
+    // bodyless as an omitted body and must be treated the same way; no
+    // current call site passes `body: null`, but the check should be
+    // correct for the type it's actually checking, not just today's
+    // callers. The caller's own `init.headers` still wins over this
+    // default (spread last), so an explicit override is unaffected.
     headers: {
-      ...(init?.body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(init?.body != null ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },
   });

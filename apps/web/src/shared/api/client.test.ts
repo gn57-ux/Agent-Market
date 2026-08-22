@@ -48,6 +48,17 @@ describe("apiFetch — Content-Type header", () => {
     expect(headers.get("Content-Type")).toBe("application/json");
   });
 
+  it("does not set Content-Type when body is explicitly null (Codex round 2 P2)", async () => {
+    // RequestInit.body accepts an explicit null — just as bodyless as an
+    // omitted body, and the same Fastify rejection applies if this were
+    // ever mistakenly treated as "a body is present."
+    const fetchMock = stubFetchOk();
+    await apiFetch("/agents/some-id/deactivate", { method: "POST", body: null });
+
+    const headers = new Headers(lastCallInit(fetchMock).headers);
+    expect(headers.has("Content-Type")).toBe(false);
+  });
+
   it("lets a caller-supplied Content-Type override the default", async () => {
     const fetchMock = stubFetchOk();
     await apiFetch("/agents", {
