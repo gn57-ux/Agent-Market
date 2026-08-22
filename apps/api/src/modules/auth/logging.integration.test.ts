@@ -63,7 +63,17 @@ runIfOptedIn(
         url: "/auth/nonce",
         payload: { address: account.address },
       });
+      // Codex review (T-406 P2): without these, a regression that made
+      // /auth/verify start failing would leave sessionToken `undefined`,
+      // and `not.toContain(undefined)` would still pass trivially — the
+      // test would stay green without ever actually completing the login
+      // it claims to log, silently no longer testing anything. Each step
+      // must be proven to have actually succeeded with a real value before
+      // the log-content assertions below mean anything.
+      expect(nonceResponse.statusCode).toBe(200);
       const { nonce, issuedAt, expiresAt } = nonceResponse.json();
+      expect(typeof nonce).toBe("string");
+      expect(nonce.length).toBeGreaterThan(0);
 
       const message = buildSignInMessage({
         domain: "localhost",
@@ -79,13 +89,17 @@ runIfOptedIn(
         url: "/auth/verify",
         payload: { address: account.address, signature, nonce },
       });
+      expect(verifyResponse.statusCode).toBe(200);
       const { sessionToken } = verifyResponse.json();
+      expect(typeof sessionToken).toBe("string");
+      expect(sessionToken.length).toBeGreaterThan(0);
 
-      await app.inject({
+      const logoutResponse = await app.inject({
         method: "POST",
         url: "/auth/logout",
         headers: { cookie: `session_token=${sessionToken}` },
       });
+      expect(logoutResponse.statusCode).toBe(200);
 
       await app.close();
       const logText = Buffer.concat(captured).toString("utf8");
