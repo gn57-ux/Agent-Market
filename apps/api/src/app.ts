@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { getPool } from "./db/pool.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
+import { registerSessionMiddleware } from "./modules/auth/session.middleware.js";
 
 export interface BuildAppOptions {
   /** Test seam: pass a Pool bound to a throwaway test database instead of
@@ -32,6 +33,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   void app.register(cors, { origin: webOrigin(), credentials: true });
   void app.register(cookie);
+  void app.register(registerSessionMiddleware, { pool });
 
   app.get("/health", async () => {
     return { status: "ok" };

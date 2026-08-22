@@ -20,11 +20,6 @@ export interface IssuedSession {
 
 /**
  * Issues a new session for `address` after a successful `/auth/verify`.
- * Only `sessions` (this module's own scope). Validating a presented token
- * or revoking a session (`/auth/logout` + the protected-route middleware
- * design.md assigns to T-405) is deliberately not implemented here — this
- * module only needs to ISSUE sessions for T-404's own scope; T-405 owns
- * consuming what this table stores.
  *
  * Design call (two approaches considered, per project rule requiring a
  * comparison for a new shared data model):
@@ -62,4 +57,47 @@ export async function issueSession(pool: Queryable, rawAddress: string): Promise
     throw new Error("issueSession: INSERT ... RETURNING produced no row");
   }
   return { token, address, issuedAt: row.issued_at, expiresAt: row.expires_at };
+}
+
+export interface VerifiedSession {
+  address: string;
+  issuedAt: Date;
+  expiresAt: Date;
+}
+
+/**
+ * Verifies a presented bearer token: valid iff a session row exists whose
+ * hash matches, that hasn't expired, and hasn't been revoked. T-405's
+ * `session.middleware.ts` is the only intended caller — this is the "当前
+ * 登录地址" lookup design.md says every later Feature's protected route
+ * depends on (CLAUDE.md 原则 6: 设计知识只能有一个归属 — no route handler
+ * anywhere should query `sessions` directly).
+ */
+export async function verifySession(
+  pool: Queryable,
+  rawToken: string,
+): Promise<VerifiedSession | null> {
+  const tokenHash = hashToken(rawToken);
+  const { rows } = await pool.query<{ address: string; issued_at: Date; expires_at: Date }>(
+    `SELECT address, issued_at, expires_at FROM sessions
+     WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()`,
+    [tokenHash],
+  );
+  const row = rows[0];
+  return row ? { address: row.address, issuedAt: row.issued_at, expiresAt: row.expires_at } : null;
+}
+
+/**
+ * Revokes a session (F-404 `/auth/logout`, AC-404). Idempotent — revoking
+ * an already-revoked, expired, or unknown token is not an error (logout is
+ * inherently "make sure this session can't be used again"; a token that
+ * already can't be used satisfies that whether or not this UPDATE actually
+ * matched a row, so routes.ts doesn't need to branch on the result).
+ */
+export async function revokeSession(pool: Queryable, rawToken: string): Promise<void> {
+  const tokenHash = hashToken(rawToken);
+  await pool.query(
+    `UPDATE sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`,
+    [tokenHash],
+  );
 }

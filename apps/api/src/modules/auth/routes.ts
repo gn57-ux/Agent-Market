@@ -1,10 +1,14 @@
 import type { ErrorCode } from "@agent-market/domain";
+import type { CookieSerializeOptions } from "@fastify/cookie";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { completeLogin } from "./completeLogin.js";
 import { getActiveNonce, issueNonce } from "./nonce.store.js";
 import { nonceRequestSchema, verifyRequestSchema } from "./schema.js";
 import { buildSignInMessage, verifySignInSignature } from "./signInMessage.js";
+import { revokeSession } from "./session.service.js";
+
+const SESSION_COOKIE_NAME = "session_token";
 
 /** Domain field embedded in the sign-in message (F-404, design.md). Not
  * secret, just an anti-phishing binding (the same purpose EIP-4361's
@@ -33,6 +37,13 @@ function cookieShouldBeSecure(): boolean {
   return process.env.COOKIE_INSECURE_LOCAL_DEV !== "1";
 }
 
+/** `path` must match between `setCookie` and `clearCookie` for the browser
+ * to actually recognize them as the same cookie — shared here so
+ * `/auth/logout` can't drift from `/auth/verify`'s own setCookie call. */
+function sessionCookiePath(): Pick<CookieSerializeOptions, "path"> {
+  return { path: "/" };
+}
+
 // Typed against @agent-market/domain's ErrorCode (the PRD §11.4 single
 // source of truth for domain error codes) so a rename/removal there fails
 // this file to typecheck rather than silently drifting. Basic request-shape
@@ -42,10 +53,11 @@ function cookieShouldBeSecure(): boolean {
 const WALLET_SIGNATURE_INVALID: ErrorCode = "WALLET_SIGNATURE_INVALID";
 
 /**
- * Registers F-404's two login-flow routes. `/auth/logout` + the
- * session-validating middleware other Features will use is T-405's scope,
- * not this Task's — see session.service.ts's doc comment for why issuing a
- * session doesn't require having built revocation/verification yet.
+ * Registers the full F-404/F-405 auth route surface: `/auth/nonce`,
+ * `/auth/verify` (login), and `/auth/logout` (session revocation). The
+ * session-validating middleware other Features (5-10) attach to their own
+ * protected routes is registered separately — see
+ * `session.middleware.ts`'s `registerSessionMiddleware`.
  */
 export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
   app.post("/auth/nonce", async (request, reply) => {
@@ -117,13 +129,26 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
     }
     const session = result.session;
 
-    reply.setCookie("session_token", session.token, {
+    reply.setCookie(SESSION_COOKIE_NAME, session.token, {
       httpOnly: true,
       secure: cookieShouldBeSecure(),
       sameSite: "lax",
-      path: "/",
+      ...sessionCookiePath(),
       expires: session.expiresAt,
     });
     return reply.send({ sessionToken: session.token, address: session.address });
+  });
+
+  app.post("/auth/logout", async (request, reply) => {
+    // Idempotent by design (see revokeSession's doc comment): logging out
+    // with no cookie, an already-expired cookie, or an already-revoked one
+    // all end at the same place — "this session cannot be used again" is
+    // already true, so there's nothing to branch on or fail here.
+    const token = request.cookies[SESSION_COOKIE_NAME];
+    if (token) {
+      await revokeSession(pool, token);
+    }
+    reply.clearCookie(SESSION_COOKIE_NAME, sessionCookiePath());
+    return reply.send({ ok: true });
   });
 }
