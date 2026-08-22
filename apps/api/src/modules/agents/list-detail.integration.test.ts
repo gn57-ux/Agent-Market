@@ -132,6 +132,19 @@ runIfOptedIn("GET /agents, GET /agents/:agentId (integration, F-502)", () => {
     expect(new Set(allIds).size).toBe(5);
   });
 
+  it("reports the true total even when the requested page is beyond the last populated page (Codex round 1 P2)", async () => {
+    const token = await login();
+    for (let i = 0; i < 3; i += 1) {
+      await createAgent(token, { name: `Agent ${i}` });
+    }
+
+    const response = await app.inject({ method: "GET", url: "/agents?page=99&pageSize=2" });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.items).toHaveLength(0);
+    expect(body.total).toBe(3);
+  });
+
   it("rejects a pageSize above the 20-item ceiling", async () => {
     const response = await app.inject({ method: "GET", url: "/agents?pageSize=21" });
     expect(response.statusCode).toBe(400);

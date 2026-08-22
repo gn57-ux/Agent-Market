@@ -149,50 +149,71 @@ export interface ListAgentsResult {
 
 interface AgentListQueryRow extends AgentQueryRow {
   skill_tags: string[];
-  total_count: string;
 }
 
 /**
  * F-502: paginated/filtered Agent listing. `total_count` comes from a
  * `count(*) OVER()` window — computed after the `GROUP BY`/`WHERE`
- * filtering and before `LIMIT`/`OFFSET`, so it's the true match count
- * across all pages, not just the page returned. `skillTag` filters via an
- * `EXISTS` subquery rather than joining on it directly, so the separate
- * `LEFT JOIN agent_skills` used to collect each agent's full tag list isn't
- * narrowed down to only the matching tag.
+ * filtering and before `LIMIT`/`OFFSET` — but only for the rows the query
+ * actually returns (Codex review, T-503 round 1, P2): a `page` beyond the
+ * last populated page returns zero rows, and a `count(*) OVER()` computed
+ * from zero rows is itself 0, silently misreporting a nonzero true total.
+ * The total is therefore counted in a separate query using the same
+ * filters, independent of the page/offset applied to the items query.
+ * `skillTag` filters via an `EXISTS` subquery rather than joining on it
+ * directly, so the separate `LEFT JOIN agent_skills` used to collect each
+ * agent's full tag list isn't narrowed down to only the matching tag.
+ *
+ * Ordered by `created_at DESC, id DESC` (Codex review, T-503 round 1, P2):
+ * ordering by `created_at` alone is not deterministic when two agents share
+ * the same timestamp (achievable at this table's timestamp resolution under
+ * concurrent inserts), which can duplicate or skip rows across separate
+ * page requests under `LIMIT`/`OFFSET`. `id` is a `gen_random_uuid()`
+ * primary key, unique by construction, so appending it as a tie-breaker
+ * makes the ordering — and therefore the pagination — deterministic.
  */
 export async function listAgents(
   pool: Queryable,
   filter: ListAgentsFilter,
 ): Promise<ListAgentsResult> {
   const offset = (filter.page - 1) * filter.pageSize;
-  const { rows } = await pool.query<AgentListQueryRow>(
-    `SELECT a.id, a.owner_address, a.name, a.description, a.category, a.author_bio,
-            a.invocation_url, a.payout_address, a.pricing_model, a.reference_price,
-            a.status, a.completed_task_count, a.success_count, a.overdue_count,
-            a.quality_score, a.created_at, a.updated_at,
-            COALESCE(
-              array_agg(s.skill_tag) FILTER (WHERE s.skill_tag IS NOT NULL),
-              '{}'
-            ) AS skill_tags,
-            count(*) OVER() AS total_count
-     FROM agents a
-     LEFT JOIN agent_skills s ON s.agent_id = a.id
-     WHERE ($1::text IS NULL OR a.category = $1)
-       AND (
-         $2::text IS NULL
-         OR EXISTS (
-           SELECT 1 FROM agent_skills s2 WHERE s2.agent_id = a.id AND s2.skill_tag = $2
-         )
-       )
-     GROUP BY a.id
-     ORDER BY a.created_at DESC
-     LIMIT $3 OFFSET $4`,
-    [filter.category ?? null, filter.skillTag ?? null, filter.pageSize, offset],
-  );
+  const filterParams = [filter.category ?? null, filter.skillTag ?? null];
+  const filterWhere = `
+    WHERE ($1::text IS NULL OR a.category = $1)
+      AND (
+        $2::text IS NULL
+        OR EXISTS (
+          SELECT 1 FROM agent_skills s2 WHERE s2.agent_id = a.id AND s2.skill_tag = $2
+        )
+      )
+  `;
 
-  const items = rows.map((row) => toAgentRow(row, row.skill_tags));
-  const total = rows.length > 0 ? Number(rows[0]?.total_count) : 0;
+  const [itemsResult, countResult] = await Promise.all([
+    pool.query<AgentListQueryRow>(
+      `SELECT a.id, a.owner_address, a.name, a.description, a.category, a.author_bio,
+              a.invocation_url, a.payout_address, a.pricing_model, a.reference_price,
+              a.status, a.completed_task_count, a.success_count, a.overdue_count,
+              a.quality_score, a.created_at, a.updated_at,
+              COALESCE(
+                array_agg(s.skill_tag) FILTER (WHERE s.skill_tag IS NOT NULL),
+                '{}'
+              ) AS skill_tags
+       FROM agents a
+       LEFT JOIN agent_skills s ON s.agent_id = a.id
+       ${filterWhere}
+       GROUP BY a.id
+       ORDER BY a.created_at DESC, a.id DESC
+       LIMIT $3 OFFSET $4`,
+      [...filterParams, filter.pageSize, offset],
+    ),
+    pool.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM agents a ${filterWhere}`,
+      filterParams,
+    ),
+  ]);
+
+  const items = itemsResult.rows.map((row) => toAgentRow(row, row.skill_tags));
+  const total = Number(countResult.rows[0]?.total ?? "0");
   return { items, total };
 }
 
