@@ -165,7 +165,7 @@ runIfOptedIn(
       expect(response.statusCode).toBe(401);
     });
 
-    it("deactivates then reactivates an Agent, filterable via GET /agents (AC-505)", async () => {
+    it("deactivates then reactivates an Agent, excludable via GET /agents?status=ACTIVE (AC-505)", async () => {
       const token = await login(owner);
       const agentId = await createAgent(token);
 
@@ -177,11 +177,26 @@ runIfOptedIn(
       expect(deactivate.statusCode).toBe(200);
       expect(deactivate.json().status).toBe("INACTIVE");
 
-      const listAfterDeactivate = await app.inject({ method: "GET", url: "/agents" });
-      const foundInactive = listAfterDeactivate
+      // Unfiltered listing still shows it (its status is reported as-is,
+      // not hidden) — the actual exclusion is via the status query param.
+      const unfiltered = await app.inject({ method: "GET", url: "/agents" });
+      const foundUnfiltered = unfiltered
         .json()
         .items.find((a: { agentId: string }) => a.agentId === agentId);
-      expect(foundInactive?.status).toBe("INACTIVE");
+      expect(foundUnfiltered?.status).toBe("INACTIVE");
+
+      // AC-505: filtering by status=ACTIVE excludes the deactivated Agent.
+      const activeOnly = await app.inject({ method: "GET", url: "/agents?status=ACTIVE" });
+      const foundInActiveOnly = activeOnly
+        .json()
+        .items.find((a: { agentId: string }) => a.agentId === agentId);
+      expect(foundInActiveOnly).toBeUndefined();
+      expect(activeOnly.json().total).toBe(0);
+
+      // Symmetrically, status=INACTIVE finds exactly this Agent.
+      const inactiveOnly = await app.inject({ method: "GET", url: "/agents?status=INACTIVE" });
+      expect(inactiveOnly.json().total).toBe(1);
+      expect(inactiveOnly.json().items[0]?.agentId).toBe(agentId);
 
       const activate = await app.inject({
         method: "POST",
@@ -190,6 +205,17 @@ runIfOptedIn(
       });
       expect(activate.statusCode).toBe(200);
       expect(activate.json().status).toBe("ACTIVE");
+
+      // Reactivated: now shows up under status=ACTIVE again.
+      const activeOnlyAfterReactivate = await app.inject({
+        method: "GET",
+        url: "/agents?status=ACTIVE",
+      });
+      expect(
+        activeOnlyAfterReactivate
+          .json()
+          .items.some((a: { agentId: string }) => a.agentId === agentId),
+      ).toBe(true);
     });
 
     it("rejects deactivate from a non-owner session (AC-505)", async () => {

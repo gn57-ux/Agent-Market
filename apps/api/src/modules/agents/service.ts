@@ -87,6 +87,7 @@ export async function listAgentsForMarket(
   return listAgents(pool, {
     category: query.category,
     skillTag: query.skillTag,
+    status: query.status,
     page: query.page,
     pageSize: query.pageSize,
   });

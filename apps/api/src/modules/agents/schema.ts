@@ -50,6 +50,11 @@ export type CreateAgentInput = z.infer<typeof createAgentSchema>;
 export const listAgentsQuerySchema = z.object({
   category: z.string().trim().min(1).max(100).optional(),
   skillTag: z.string().trim().min(1).max(50).optional(),
+  // AC-505: "停用的 Agent 通过 GET /agents 可被状态筛选排除" — omitted entirely
+  // (the default), the listing is unfiltered by status (matches T-503's
+  // existing behavior); a caller passing status=ACTIVE excludes INACTIVE
+  // Agents (Codex review, T-504 round 1, P1: this was missing entirely).
+  status: z.enum(["ACTIVE", "INACTIVE"]).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(20).default(20),
 });

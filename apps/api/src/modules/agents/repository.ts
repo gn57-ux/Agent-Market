@@ -138,6 +138,7 @@ export async function insertAgent(pool: Pool, input: InsertAgentInput): Promise<
 export interface ListAgentsFilter {
   category?: string;
   skillTag?: string;
+  status?: AgentStatus;
   page: number;
   pageSize: number;
 }
@@ -171,13 +172,19 @@ interface AgentListQueryRow extends AgentQueryRow {
  * page requests under `LIMIT`/`OFFSET`. `id` is a `gen_random_uuid()`
  * primary key, unique by construction, so appending it as a tie-breaker
  * makes the ordering — and therefore the pagination — deterministic.
+ *
+ * `status` filters to exactly `ACTIVE` or `INACTIVE` when provided
+ * (AC-505: "停用的 Agent 通过 GET /agents 可被状态筛选排除" — Codex review, T-504
+ * round 1, P1: this filter didn't exist at all until this fix); omitted,
+ * the listing is unfiltered by status, matching this endpoint's original
+ * T-503 behavior.
  */
 export async function listAgents(
   pool: Queryable,
   filter: ListAgentsFilter,
 ): Promise<ListAgentsResult> {
   const offset = (filter.page - 1) * filter.pageSize;
-  const filterParams = [filter.category ?? null, filter.skillTag ?? null];
+  const filterParams = [filter.category ?? null, filter.skillTag ?? null, filter.status ?? null];
   const filterWhere = `
     WHERE ($1::text IS NULL OR a.category = $1)
       AND (
@@ -186,6 +193,7 @@ export async function listAgents(
           SELECT 1 FROM agent_skills s2 WHERE s2.agent_id = a.id AND s2.skill_tag = $2
         )
       )
+      AND ($3::text IS NULL OR a.status = $3)
   `;
 
   const [itemsResult, countResult] = await Promise.all([
@@ -203,7 +211,7 @@ export async function listAgents(
        ${filterWhere}
        GROUP BY a.id
        ORDER BY a.created_at DESC, a.id DESC
-       LIMIT $3 OFFSET $4`,
+       LIMIT $4 OFFSET $5`,
       [...filterParams, filter.pageSize, offset],
     ),
     pool.query<{ total: string }>(
