@@ -43,7 +43,25 @@ export interface CreateAgentInput {
   referencePrice?: number;
 }
 
-export type UpdateAgentInput = Partial<CreateAgentInput>;
+/**
+ * `PATCH /agents/:agentId` body. Distinct from `Partial<CreateAgentInput>`
+ * in one way, matching apps/api's `updateAgentSchema`: the optional fields
+ * also accept an explicit `null` to mean "clear this field," distinct from
+ * `undefined` ("don't change it"). AgentForm.ts's `agentFormValuesToInput`
+ * is what actually decides which of the three (value / null / omitted) a
+ * blank form field becomes.
+ */
+export interface UpdateAgentInput {
+  name?: string;
+  description?: string;
+  category?: string;
+  skillTags?: string[];
+  authorBio?: string | null;
+  invocationUrl?: string | null;
+  payoutAddress?: string;
+  pricingModel?: string | null;
+  referencePrice?: number | null;
+}
 
 export interface ListAgentsParams {
   category?: string;

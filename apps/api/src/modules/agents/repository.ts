@@ -250,11 +250,13 @@ export interface UpdateAgentInput {
   name?: string;
   description?: string;
   category?: string;
-  authorBio?: string;
-  invocationUrl?: string;
+  /** `undefined` = don't change; `null` = clear (see schema.ts's
+   * updateAgentSchema doc comment for why this distinction exists). */
+  authorBio?: string | null;
+  invocationUrl?: string | null;
   payoutAddress?: string;
-  pricingModel?: string;
-  referencePrice?: number;
+  pricingModel?: string | null;
+  referencePrice?: number | null;
   skillTags?: string[];
 }
 

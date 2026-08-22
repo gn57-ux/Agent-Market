@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useSession } from "../session/SessionProvider.js";
 import { SignInButton } from "../session/SignInButton.js";
 import { AgentForm, agentFormValuesFromAgent } from "./AgentForm.js";
-import { getAgent, updateAgent, type Agent, type CreateAgentInput } from "./api.js";
+import { getAgent, updateAgent, type Agent, type UpdateAgentInput } from "./api.js";
 import { ApiError } from "../../shared/api/client.js";
 
 type LoadState =
@@ -44,7 +44,7 @@ export function AgentEditPage() {
     };
   }, [agentId]);
 
-  async function handleSubmit(agent: Agent, input: CreateAgentInput) {
+  async function handleSubmit(agent: Agent, input: UpdateAgentInput) {
     setPending(true);
     setSubmitError(undefined);
     try {
@@ -73,6 +73,7 @@ export function AgentEditPage() {
       ) : (
         <AgentForm
           initialValues={agentFormValuesFromAgent(agent)}
+          originalValues={agentFormValuesFromAgent(agent)}
           submitLabel="保存"
           pending={pending}
           errorMessage={submitError}

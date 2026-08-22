@@ -111,6 +111,47 @@ runIfOptedIn(
       expect(body.skillTags).toEqual(["copywriting"]);
     });
 
+    it("clears an optional field via explicit null, distinct from omitting it (Codex round 1 P2)", async () => {
+      const token = await login(owner);
+      const agentId = await createAgent(token);
+
+      const setValue = await app.inject({
+        method: "PATCH",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+        payload: { authorBio: "A real bio", pricingModel: "per-task", referencePrice: 12.5 },
+      });
+      expect(setValue.statusCode).toBe(200);
+      expect(setValue.json().authorBio).toBe("A real bio");
+
+      // Omitting a field entirely must NOT clear it — this PATCH only
+      // touches `name`, so authorBio/pricingModel/referencePrice must
+      // survive untouched.
+      const unrelatedEdit = await app.inject({
+        method: "PATCH",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+        payload: { name: "Still Has A Bio" },
+      });
+      expect(unrelatedEdit.json().authorBio).toBe("A real bio");
+      expect(unrelatedEdit.json().pricingModel).toBe("per-task");
+
+      const clear = await app.inject({
+        method: "PATCH",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+        payload: { authorBio: null, pricingModel: null, referencePrice: null },
+      });
+      expect(clear.statusCode).toBe(200);
+      const body = clear.json();
+      expect(body.authorBio).toBeNull();
+      expect(body.pricingModel).toBeNull();
+      expect(body.referencePrice).toBeNull();
+      // name from the previous PATCH must still be intact — clearing other
+      // fields must not reset unrelated columns.
+      expect(body.name).toBe("Still Has A Bio");
+    });
+
     it("replaces the full skillTags set when provided", async () => {
       const token = await login(owner);
       const agentId = await createAgent(token);

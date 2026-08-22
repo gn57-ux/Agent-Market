@@ -5,32 +5,93 @@ import {
   agentFormValuesFromAgent,
   agentFormValuesToInput,
   emptyAgentFormValues,
+  toCreateAgentInput,
 } from "./AgentForm.js";
 
 describe("agentFormValuesToInput", () => {
   it("splits and trims the comma-separated skill tags field", () => {
     const values = { ...emptyAgentFormValues(), skillTagsText: " copywriting ,editing,, seo " };
-    expect(agentFormValuesToInput(values).skillTags).toEqual(["copywriting", "editing", "seo"]);
+    expect(agentFormValuesToInput(values, emptyAgentFormValues()).skillTags).toEqual([
+      "copywriting",
+      "editing",
+      "seo",
+    ]);
   });
 
-  it("omits optional fields left blank rather than sending empty strings", () => {
+  it("create mode (diffing against an empty baseline): a blank optional field is omitted, never null", () => {
     const values = emptyAgentFormValues();
-    const input = agentFormValuesToInput(values);
+    const input = agentFormValuesToInput(values, emptyAgentFormValues());
     expect(input.authorBio).toBeUndefined();
     expect(input.invocationUrl).toBeUndefined();
     expect(input.pricingModel).toBeUndefined();
     expect(input.referencePrice).toBeUndefined();
   });
 
-  it("parses referencePriceText into a number only when non-blank", () => {
+  it("edit mode: a field unchanged from the original is omitted (undefined), not resent", () => {
+    const original = {
+      ...emptyAgentFormValues(),
+      authorBio: "Same bio",
+      referencePriceText: "9.99",
+    };
+    const values = { ...original };
+    const input = agentFormValuesToInput(values, original);
+    expect(input.authorBio).toBeUndefined();
+    expect(input.referencePrice).toBeUndefined();
+  });
+
+  it("edit mode: clearing a previously-set field sends explicit null, not undefined or empty string (Codex round 1 P2)", () => {
+    const original = { ...emptyAgentFormValues(), authorBio: "Had a bio", pricingModel: "flat" };
+    const values = { ...original, authorBio: "", pricingModel: "  " };
+    const input = agentFormValuesToInput(values, original);
+    expect(input.authorBio).toBeNull();
+    expect(input.pricingModel).toBeNull();
+  });
+
+  it("edit mode: changing a field to a new value sends that value", () => {
+    const original = { ...emptyAgentFormValues(), authorBio: "Old bio" };
+    const values = { ...original, authorBio: "New bio" };
+    expect(agentFormValuesToInput(values, original).authorBio).toBe("New bio");
+  });
+
+  it("referencePrice: unchanged text is never re-parsed through Number(), preserving precision (Codex round 1 P2)", () => {
+    // A precision-losing value: Number() would round this, but since the
+    // text is unchanged from the original, it must never be parsed at all.
+    const highPrecisionText = "0.100000000000000000001";
+    const original = {
+      ...emptyAgentFormValues(),
+      referencePriceText: highPrecisionText,
+      name: "Old",
+    };
+    const values = { ...original, name: "New Name" }; // only name changed
+    const input = agentFormValuesToInput(values, original);
+    expect(input.referencePrice).toBeUndefined();
+    expect(input.name).toBe("New Name");
+  });
+
+  it("referencePrice: clearing it sends null; changing it sends the parsed number", () => {
+    const original = { ...emptyAgentFormValues(), referencePriceText: "10" };
     expect(
-      agentFormValuesToInput({ ...emptyAgentFormValues(), referencePriceText: "12.5" })
-        .referencePrice,
+      agentFormValuesToInput({ ...original, referencePriceText: "" }, original).referencePrice,
+    ).toBeNull();
+    expect(
+      agentFormValuesToInput({ ...original, referencePriceText: "12.5" }, original).referencePrice,
     ).toBe(12.5);
-    expect(
-      agentFormValuesToInput({ ...emptyAgentFormValues(), referencePriceText: "  " })
-        .referencePrice,
-    ).toBeUndefined();
+  });
+});
+
+describe("toCreateAgentInput", () => {
+  it("maps null/undefined optional fields to undefined for the create request", () => {
+    const input = toCreateAgentInput({
+      name: "N",
+      description: "D",
+      category: "C",
+      skillTags: ["a"],
+      authorBio: null,
+      payoutAddress: "0xabc",
+    });
+    expect(input.authorBio).toBeUndefined();
+    expect(input.name).toBe("N");
+    expect(input.payoutAddress).toBe("0xabc");
   });
 });
 
@@ -54,7 +115,7 @@ describe("agentFormValuesFromAgent", () => {
 });
 
 describe("AgentForm", () => {
-  it("submits the converted input when the form is filled and submitted", () => {
+  it("submits the converted input when the form is filled and submitted (create mode, no originalValues)", () => {
     const onSubmit = vi.fn();
     render(
       <AgentForm
@@ -82,6 +143,36 @@ describe("AgentForm", () => {
         payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
       }),
     );
+  });
+
+  it("edit mode: submits null for a field the user clears", () => {
+    const onSubmit = vi.fn();
+    const original = agentFormValuesFromAgent({
+      name: "Existing",
+      description: "d",
+      category: "c",
+      skillTags: [],
+      authorBio: "Had a bio",
+      invocationUrl: null,
+      payoutAddress: "0xabc",
+      pricingModel: null,
+      referencePrice: null,
+    });
+    render(
+      <AgentForm
+        initialValues={original}
+        originalValues={original}
+        submitLabel="保存"
+        pending={false}
+        errorMessage={undefined}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("作者介绍"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ authorBio: null }));
   });
 
   it("shows the error message and disables the submit button while pending", () => {

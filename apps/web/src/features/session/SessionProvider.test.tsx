@@ -1,6 +1,7 @@
 import type { ChainConfig } from "@agent-market/domain";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getAddress } from "viem";
 import { WalletConnectionStatus, WalletProvider } from "../wallet/WalletProvider.js";
 import { SessionProvider, useSession } from "./SessionProvider.js";
 
@@ -139,6 +140,28 @@ describe("SessionProvider", () => {
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
     await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_in"));
     expect(screen.getByTestId("address").textContent).toBe(ADDRESS);
+  });
+
+  it("stores the signed-in address lowercased, matching how apps/api returns ownerAddress (Codex round 1 P1)", async () => {
+    // A wallet reports an EIP-55 checksummed (mixed-case) address; the API
+    // always normalizes to lowercase. AgentDetailPage/AgentEditPage's
+    // ownership check (`session.address === agent.ownerAddress`) would
+    // silently fail for the real owner if this weren't normalized here.
+    const checksummedAddress = getAddress(
+      `0xabcdefabcdefabcdefabcdefabcdefabcdefabcd`,
+    ) as `0x${string}`;
+    expect(checksummedAddress).not.toBe(checksummedAddress.toLowerCase());
+
+    stubAuthFetch(checksummedAddress);
+    mockWalletProvider({ value: checksummedAddress });
+    renderHarness();
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByTitle(checksummedAddress);
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+
+    await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_in"));
+    expect(screen.getByTestId("address").textContent).toBe(checksummedAddress.toLowerCase());
   });
 
   it("logout clears the signed-in state and calls POST /auth/logout", async () => {

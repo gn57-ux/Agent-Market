@@ -92,7 +92,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         method: "POST",
         body: JSON.stringify({ address, signature, nonce: nonceResponse.nonce }),
       });
-      setSignedInAddress(address);
+      // Codex review (T-505 round 1, P1): the wallet returns an EIP-55
+      // checksummed (mixed-case) address, but apps/api always normalizes
+      // ownerAddress to lowercase (nonce.store.ts's normalizeAddress) before
+      // returning it. AgentDetailPage/AgentEditPage compare
+      // `session.address === agent.ownerAddress` with strict equality —
+      // storing the checksummed form here would make that comparison fail
+      // for any address containing uppercase hex digits, hiding the
+      // edit/activate/deactivate controls from the actual owner. Normalize
+      // here, once, at the session boundary, matching what the API returns.
+      setSignedInAddress(address.toLowerCase() as HexAddress);
       setStatus("signed_in");
     } catch (error) {
       setStatus("error");
@@ -119,7 +128,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // new address needs its own login. Does not call /auth/logout: the old
   // session is simply no longer what this UI is acting as.
   useEffect(() => {
-    if (status === "signed_in" && wallet.address !== signedInAddress) {
+    // Compare lowercased on both sides: `signedInAddress` is always
+    // lowercase (see login() above) but `wallet.address` is whatever
+    // casing the wallet itself reports (typically EIP-55 checksummed) — a
+    // naive strict comparison would treat "still the same account" as a
+    // switch on every render, immediately signing the user back out.
+    if (status === "signed_in" && wallet.address?.toLowerCase() !== signedInAddress) {
       setSignedInAddress(undefined);
       setStatus("signed_out");
     }

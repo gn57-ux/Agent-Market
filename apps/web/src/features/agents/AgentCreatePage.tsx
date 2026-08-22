@@ -2,8 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSession } from "../session/SessionProvider.js";
 import { SignInButton } from "../session/SignInButton.js";
-import { AgentForm, emptyAgentFormValues } from "./AgentForm.js";
-import { createAgent, type CreateAgentInput } from "./api.js";
+import { AgentForm, emptyAgentFormValues, toCreateAgentInput } from "./AgentForm.js";
+import { createAgent, type UpdateAgentInput } from "./api.js";
 import { ApiError } from "../../shared/api/client.js";
 
 export function AgentCreatePage() {
@@ -12,11 +12,11 @@ export function AgentCreatePage() {
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | undefined>(undefined);
 
-  async function handleSubmit(input: CreateAgentInput) {
+  async function handleSubmit(input: UpdateAgentInput) {
     setPending(true);
     setErrorMessage(undefined);
     try {
-      const created = await createAgent(input);
+      const created = await createAgent(toCreateAgentInput(input));
       navigate(`/agents/${created.agentId}`);
     } catch (error) {
       setErrorMessage(error instanceof ApiError ? error.message : "创建失败，请重试。");
