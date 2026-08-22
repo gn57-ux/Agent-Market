@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentMarketPage } from "./AgentMarketPage.js";
@@ -85,5 +85,77 @@ describe("AgentMarketPage", () => {
     );
 
     expect(await screen.findByText("暂无符合条件的 Agent。")).toBeTruthy();
+  });
+
+  it("defaults to status=ACTIVE and shows an explicit status chip on each card (real browser walkthrough, T-505 P1 reachability)", async () => {
+    const listAgentsMock = vi.spyOn(agentsApi, "listAgents").mockResolvedValue({
+      items: [makeAgent({ status: "ACTIVE" })],
+      total: 1,
+      page: 1,
+      pageSize: 20,
+    });
+
+    render(
+      <MemoryRouter>
+        <AgentMarketPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("Copy Polisher");
+    expect(listAgentsMock).toHaveBeenCalledWith(expect.objectContaining({ status: "ACTIVE" }));
+    const card = screen.getByRole("article");
+    expect(within(card).getByText("启用中")).toBeTruthy();
+  });
+
+  it("switching to the '已停用' filter re-fetches with status=INACTIVE and shows the deactivated status on the card", async () => {
+    const listAgentsMock = vi.spyOn(agentsApi, "listAgents").mockResolvedValue({
+      items: [makeAgent({ status: "INACTIVE" })],
+      total: 1,
+      page: 1,
+      pageSize: 20,
+    });
+
+    render(
+      <MemoryRouter>
+        <AgentMarketPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText("Copy Polisher");
+
+    fireEvent.click(screen.getByRole("button", { name: "已停用" }));
+
+    await waitFor(() =>
+      expect(listAgentsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: "INACTIVE" }),
+      ),
+    );
+    const card = screen.getByRole("article");
+    expect(within(card).getByText("已停用")).toBeTruthy();
+  });
+
+  it("switching to the '全部' filter re-fetches with no status param at all", async () => {
+    const listAgentsMock = vi.spyOn(agentsApi, "listAgents").mockResolvedValue({
+      items: [
+        makeAgent({ status: "ACTIVE" }),
+        makeAgent({ agentId: "agent-2", name: "Bug Triager", status: "INACTIVE" }),
+      ],
+      total: 2,
+      page: 1,
+      pageSize: 20,
+    });
+
+    render(
+      <MemoryRouter>
+        <AgentMarketPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText("Copy Polisher");
+
+    fireEvent.click(screen.getByRole("button", { name: "全部" }));
+
+    await waitFor(() => {
+      const lastCall = listAgentsMock.mock.calls.at(-1)?.[0];
+      expect(lastCall?.status).toBeUndefined();
+    });
   });
 });

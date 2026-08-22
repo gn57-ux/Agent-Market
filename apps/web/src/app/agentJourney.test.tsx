@@ -357,6 +357,29 @@ describe("Agent registration journey (AC-501 automated substitute — see file h
     const stored = [...store.values()][0];
     expect(stored?.status).toBe("INACTIVE");
     expect(stored?.name).toBe("Renamed Agent");
+
+    // Real browser walkthrough, T-505 P1 (reachability): a deactivated
+    // Agent must be findable again through normal navigation, not just
+    // browser back/forward or a hand-typed URL. The "已停用" filter is that
+    // path — reaching the detail page from here and reactivating is the
+    // only supported way back to ACTIVE.
+    fireEvent.click(screen.getByRole("button", { name: "已停用" }));
+    fireEvent.click(await screen.findByRole("link", { name: "Renamed Agent" }));
+    await screen.findByRole("heading", { level: 1, name: "Renamed Agent" });
+    expect(screen.getByText("已停用")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "启用" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认启用？" }));
+    await waitFor(() => expect(screen.getByText("启用中")).toBeTruthy());
+    expect(store.get(stored?.agentId ?? "")?.status).toBe("ACTIVE");
+
+    // Reactivated: gone from "已停用", back in the default ACTIVE view.
+    goToAgentMarket();
+    fireEvent.click(screen.getByRole("button", { name: "已停用" }));
+    await waitFor(() => expect(screen.getByText("暂无符合条件的 Agent。")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "启用中" }));
+    expect(await screen.findByText("Renamed Agent")).toBeTruthy();
   });
 
   it("a non-owner session sees no edit/deactivate controls on someone else's Agent detail page", async () => {
