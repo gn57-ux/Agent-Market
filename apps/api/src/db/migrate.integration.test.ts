@@ -35,25 +35,35 @@ runIfOptedIn("runMigrations (integration)", () => {
   });
 
   afterAll(async () => {
-    await pool.query("DROP TABLE IF EXISTS auth_nonces, users, schema_migrations CASCADE");
+    await pool.query(
+      "DROP TABLE IF EXISTS sessions, auth_nonces, users, schema_migrations CASCADE",
+    );
     await pool.end();
   });
 
   it("applies all migrations on first run", async () => {
     const result = await runMigrations(pool, migrationsDir);
-    expect(result.applied).toEqual(["0001_create_users.sql", "0002_create_auth_nonces.sql"]);
+    expect(result.applied).toEqual([
+      "0001_create_users.sql",
+      "0002_create_auth_nonces.sql",
+      "0003_create_sessions.sql",
+    ]);
     expect(result.alreadyApplied).toEqual([]);
 
     const { rows } = await pool.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables
-       WHERE table_schema = 'public' AND table_name IN ('users', 'auth_nonces')`,
+       WHERE table_schema = 'public' AND table_name IN ('users', 'auth_nonces', 'sessions')`,
     );
-    expect(rows.map((row) => row.table_name).sort()).toEqual(["auth_nonces", "users"]);
+    expect(rows.map((row) => row.table_name).sort()).toEqual(["auth_nonces", "sessions", "users"]);
   });
 
   it("is a no-op / does not fail when run again (idempotent)", async () => {
     const result = await runMigrations(pool, migrationsDir);
     expect(result.applied).toEqual([]);
-    expect(result.alreadyApplied).toEqual(["0001_create_users.sql", "0002_create_auth_nonces.sql"]);
+    expect(result.alreadyApplied).toEqual([
+      "0001_create_users.sql",
+      "0002_create_auth_nonces.sql",
+      "0003_create_sessions.sql",
+    ]);
   });
 });

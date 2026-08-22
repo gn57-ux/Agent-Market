@@ -29,7 +29,9 @@ runIfOptedIn("nonce.store (integration)", () => {
   });
 
   afterAll(async () => {
-    await pool.query("DROP TABLE IF EXISTS auth_nonces, users, schema_migrations CASCADE");
+    await pool.query(
+      "DROP TABLE IF EXISTS sessions, auth_nonces, users, schema_migrations CASCADE",
+    );
     await pool.end();
   });
 

@@ -93,6 +93,40 @@ export async function issueNonce(pool: Pool, rawAddress: string): Promise<Issued
   }
 }
 
+export interface ActiveNonce {
+  address: string;
+  nonce: string;
+  issuedAt: Date;
+  expiresAt: Date;
+}
+
+/**
+ * Non-consuming lookup of a still-valid (unconsumed, unexpired) nonce.
+ * T-404's `/auth/verify` needs this to reconstruct the exact message the
+ * wallet was asked to sign (which embeds `issuedAt`/`expiresAt`) BEFORE
+ * deciding whether the signature is valid — `consumeNonce` alone can't
+ * serve that purpose, since verifying the signature has to happen first
+ * (a request with an invalid signature must not burn the nonce, so a
+ * legitimate client can still retry with a correct one). The actual
+ * one-time-use enforcement remains `consumeNonce`'s atomic UPDATE, called
+ * only after a signature built from this lookup verifies — this function
+ * itself provides no replay protection by itself.
+ */
+export async function getActiveNonce(
+  pool: Pool,
+  rawAddress: string,
+  nonce: string,
+): Promise<ActiveNonce | null> {
+  const address = normalizeAddress(rawAddress);
+  const { rows } = await pool.query<{ issued_at: Date; expires_at: Date }>(
+    `SELECT issued_at, expires_at FROM auth_nonces
+     WHERE address = $1 AND nonce = $2 AND consumed = false AND expires_at > now()`,
+    [address, nonce],
+  );
+  const row = rows[0];
+  return row ? { address, nonce, issuedAt: row.issued_at, expiresAt: row.expires_at } : null;
+}
+
 export type ConsumeNonceResult =
   { ok: true } | { ok: false; reason: "not_found" | "already_consumed" | "expired" };
 
