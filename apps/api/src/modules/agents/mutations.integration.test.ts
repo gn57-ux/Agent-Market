@@ -311,3 +311,130 @@ runIfOptedIn(
     });
   },
 );
+
+/**
+ * `app.inject()` (used throughout this file above) never sends a
+ * Content-Type header unless a payload is given — so it could never have
+ * reproduced the real bug found in T-505's manual browser walkthrough:
+ * apps/web's apiFetch was sending Content-Type: application/json on EVERY
+ * request, including bodyless POSTs like activate/deactivate, and Fastify
+ * rejects an empty body under that content-type as invalid JSON — a 400
+ * before the route handler ever ran. This suite starts the real app
+ * listening on a real TCP port and issues actual `fetch()` calls (real
+ * HTTP, not Fastify's in-process injection) to prove Fastify's actual
+ * behavior for both the broken and the fixed request shape, against a
+ * real database.
+ */
+runIfOptedIn("activate/deactivate over real HTTP (integration, T-505 P1 regression)", () => {
+  let pool: Pool;
+  let app: ReturnType<typeof buildApp>;
+  let baseUrl: string;
+  const owner = privateKeyToAccount(generatePrivateKey());
+
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: requireTestDatabaseUrl() });
+    await runMigrations(pool, migrationsDir);
+    app = buildApp({ pool });
+    const address = await app.listen({ port: 0, host: "127.0.0.1" });
+    baseUrl = address;
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await pool.query(
+      "DROP TABLE IF EXISTS agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+    );
+    await pool.end();
+  });
+
+  afterEach(async () => {
+    await pool.query("DELETE FROM agent_skills");
+    await pool.query("DELETE FROM agents");
+    await pool.query("DELETE FROM sessions");
+    await pool.query("DELETE FROM auth_nonces");
+    await pool.query("DELETE FROM users");
+  });
+
+  async function loginOverHttp(): Promise<string> {
+    const nonceResponse = await fetch(`${baseUrl}/auth/nonce`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address: owner.address }),
+    });
+    const { nonce, issuedAt, expiresAt } = await nonceResponse.json();
+    const message = buildSignInMessage({
+      domain: "localhost",
+      address: owner.address,
+      nonce,
+      issuedAt: new Date(issuedAt),
+      expiresAt: new Date(expiresAt),
+    });
+    const signature = await owner.signMessage({ message });
+    const verifyResponse = await fetch(`${baseUrl}/auth/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address: owner.address, signature, nonce }),
+    });
+    const setCookie = verifyResponse.headers.get("set-cookie");
+    const match = /session_token=([^;]+)/.exec(String(setCookie));
+    if (!match?.[1]) throw new Error("no session_token cookie in verify response");
+    return match[1];
+  }
+
+  async function createAgentOverHttp(cookie: string): Promise<string> {
+    const response = await fetch(`${baseUrl}/agents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie: `session_token=${cookie}` },
+      body: JSON.stringify({
+        name: "HTTP Test Agent",
+        description: "desc",
+        category: "writing",
+        skillTags: ["copywriting"],
+        payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+      }),
+    });
+    const body = await response.json();
+    return body.agentId;
+  }
+
+  it("reproduces the exact browser bug: Content-Type: application/json with no body is rejected before the route runs", async () => {
+    const cookie = await loginOverHttp();
+    const agentId = await createAgentOverHttp(cookie);
+
+    const response = await fetch(`${baseUrl}/agents/${agentId}/deactivate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie: `session_token=${cookie}` },
+    });
+    // This is Fastify's real rejection — the same one the browser
+    // walkthrough hit — not this project's own error shape, confirming the
+    // request never reached the agents route at all.
+    expect(response.status).toBe(400);
+  });
+
+  it("activate/deactivate succeed over real HTTP when no Content-Type is sent for the bodyless request (the fix)", async () => {
+    const cookie = await loginOverHttp();
+    const agentId = await createAgentOverHttp(cookie);
+
+    const deactivateResponse = await fetch(`${baseUrl}/agents/${agentId}/deactivate`, {
+      method: "POST",
+      headers: { cookie: `session_token=${cookie}` },
+    });
+    expect(deactivateResponse.status).toBe(200);
+    expect((await deactivateResponse.json()).status).toBe("INACTIVE");
+
+    const activeOnlyList = await fetch(`${baseUrl}/agents?status=ACTIVE`, {
+      headers: { cookie: `session_token=${cookie}` },
+    });
+    const activeOnlyBody = await activeOnlyList.json();
+    expect(activeOnlyBody.items.some((a: { agentId: string }) => a.agentId === agentId)).toBe(
+      false,
+    );
+
+    const activateResponse = await fetch(`${baseUrl}/agents/${agentId}/activate`, {
+      method: "POST",
+      headers: { cookie: `session_token=${cookie}` },
+    });
+    expect(activateResponse.status).toBe(200);
+    expect((await activateResponse.json()).status).toBe("ACTIVE");
+  });
+});

@@ -130,22 +130,16 @@ beforeEach(async () => {
     return updated;
   });
 
-  vi.spyOn(agentsApi, "deactivateAgent").mockImplementation(async (agentId) => {
-    const row = store.get(agentId);
-    if (!row) throw new ApiError(404, "未找到该 Agent。");
-    const updated = { ...row, status: "INACTIVE" as const };
-    store.set(agentId, updated);
-    return updated;
-  });
-
-  vi.spyOn(agentsApi, "activateAgent").mockImplementation(async (agentId) => {
-    const row = store.get(agentId);
-    if (!row) throw new ApiError(404, "未找到该 Agent。");
-    const updated = { ...row, status: "ACTIVE" as const };
-    store.set(agentId, updated);
-    return updated;
-  });
-
+  // activateAgent/deactivateAgent are deliberately NOT mocked at the api.ts
+  // level (Codex/browser-walkthrough regression, T-505 P1): the real bug —
+  // apiFetch always sending Content-Type: application/json even for a
+  // bodyless POST, which apps/api's Fastify rejects as a 400 before the
+  // route handler ever runs — lives inside apiFetch itself. Mocking
+  // agentsApi.activateAgent/deactivateAgent directly (as every other
+  // agentsApi function here still is) would bypass apiFetch entirely and
+  // could never have caught this. Letting the real functions run means the
+  // fetch mock below has to replicate Fastify's real behavior for these
+  // two routes, not just return canned data.
   window.ethereum = {
     request: vi.fn(async ({ method }: { method: string }) => {
       if (method === "eth_requestAccounts") return [ADDRESS];
@@ -156,7 +150,7 @@ beforeEach(async () => {
   };
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
+    vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith("/auth/nonce")) {
         return new Response(
           JSON.stringify({
@@ -172,6 +166,41 @@ beforeEach(async () => {
           status: 200,
         });
       }
+
+      const activateMatch = /\/agents\/([^/]+)\/(activate|deactivate)$/.exec(url);
+      if (activateMatch) {
+        // Replicates real Fastify's actual behavior (T-505 P1 root cause):
+        // a request whose Content-Type says application/json but carries no
+        // body is rejected as invalid JSON before the route handler runs.
+        // apiFetch must NOT be sending this header for a bodyless request —
+        // if it regresses, this branch fires and the test fails exactly
+        // like the real browser bug did.
+        const contentType = new Headers(init?.headers).get("content-type");
+        if (contentType?.toLowerCase().includes("application/json")) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: "Body cannot be empty when content-type is set to 'application/json'",
+              },
+            }),
+            { status: 400 },
+          );
+        }
+        const [, agentId, action] = activateMatch;
+        const row = agentId ? store.get(agentId) : undefined;
+        if (!row) {
+          return new Response(JSON.stringify({ error: { message: "未找到该 Agent。" } }), {
+            status: 404,
+          });
+        }
+        const updated = {
+          ...row,
+          status: action === "activate" ? ("ACTIVE" as const) : ("INACTIVE" as const),
+        };
+        store.set(row.agentId, updated);
+        return new Response(JSON.stringify(updated), { status: 200 });
+      }
+
       throw new Error(`Unexpected fetch: ${url}`);
     }),
   );
