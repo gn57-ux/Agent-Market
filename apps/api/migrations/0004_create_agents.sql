@@ -43,11 +43,21 @@ CREATE TABLE agents (
 -- T-504's ownership check (only the session address matching owner_address
 -- may edit/activate/deactivate) and T-503's "my agents" style queries both
 -- look up by owner_address.
-CREATE INDEX IF NOT EXISTS agents_owner_address_idx ON agents (owner_address);
+--
+-- Deliberately no IF NOT EXISTS on any index below either (Codex review,
+-- T-501 round 1, P2): with IF NOT EXISTS, a same-named index that already
+-- exists for some other reason (different definition, different table)
+-- would be silently skipped and the migration would still be recorded as
+-- applied, leaving `agents`/`agent_skills` without the index every later
+-- Feature's queries assume. As with CREATE TABLE above, a normal re-run
+-- never reaches these statements a second time (schema_migrations already
+-- skips the whole file), so the only case IF NOT EXISTS could hide is an
+-- unverified pre-existing conflict — which must fail loudly instead.
+CREATE INDEX agents_owner_address_idx ON agents (owner_address);
 
 -- T-503's GET /agents filtering (category, status) — a composite index
 -- covers "active agents in category X" without a separate index per column.
-CREATE INDEX IF NOT EXISTS agents_status_category_idx ON agents (status, category);
+CREATE INDEX agents_status_category_idx ON agents (status, category);
 
 -- Multi-valued skill tags, expanded into their own table rather than an
 -- array column: keeps `agent_skills.skill_tag = $1` filtering (T-503) a
@@ -58,4 +68,4 @@ CREATE TABLE agent_skills (
   PRIMARY KEY (agent_id, skill_tag)
 );
 
-CREATE INDEX IF NOT EXISTS agent_skills_skill_tag_idx ON agent_skills (skill_tag);
+CREATE INDEX agent_skills_skill_tag_idx ON agent_skills (skill_tag);
