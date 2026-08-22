@@ -32,7 +32,7 @@ function SessionProbe() {
       <button type="button" onClick={() => void session.login()}>
         登录
       </button>
-      <button type="button" onClick={() => void session.logout()}>
+      <button type="button" onClick={() => session.logout().catch(() => undefined)}>
         登出
       </button>
     </div>
@@ -84,10 +84,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function stubAuthFetch(expectedAddress: string) {
+function stubAuthFetch(expectedAddress: string, options: { logoutFails?: boolean } = {}) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/auth/logout") && options.logoutFails) {
+        return new Response(JSON.stringify({ error: { message: "服务器错误" } }), {
+          status: 500,
+        });
+      }
       if (url.endsWith("/auth/nonce")) {
         const body = JSON.parse(String(init?.body));
         expect(body.address).toBe(expectedAddress);
@@ -181,6 +186,25 @@ describe("SessionProvider", () => {
       expect.stringContaining("/auth/logout"),
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("keeps status signed_in and surfaces the error when /auth/logout itself fails (Codex round 2 P2)", async () => {
+    // The session cookie is still valid server-side if revocation failed —
+    // clearing local state anyway would falsely tell the user they're
+    // logged out while the session can still authenticate requests.
+    stubAuthFetch(ADDRESS, { logoutFails: true });
+    mockWalletProvider({ value: ADDRESS });
+    renderHarness();
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByTitle(ADDRESS);
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_in"));
+
+    fireEvent.click(screen.getByRole("button", { name: "登出" }));
+    await waitFor(() => expect(screen.getByTestId("error").textContent).toBe("服务器错误"));
+    expect(screen.getByTestId("status").textContent).toBe("signed_in");
+    expect(screen.getByTestId("address").textContent).toBe(ADDRESS);
   });
 
   it("a wallet account switch after login invalidates the client-visible signed_in state without calling /auth/logout", async () => {

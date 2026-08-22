@@ -110,12 +110,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [wallet]);
 
   const logout = useCallback(async () => {
+    // Codex review (T-505 round 2, P2): clearing local state in a `finally`
+    // regardless of outcome would report "signed out" even when
+    // `/auth/logout` itself failed (network error, server 5xx) — the
+    // session cookie is still valid server-side in that case, so the UI
+    // would be lying about being logged out while the session can still
+    // authenticate requests. Only clear local state after the server
+    // actually confirms revocation; surface the failure otherwise so the
+    // user can retry rather than believing they're safely logged out.
     try {
       await apiFetch("/auth/logout", { method: "POST" });
-    } finally {
       setSignedInAddress(undefined);
       setStatus("signed_out");
       setErrorMessage(undefined);
+    } catch (error) {
+      setErrorMessage(loginErrorMessage(error));
+      throw error;
     }
   }, []);
 

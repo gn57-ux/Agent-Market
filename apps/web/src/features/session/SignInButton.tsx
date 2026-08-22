@@ -11,9 +11,21 @@ export function SignInButton() {
     return (
       <span>
         已登录：{session.address}{" "}
-        <button type="button" onClick={() => void session.logout()}>
+        <button
+          type="button"
+          onClick={() => {
+            // logout() now rejects (rather than always clearing local
+            // state) when the server-side revocation itself fails — caught
+            // here so that failure surfaces as session.errorMessage instead
+            // of an unhandled rejection; status stays "signed_in" in that
+            // case (SessionProvider's doc comment), so the error still
+            // needs to render on this same branch.
+            session.logout().catch(() => undefined);
+          }}
+        >
           登出
         </button>
+        {session.errorMessage && <span role="alert"> {session.errorMessage}</span>}
       </span>
     );
   }
