@@ -12,6 +12,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type Dispatch,
   type ReactNode,
@@ -84,6 +85,26 @@ export interface WalletContextValue {
   connect: () => Promise<void>;
   disconnect: () => void;
   switchNetwork: () => Promise<void>;
+  /**
+   * Monotonically increasing "wallet identity generation" — see
+   * `requestVersion.ts`'s `useRequestVersion`/`useVersionedAsync` for the
+   * consumer-facing staleness API built on top of this. Bumped synchronously
+   * by `WalletProvider` itself, at the exact moment address/chainId actually
+   * changes, from plain function bodies only (event handlers, connect/
+   * disconnect/switchNetwork) — never from inside a `setConnection` updater
+   * callback. React may invoke a state updater function more than once for
+   * a single logical update (StrictMode's dev-mode double-invoke exists
+   * specifically to catch impure updaters); a ref bump inside one would
+   * double-count. Tracking it here, at the source, also closes an ABA/
+   * batching gap a downstream consumer can't: if MetaMask fires two events
+   * (e.g. accountsChanged then chainChanged) synchronously in the same
+   * tick, React 18 batches both `setConnection` calls into a single render
+   * — a consumer deriving "did identity change" from its own render would
+   * only ever see the final state and could miss an intervening identity
+   * entirely. Bumping here, once per real transition, regardless of
+   * whether React ever schedules a render for it, has no such gap.
+   */
+  identityGeneration: number;
 }
 
 export interface WalletProviderProps {
@@ -261,6 +282,39 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
   const [connection, setConnection] = useState<WalletConnection>({ status: "disconnected" });
   const [errorMessage, setErrorMessage] = useState<string>();
 
+  // Source of truth for `identityGeneration` (see WalletContextValue's doc
+  // comment). `latestAddressRef`/`latestChainIdRef` mirror "what identity
+  // are we at right now" so each transition site can detect a real change,
+  // and other sites (e.g. switchNetwork's post-await race guard, below) can
+  // check "did the identity move on without me" — without depending on
+  // React's `connection` state, which may not reflect an intermediate
+  // transition that got batched away before ever rendering, and without
+  // depending on exactly when React invokes a `setConnection` updater
+  // function relative to the surrounding code (unspecified by React; not
+  // safe to rely on for synchronous side effects).
+  const latestAddressRef = useRef<HexAddress | undefined>(undefined);
+  const latestChainIdRef = useRef<number | undefined>(undefined);
+  const identityGenerationRef = useRef(0);
+
+  /** Bumps `identityGenerationRef` iff `nextAddress`/`nextChainId` differ
+   * from the last-recorded identity. Call ONLY from plain function bodies
+   * (event handlers, connect/disconnect/switchNetwork) — never from inside
+   * a `setConnection` updater callback. React may invoke a state updater
+   * function more than once for a single logical update (StrictMode's
+   * dev-mode double-invoke exists specifically to catch impure updaters);
+   * a ref bump inside one would double-count. */
+  function recordIdentityIfChanged(
+    nextAddress: HexAddress | undefined,
+    nextChainId: number | undefined,
+  ): void {
+    if (nextAddress === latestAddressRef.current && nextChainId === latestChainIdRef.current) {
+      return;
+    }
+    latestAddressRef.current = nextAddress;
+    latestChainIdRef.current = nextChainId;
+    identityGenerationRef.current += 1;
+  }
+
   const connect = useCallback(async () => {
     setConnection({ status: "connecting" });
     setErrorMessage(undefined);
@@ -273,6 +327,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       }
       const chainId = await walletClient.getChainId();
       const needsNetworkSwitch = chainId !== chainConfig.chainId;
+      recordIdentityIfChanged(address, chainId);
       setConnection({
         status: "connected",
         address,
@@ -284,6 +339,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       // trigger point shared by connect/switchNetwork/wallet-events instead
       // of each call site separately kicking off the read.
     } catch (error) {
+      recordIdentityIfChanged(undefined, undefined);
       setConnection({ status: "disconnected" });
       setErrorMessage(
         error instanceof ActionableWalletError
@@ -294,6 +350,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
   }, [chainConfig]);
 
   const disconnect = useCallback(() => {
+    recordIdentityIfChanged(undefined, undefined);
     setConnection({ status: "disconnected" });
     setErrorMessage(undefined);
   }, []);
@@ -303,6 +360,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       setErrorMessage("请先连接 MetaMask，再切换网络。");
       return;
     }
+    const switchTargetAddress = connection.address;
     setErrorMessage(undefined);
     try {
       const provider = requireInjectedProvider();
@@ -344,6 +402,15 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
             }
           : current,
       );
+      // Same race guard as the setConnection call above, expressed against
+      // `latestAddressRef` instead of the updater's `current` (see
+      // `recordIdentityIfChanged`'s doc comment for why this can't safely
+      // read the updater's own decision): only record the new chainId
+      // against `switchTargetAddress` if the wallet's connected address is
+      // still the one this switchNetwork call started for.
+      if (latestAddressRef.current === switchTargetAddress) {
+        recordIdentityIfChanged(switchTargetAddress, activeChainId);
+      }
     } catch (error) {
       setErrorMessage(
         error instanceof ActionableWalletError
@@ -358,59 +425,96 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
   // accountsChanged/chainChanged events — so the app's state can't silently
   // diverge from the wallet's real state (AC-403's "界面反映新状态").
   //
-  // Both handlers use the functional `setConnection(current => ...)` form
-  // exclusively (no external ref snapshot of `connection`). This matters
-  // because a wallet can emit accountsChanged and chainChanged back to back
-  // in the same tick; React composes sequential functional updates within
-  // one batch by feeding each updater the previous updater's *result*, so
-  // the second handler always sees the first handler's effect even though
-  // neither handler re-rendered (and thus re-closed over fresh `chainConfig`
-  // captured state) in between. Reading from a ref synced via a separate
-  // `useEffect` (the previous implementation) does not have this guarantee
-  // — Codex review round 1 found it could drop an account update when both
-  // events fire together, since the effect syncing the ref hadn't run yet
-  // when the second handler read it.
+  // Both handlers still apply their actual `connection` state change via
+  // the functional `setConnection(current => ...)` form (Codex review round
+  // 1: a ref synced via a separate `useEffect` could drop an account update
+  // when both events fire together, since the effect hadn't run yet when
+  // the second handler read it — reading React's own always-fresh `current`
+  // instead has no such gap for *state composition*).
+  //
+  // But "did identity actually change, and by how much" (`identityGeneration`)
+  // is decided BEFORE calling setConnection, from `latestAddressRef`/
+  // `latestChainIdRef` — not from `current` inside the updater. Codex review
+  // round 2: deriving the generation from a downstream consumer's *render*
+  // of `connection` misses transitions that get batched away (React 18
+  // coalesces two same-tick setConnection calls into one render, so a
+  // consumer could observe only the final identity and never the
+  // intermediate one — an ABA case, or a single change that settles before
+  // the next render). Recording it here, synchronously in the handler body,
+  // once per real event regardless of whether a render happens for it,
+  // closes that gap.
   useEffect(() => {
     const provider = typeof window === "undefined" ? undefined : window.ethereum;
     if (!provider?.on) return;
 
     const handleAccountsChanged = (payload: unknown) => {
+      // Only react if the app already had an active session — an
+      // accounts-changed event while never connected in-app has nothing to
+      // reconcile against. Gated on the ref (not `connection.status`) so
+      // this decision is correct even if a just-prior same-tick event (e.g.
+      // handleChainChanged, if the wallet fires both back to back) already
+      // advanced identity past what the last render observed.
+      if (latestAddressRef.current === undefined) return;
+
       const nextAddress =
         Array.isArray(payload) && typeof payload[0] === "string"
           ? (payload[0] as HexAddress)
           : undefined;
-      setConnection((current) => {
-        // Only react if the app already had an active session — an
-        // accounts-changed event while never connected in-app has nothing
-        // to reconcile against.
-        if (current.status !== "connected") return current;
-        if (!nextAddress) return { status: "disconnected" };
-        if (nextAddress === current.address) return current;
-        return {
-          status: "connected",
-          address: nextAddress,
-          chainId: current.chainId,
-          ydBalance:
-            current.chainId === chainConfig.chainId
-              ? { status: "loading" }
-              : { status: "unavailable" },
-        };
-      });
+      if (nextAddress === latestAddressRef.current) return;
+
+      // Codex review round 2 (P2): a wallet-driven change succeeding must
+      // clear any stale error left over from a previous *failed* in-app
+      // action (e.g. a cancelled switchNetwork) — otherwise the old failure
+      // message stays visible next to state that now looks fine.
+      setErrorMessage(undefined);
+
+      if (!nextAddress) {
+        recordIdentityIfChanged(undefined, undefined);
+        setConnection({ status: "disconnected" });
+        return;
+      }
+      const currentChainId = latestChainIdRef.current;
+      recordIdentityIfChanged(nextAddress, currentChainId);
+      setConnection((current) =>
+        current.status === "connected"
+          ? {
+              status: "connected",
+              address: nextAddress,
+              chainId: current.chainId,
+              ydBalance:
+                current.chainId === chainConfig.chainId
+                  ? { status: "loading" }
+                  : { status: "unavailable" },
+            }
+          : current,
+      );
     };
 
     const handleChainChanged = (payload: unknown) => {
+      if (latestAddressRef.current === undefined) return;
+
       const nextChainId = typeof payload === "string" ? Number.parseInt(payload, 16) : undefined;
-      if (nextChainId === undefined) return;
-      setConnection((current) => {
-        if (current.status !== "connected" || nextChainId === current.chainId) return current;
-        return {
-          status: "connected",
-          address: current.address,
-          chainId: nextChainId,
-          ydBalance:
-            nextChainId === chainConfig.chainId ? { status: "loading" } : { status: "unavailable" },
-        };
-      });
+      if (nextChainId === undefined || nextChainId === latestChainIdRef.current) return;
+
+      // Same rationale as handleAccountsChanged: a wallet-driven change
+      // succeeding clears a stale error from a previous failed in-app
+      // action.
+      setErrorMessage(undefined);
+
+      recordIdentityIfChanged(latestAddressRef.current, nextChainId);
+      setConnection((current) =>
+        current.status === "connected"
+          ? {
+              status: "connected",
+              address: current.address,
+              chainId: nextChainId,
+              ydBalance:
+                nextChainId === chainConfig.chainId
+                  ? { status: "loading" }
+                  : { status: "unavailable" },
+            }
+          : current,
+      );
     };
 
     provider.on("accountsChanged", handleAccountsChanged);
@@ -446,8 +550,24 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       connect,
       disconnect,
       switchNetwork,
+      identityGeneration: identityGenerationRef.current,
     }),
-    [address, chainConfig, chainId, connect, connection, disconnect, errorMessage, switchNetwork],
+    [
+      address,
+      chainConfig,
+      chainId,
+      connect,
+      connection,
+      disconnect,
+      errorMessage,
+      switchNetwork,
+      // `connection` above already changes on every real identity
+      // transition (each one has a corresponding `recordIdentityIfChanged`
+      // call), so this recomputes whenever the generation could have
+      // bumped; listed explicitly so the dependency itself isn't silently
+      // relying on that correlation holding forever.
+      identityGenerationRef.current,
+    ],
   );
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

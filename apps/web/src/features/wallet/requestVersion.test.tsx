@@ -1,5 +1,5 @@
 import type { ChainConfig } from "@agent-market/domain";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WalletConnectionStatus, WalletProvider } from "./WalletProvider.js";
 import { useRequestVersion, useVersionedAsync } from "./requestVersion.js";
@@ -42,6 +42,38 @@ function installWallet(address: `0x${string}`, chainId: number) {
     throw new Error(`Unexpected test RPC method: ${method}`);
   });
   window.ethereum = { request };
+}
+
+interface EventCapableWallet {
+  emitAccountsChanged(address: `0x${string}`): void;
+  emitChainChanged(chainId: number): void;
+}
+
+/** Same as `installWallet`, but also wires MetaMask's `on`/`removeListener`
+ * so a test can directly invoke the captured listeners — synchronously,
+ * back-to-back, with no `await`/render between them — to reproduce a real
+ * same-tick wallet event burst (e.g. accountsChanged immediately followed
+ * by chainChanged), which is exactly what React 18 batches into a single
+ * render and what the earlier ABA regression test above (which awaits a
+ * render between each step) cannot reproduce. */
+function installWalletWithEvents(address: `0x${string}`, chainId: number): EventCapableWallet {
+  installWallet(address, chainId);
+  let accountsChangedListener: ((payload: unknown) => void) | undefined;
+  let chainChangedListener: ((payload: unknown) => void) | undefined;
+  const existing = window.ethereum;
+  if (!existing) throw new Error("installWallet did not set window.ethereum");
+  existing.on = (eventName, listener) => {
+    if (eventName === "accountsChanged") accountsChangedListener = listener;
+    if (eventName === "chainChanged") chainChangedListener = listener;
+  };
+  existing.removeListener = (eventName) => {
+    if (eventName === "accountsChanged") accountsChangedListener = undefined;
+    if (eventName === "chainChanged") chainChangedListener = undefined;
+  };
+  return {
+    emitAccountsChanged: (nextAddress) => accountsChangedListener?.([nextAddress]),
+    emitChainChanged: (nextChainId) => chainChangedListener?.(`0x${nextChainId.toString(16)}`),
+  };
 }
 
 afterEach(() => {
@@ -224,6 +256,51 @@ describe("useVersionedAsync", () => {
     installWallet(ADDRESS_A, TARGET_CHAIN.chainId);
     fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
     await screen.findByRole("button", { name: "0x1234…7890" });
+
+    deferred.resolve("result-for-address-a");
+
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1));
+    expect(onSettled).toHaveBeenCalledWith(undefined);
+  });
+
+  it("discards a stale result even when the wallet round-trips within a single same-tick batch (real ABA, no intermediate render)", async () => {
+    // Regression for Codex review round 2 P1: the earlier ABA test above
+    // awaits a render for B before switching back to A, so it never
+    // exercises the actual bug — two wallet-driven events (e.g. two
+    // accountsChanged emissions) that fire synchronously back-to-back,
+    // which React 18 batches into a SINGLE render. A version derived from
+    // a downstream consumer's own render (the old implementation) would
+    // observe only the final state (A) and never advance at all, since the
+    // B render never happens. The fix moves generation tracking into
+    // WalletProvider itself, bumped synchronously in the event-handler
+    // bodies — independent of whether React ever renders the intermediate
+    // identity — so this must still correctly mark the in-flight request
+    // stale even though no B render occurs.
+    const wallet = installWalletWithEvents(ADDRESS_A, TARGET_CHAIN.chainId);
+    const deferred = createDeferred<string>();
+    const onSettled = vi.fn();
+
+    render(
+      <WalletProvider chainConfig={TARGET_CHAIN}>
+        <WalletConnectionStatus />
+        <VersionedAsyncProbe deferred={deferred} onSettled={onSettled} />
+      </WalletProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x1234…7890" });
+
+    fireEvent.click(screen.getByRole("button", { name: "start-async" }));
+
+    // Fire accountsChanged(B) then accountsChanged(A) synchronously inside
+    // one `act()`, with no `await`/render between them — this is what a
+    // real same-tick wallet event burst looks like, and it is exactly what
+    // the button-click-driven test above (which awaits a render after each
+    // step) cannot reproduce.
+    act(() => {
+      wallet.emitAccountsChanged(ADDRESS_B);
+      wallet.emitAccountsChanged(ADDRESS_A);
+    });
 
     deferred.resolve("result-for-address-a");
 
