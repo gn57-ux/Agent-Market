@@ -50,6 +50,16 @@ export interface IssuedNonce {
  *   - It keeps the partial index on `auth_nonces (address) WHERE consumed =
  *     false` (migration 0002) cheap regardless of how many times a client
  *     re-requests a nonce.
+ *
+ * Concurrency (Codex review round 1, P2): two concurrent `issueNonce` calls
+ * for the same address could otherwise both run their supersede-UPDATE
+ * before either commits its INSERT (the UPDATE only touches pre-existing
+ * rows, so it doesn't lock against a row that doesn't exist yet), leaving
+ * two `consumed = false` rows and breaking the "at most one outstanding
+ * nonce" invariant. `pg_advisory_xact_lock` takes a session-held lock keyed
+ * on the address for the duration of this transaction, serializing
+ * concurrent issuance per address without needing a unique-constraint
+ * retry loop or changing the table's indexing.
  */
 export async function issueNonce(pool: Pool, rawAddress: string): Promise<IssuedNonce> {
   const address = normalizeAddress(rawAddress);
@@ -57,6 +67,7 @@ export async function issueNonce(pool: Pool, rawAddress: string): Promise<Issued
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [address]);
     await client.query(
       `UPDATE auth_nonces SET consumed = true, consumed_at = now()
        WHERE address = $1 AND consumed = false`,

@@ -1,8 +1,9 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { runMigrations } from "./migrate.js";
+import { requireTestDatabaseUrl } from "./test-support.js";
 
 // These tests execute real DDL (CREATE TABLE / CREATE INDEX) against
 // `process.env.DATABASE_URL`. Per this session's policy, migration
@@ -24,7 +25,11 @@ const migrationsDir = path.resolve(
 );
 
 runIfOptedIn("runMigrations (integration)", () => {
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  let pool: Pool;
+
+  beforeAll(() => {
+    pool = new Pool({ connectionString: requireTestDatabaseUrl() });
+  });
 
   afterAll(async () => {
     await pool.query("DROP TABLE IF EXISTS auth_nonces, users, schema_migrations CASCADE");

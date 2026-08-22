@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { runMigrations } from "../../db/migrate.js";
+import { requireTestDatabaseUrl } from "../../db/test-support.js";
 import { consumeNonce, issueNonce } from "./nonce.store.js";
 import { findUserByAddress, recordLogin } from "./users.store.js";
 
@@ -20,9 +21,10 @@ const migrationsDir = path.resolve(
 const ADDRESS = "0x4283FeFc63F0Cd0e873a0000C6D07eF7B77e90D3";
 
 runIfOptedIn("nonce.store (integration)", () => {
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  let pool: Pool;
 
   beforeAll(async () => {
+    pool = new Pool({ connectionString: requireTestDatabaseUrl() });
     await runMigrations(pool, migrationsDir);
   });
 
@@ -71,6 +73,23 @@ runIfOptedIn("nonce.store (integration)", () => {
 
     const consumeNew = await consumeNonce(pool, ADDRESS, second.nonce);
     expect(consumeNew).toEqual({ ok: true });
+  });
+
+  it("serializes concurrent issueNonce calls for the same address so at most one stays unconsumed", async () => {
+    // Regression for Codex review round 1 P2: without per-address
+    // serialization, two concurrent issuances could each supersede-then-
+    // insert before the other commits, leaving two consumed=false rows.
+    const [first, second] = await Promise.all([
+      issueNonce(pool, ADDRESS),
+      issueNonce(pool, ADDRESS),
+    ]);
+    expect(first.nonce).not.toBe(second.nonce);
+
+    const { rows } = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM auth_nonces WHERE address = $1 AND consumed = false`,
+      [ADDRESS.toLowerCase()],
+    );
+    expect(rows[0]?.count).toBe("1");
   });
 
   it("recordLogin creates then updates a user row for the normalized address", async () => {
