@@ -28,7 +28,54 @@ const INVOCATION_URL_SCHEMA = z
   .max(2000)
   .refine((value) => /^https?:\/\//i.test(value), "调用地址必须是 http(s) URL");
 const PRICING_MODEL_SCHEMA = z.string().trim().max(100);
-const REFERENCE_PRICE_SCHEMA = z.number().finite().nonnegative();
+
+// `reference_price` is a PostgreSQL NUMERIC column (arbitrary precision) and
+// `node-postgres` already reads it back out as a string rather than a JS
+// `number` (routes.ts's toAgentSummaryJson doc comment). Accepting it as a
+// JS `number` on the way IN would break that symmetry: a JSON body's number
+// literal is parsed into an IEEE-754 double before Zod (or this code) ever
+// sees it — precision beyond ~15-17 significant digits is already lost by
+// the time `JSON.parse` returns, independent of anything this schema does.
+// The only way to preserve a caller's exact decimal text end-to-end is to
+// never convert it to a `number` at all.
+//
+// Two approaches were compared (Codex review, T-505 round 3, blocking):
+//
+// Option A (chosen): accept a plain decimal string, validated with a regex,
+// stored as-is (the SQL driver binds a JS string to a NUMERIC column
+// without any precision-lossy conversion; Postgres itself parses the text
+// as an arbitrary-precision NUMERIC literal). Zero new dependencies — this
+// project already established "NUMERIC stays a string at the API boundary"
+// for reads; this makes writes symmetric with that, rather than adding a
+// second, format-lossy convention for the same column.
+//
+// Option B (not chosen): adopt an arbitrary-precision decimal library
+// (e.g. decimal.js/big.js) on both apps/api and apps/web to parse/validate/
+// format the value through a `Decimal` type. Gives real decimal arithmetic
+// (add/compare/round), which this feature never needs — nothing here does
+// math on `referencePrice`, it only stores and echoes it back. Adds a
+// dependency to two packages, plus a wrapper type at every read/write site,
+// to solve a "validate this looks like a plain decimal" problem a ~40-
+// character regex already solves. Matches this project's stated stance
+// against pulling in a library for functionality implementable in a few
+// lines (see signInMessage.ts's decision record for the same reasoning
+// applied to SIWE).
+//
+// Format: an unsigned decimal — at least one leading digit, an optional
+// fractional part with at least one digit after the point. No sign (this
+// field is nonnegative by definition), no scientific notation (a NUMERIC
+// literal doesn't use it, and accepting "1e10" here would silently diverge
+// from what actually gets stored). `max(80)` is a sane abuse guard, not a
+// precision ceiling — Postgres NUMERIC itself supports far more digits than
+// any real price needs; 80 was chosen because it comfortably exceeds
+// uint256's 78-decimal-digit maximum (this is a Web3 project; that's the
+// largest "real" magnitude anything here would plausibly need to express).
+const DECIMAL_STRING_PATTERN = /^\d+(\.\d+)?$/;
+const REFERENCE_PRICE_SCHEMA = z
+  .string()
+  .trim()
+  .max(80, "参考价格过长")
+  .regex(DECIMAL_STRING_PATTERN, "参考价格必须是非负十进制数字（不支持科学计数法或负数）");
 
 /**
  * F-501/F-507: everything POST /agents accepts. `ownerAddress` is

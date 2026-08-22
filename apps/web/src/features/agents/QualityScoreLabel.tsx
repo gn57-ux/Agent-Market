@@ -8,7 +8,7 @@
  */
 export function QualityScoreLabel({ score }: { score: number | null }) {
   if (score === null) {
-    return <span>暂无评分</span>;
+    return <span className="text-ink-secondary">暂无评分</span>;
   }
-  return <span>质量分：{score.toFixed(2)}</span>;
+  return <span className="text-ink-primary">质量分：{score.toFixed(2)}</span>;
 }

@@ -217,6 +217,65 @@ runIfOptedIn("POST /agents (integration, AC-501/AC-502/AC-504)", () => {
     expect(response.statusCode).toBe(400);
   });
 
+  it("stores and returns a high-precision referencePrice byte-identical, never rounded through a JS number (Codex round 3 blocking)", async () => {
+    const token = await login();
+    // Far beyond IEEE-754 double precision (~15-17 significant digits) —
+    // if this were ever parsed through Number(), it would silently round.
+    const highPrecisionPrice = "123456789012345678901234567890.123456789012345678901234567890";
+    const response = await app.inject({
+      method: "POST",
+      url: "/agents",
+      cookies: { session_token: token },
+      payload: { ...VALID_PAYLOAD, referencePrice: highPrecisionPrice },
+    });
+    expect(response.statusCode).toBe(201);
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/agents/${response.json().agentId}`,
+    });
+    expect(detail.json().referencePrice).toBe(highPrecisionPrice);
+
+    const { rows } = await pool.query(
+      `SELECT reference_price::text AS price FROM agents WHERE id = $1`,
+      [response.json().agentId],
+    );
+    expect(rows[0]?.price).toBe(highPrecisionPrice);
+  });
+
+  it("rejects a referencePrice with scientific notation (AC-504)", async () => {
+    const token = await login();
+    const response = await app.inject({
+      method: "POST",
+      url: "/agents",
+      cookies: { session_token: token },
+      payload: { ...VALID_PAYLOAD, referencePrice: "1e10" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects a negative referencePrice (AC-504)", async () => {
+    const token = await login();
+    const response = await app.inject({
+      method: "POST",
+      url: "/agents",
+      cookies: { session_token: token },
+      payload: { ...VALID_PAYLOAD, referencePrice: "-1" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects a non-numeric referencePrice (AC-504)", async () => {
+    const token = await login();
+    const response = await app.inject({
+      method: "POST",
+      url: "/agents",
+      cookies: { session_token: token },
+      payload: { ...VALID_PAYLOAD, referencePrice: "not-a-number" },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
   it("deduplicates repeated skill tags instead of failing the insert", async () => {
     const token = await login();
     const response = await app.inject({

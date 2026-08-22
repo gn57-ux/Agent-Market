@@ -76,7 +76,10 @@ export interface InsertAgentInput {
   invocationUrl?: string;
   payoutAddress: string;
   pricingModel?: string;
-  referencePrice?: number;
+  /** Decimal text, never a JS `number` — see schema.ts's REFERENCE_PRICE_SCHEMA
+   * doc comment for why: a NUMERIC column round-trips losslessly only if
+   * this stays a string end-to-end. */
+  referencePrice?: string;
   skillTags: string[];
 }
 
@@ -256,7 +259,9 @@ export interface UpdateAgentInput {
   invocationUrl?: string | null;
   payoutAddress?: string;
   pricingModel?: string | null;
-  referencePrice?: number | null;
+  /** Decimal text, never a JS `number` — see InsertAgentInput's field of
+   * the same name and schema.ts's REFERENCE_PRICE_SCHEMA doc comment. */
+  referencePrice?: string | null;
   skillTags?: string[];
 }
 

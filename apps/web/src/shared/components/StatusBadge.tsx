@@ -1,4 +1,5 @@
 import { assertExhaustive, type TaskStatus } from "@agent-market/domain";
+import { StatusChip, type StatusChipTone } from "./StatusChip.js";
 
 export interface StatusBadgeProps {
   status: TaskStatus;
@@ -29,7 +30,28 @@ function labelFor(status: TaskStatus): string {
   }
 }
 
+function toneFor(status: TaskStatus): StatusChipTone {
+  switch (status.kind) {
+    case "DRAFT":
+    case "AWAITING_FUNDING":
+      return "neutral";
+    case "OPEN":
+    case "ACCEPTED":
+      return "info";
+    case "SUBMITTED":
+    case "DISPUTED":
+      return "warning";
+    case "RELEASED":
+      return "success";
+    case "REFUNDED":
+    case "CANCELLED":
+      return "neutral";
+    default:
+      return assertExhaustive(status, "StatusBadge.toneFor");
+  }
+}
+
 /** Consumes TaskStatus exhaustively; a missing variant fails to compile. */
 export function StatusBadge({ status }: StatusBadgeProps) {
-  return <span data-status={status.kind}>{labelFor(status)}</span>;
+  return <StatusChip label={labelFor(status)} tone={toneFor(status)} />;
 }

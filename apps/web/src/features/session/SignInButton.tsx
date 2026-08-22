@@ -9,8 +9,8 @@ export function SignInButton() {
 
   if (session.status === "signed_in") {
     return (
-      <span>
-        已登录：{session.address}{" "}
+      <span className="flex flex-wrap items-center gap-2 text-caption">
+        <span className="font-mono text-ink-secondary">已登录：{session.address}</span>
         <button
           type="button"
           onClick={() => {
@@ -22,25 +22,35 @@ export function SignInButton() {
             // needs to render on this same branch.
             session.logout().catch(() => undefined);
           }}
+          className="rounded-control border border-divider-light px-3 py-1 text-ink-secondary transition-colors hover:border-warning hover:text-warning"
         >
           登出
         </button>
-        {session.errorMessage && <span role="alert"> {session.errorMessage}</span>}
+        {session.errorMessage && (
+          <span role="alert" className="text-warning">
+            {" "}
+            {session.errorMessage}
+          </span>
+        )}
       </span>
     );
   }
 
   return (
-    <span>
+    <span className="flex flex-wrap items-center gap-2 text-caption">
       <button
         type="button"
         onClick={() => void session.login()}
         disabled={session.status === "signing_in"}
+        className="rounded-control bg-ink-primary px-4 py-1.5 font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {session.status === "signing_in" ? "登录中…" : "登录（签名验证钱包身份）"}
       </button>
       {session.status === "error" && session.errorMessage && (
-        <span role="alert"> {session.errorMessage}</span>
+        <span role="alert" className="text-warning">
+          {" "}
+          {session.errorMessage}
+        </span>
       )}
     </span>
   );

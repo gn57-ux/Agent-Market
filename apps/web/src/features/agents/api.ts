@@ -40,7 +40,9 @@ export interface CreateAgentInput {
   invocationUrl?: string;
   payoutAddress: string;
   pricingModel?: string;
-  referencePrice?: number;
+  /** Decimal text, never a JS `number` — see `Agent.referencePrice`'s doc
+   * comment. AgentForm.tsx never parses this through `Number()`. */
+  referencePrice?: string;
 }
 
 /**
@@ -60,7 +62,7 @@ export interface UpdateAgentInput {
   invocationUrl?: string | null;
   payoutAddress?: string;
   pricingModel?: string | null;
-  referencePrice?: number | null;
+  referencePrice?: string | null;
 }
 
 export interface ListAgentsParams {

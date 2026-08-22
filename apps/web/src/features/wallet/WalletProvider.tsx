@@ -654,32 +654,48 @@ export function WalletConnectionStatus() {
   const connected = wallet.connection.status === "connected" ? wallet.connection : undefined;
 
   return (
-    <section aria-label="钱包状态">
+    <section aria-label="钱包状态" className="flex flex-wrap items-center gap-3 text-caption">
       <WalletButton
         address={wallet.address}
         onConnect={() => void wallet.connect()}
         onDisconnect={wallet.disconnect}
       />
-      {wallet.connection.status === "connecting" && <span>正在连接钱包…</span>}
-      {connected && <span>当前网络：{currentNetworkName(connected.chainId)}</span>}
+      {wallet.connection.status === "connecting" && (
+        <span className="text-ink-secondary">正在连接钱包…</span>
+      )}
+      {connected && (
+        <span className="text-ink-secondary">
+          当前网络：{currentNetworkName(connected.chainId)}
+        </span>
+      )}
       {connected?.ydBalance.status === "ready" && (
-        <span>YD 余额：{connected.ydBalance.formatted} YD</span>
+        <span className="text-ink-secondary">YD 余额：{connected.ydBalance.formatted} YD</span>
       )}
       {connected?.ydBalance.status === "loading" && wallet.isCorrectNetwork && (
-        <span>正在读取 YD 余额…</span>
+        <span className="text-ink-secondary">正在读取 YD 余额…</span>
       )}
       {connected?.ydBalance.status === "error" && (
-        <span role="alert">{connected.ydBalance.message}</span>
+        <span role="alert" className="text-warning">
+          {connected.ydBalance.message}
+        </span>
       )}
       {connected && !wallet.isCorrectNetwork && (
-        <div role="alert">
+        <div role="alert" className="flex items-center gap-2 text-warning">
           当前网络不正确。请切换到 {wallet.chainConfig.name} 后再提交交易。
-          <button type="button" onClick={() => void wallet.switchNetwork()}>
+          <button
+            type="button"
+            onClick={() => void wallet.switchNetwork()}
+            className="rounded-control border border-warning px-2.5 py-1 text-caption text-warning hover:bg-warning/10"
+          >
             切换网络
           </button>
         </div>
       )}
-      {wallet.errorMessage && <div role="alert">{wallet.errorMessage}</div>}
+      {wallet.errorMessage && (
+        <div role="alert" className="text-warning">
+          {wallet.errorMessage}
+        </div>
+      )}
     </section>
   );
 }

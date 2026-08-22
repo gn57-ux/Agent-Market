@@ -119,7 +119,7 @@ runIfOptedIn(
         method: "PATCH",
         url: `/agents/${agentId}`,
         cookies: { session_token: token },
-        payload: { authorBio: "A real bio", pricingModel: "per-task", referencePrice: 12.5 },
+        payload: { authorBio: "A real bio", pricingModel: "per-task", referencePrice: "12.5" },
       });
       expect(setValue.statusCode).toBe(200);
       expect(setValue.json().authorBio).toBe("A real bio");
@@ -150,6 +150,31 @@ runIfOptedIn(
       // name from the previous PATCH must still be intact — clearing other
       // fields must not reset unrelated columns.
       expect(body.name).toBe("Still Has A Bio");
+    });
+
+    it("PATCH stores and returns a high-precision referencePrice byte-identical (Codex round 3 blocking)", async () => {
+      const token = await login(owner);
+      const agentId = await createAgent(token);
+      const highPrecisionPrice = "0.100000000000000000001";
+
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+        payload: { referencePrice: highPrecisionPrice },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().referencePrice).toBe(highPrecisionPrice);
+
+      // An unrelated edit that doesn't mention referencePrice must not
+      // disturb the stored precision either.
+      const unrelatedEdit = await app.inject({
+        method: "PATCH",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+        payload: { name: "Renamed Again" },
+      });
+      expect(unrelatedEdit.json().referencePrice).toBe(highPrecisionPrice);
     });
 
     it("replaces the full skillTags set when provided", async () => {

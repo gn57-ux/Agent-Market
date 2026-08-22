@@ -57,28 +57,56 @@ export function AgentEditPage() {
     }
   }
 
-  if (state.status === "loading") return <p>加载中…</p>;
-  if (state.status === "not_found") return <p>未找到该 Agent。</p>;
-  if (state.status === "error") return <p role="alert">{state.message}</p>;
+  const pageWrapClasses = "mx-auto max-w-reading px-gutter-mobile py-16 md:px-gutter-desktop";
+
+  if (state.status === "loading") {
+    return (
+      <div className={pageWrapClasses}>
+        <p className="text-body text-ink-secondary">加载中…</p>
+      </div>
+    );
+  }
+  if (state.status === "not_found") {
+    return (
+      <div className={pageWrapClasses}>
+        <p className="text-body text-ink-secondary">未找到该 Agent。</p>
+      </div>
+    );
+  }
+  if (state.status === "error") {
+    return (
+      <div className={pageWrapClasses}>
+        <p role="alert" className="text-body text-warning">
+          {state.message}
+        </p>
+      </div>
+    );
+  }
 
   const { agent } = state;
   const isOwner = session.status === "signed_in" && session.address === agent.ownerAddress;
 
   return (
-    <section>
-      <h1>编辑 {agent.name}</h1>
-      <SignInButton />
+    <section className={pageWrapClasses}>
+      <h1 className="mb-3 text-display-mobile text-ink-primary md:text-display">
+        编辑 {agent.name}
+      </h1>
+      <div className="mb-8">
+        <SignInButton />
+      </div>
       {!isOwner ? (
-        <p>只有该 Agent 的归属地址登录后才能编辑。</p>
+        <p className="text-body text-ink-secondary">只有该 Agent 的归属地址登录后才能编辑。</p>
       ) : (
-        <AgentForm
-          initialValues={agentFormValuesFromAgent(agent)}
-          originalValues={agentFormValuesFromAgent(agent)}
-          submitLabel="保存"
-          pending={pending}
-          errorMessage={submitError}
-          onSubmit={(input) => void handleSubmit(agent, input)}
-        />
+        <div className="rounded-card border border-divider-light bg-surface-light p-6 md:p-8">
+          <AgentForm
+            initialValues={agentFormValuesFromAgent(agent)}
+            originalValues={agentFormValuesFromAgent(agent)}
+            submitLabel="保存"
+            pending={pending}
+            errorMessage={submitError}
+            onSubmit={(input) => void handleSubmit(agent, input)}
+          />
+        </div>
       )}
     </section>
   );

@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import "./index.css";
 import { App } from "./App";
 import { WalletProvider } from "./features/wallet/WalletProvider.js";
 import { SessionProvider } from "./features/session/SessionProvider.js";

@@ -68,14 +68,28 @@ describe("agentFormValuesToInput", () => {
     expect(input.name).toBe("New Name");
   });
 
-  it("referencePrice: clearing it sends null; changing it sends the parsed number", () => {
+  it("referencePrice: clearing it sends null; changing it sends the trimmed decimal text, never a JS number", () => {
     const original = { ...emptyAgentFormValues(), referencePriceText: "10" };
     expect(
       agentFormValuesToInput({ ...original, referencePriceText: "" }, original).referencePrice,
     ).toBeNull();
     expect(
       agentFormValuesToInput({ ...original, referencePriceText: "12.5" }, original).referencePrice,
-    ).toBe(12.5);
+    ).toBe("12.5");
+  });
+
+  it("referencePrice: a changed high-precision value is sent as text, byte-identical, not Number()-rounded (Codex round 3 blocking)", () => {
+    const original = { ...emptyAgentFormValues(), referencePriceText: "1" };
+    const highPrecisionText = "123456789012345678901234567890.123456789012345678901234567890";
+    const input = agentFormValuesToInput(
+      { ...original, referencePriceText: highPrecisionText },
+      original,
+    );
+    // If this had ever gone through Number(), it would no longer equal the
+    // original text — IEEE-754 doubles can't hold this many significant
+    // digits.
+    expect(input.referencePrice).toBe(highPrecisionText);
+    expect(typeof input.referencePrice).toBe("string");
   });
 });
 

@@ -92,13 +92,16 @@ export function agentFormValuesToInput(
     .map((tag) => tag.trim())
     .filter(Boolean);
 
+  // Never Number()'d (Codex review, T-505 round 3, blocking): apps/api's
+  // reference_price is a PostgreSQL NUMERIC column, and a JS `number`
+  // cannot represent it losslessly beyond ~15-17 significant digits — see
+  // apps/api/src/modules/agents/schema.ts's REFERENCE_PRICE_SCHEMA doc
+  // comment for the two-approach comparison. The trimmed decimal TEXT is
+  // sent as-is; format validation happens via the input's HTML `pattern`
+  // (below) and, authoritatively, apps/api's Zod regex.
   const trimmedPrice = values.referencePriceText.trim();
-  const referencePrice: number | null | undefined =
-    trimmedPrice === originalValues.referencePriceText.trim()
-      ? undefined
-      : trimmedPrice
-        ? Number(trimmedPrice)
-        : null;
+  const referencePrice: string | null | undefined =
+    trimmedPrice === originalValues.referencePriceText.trim() ? undefined : trimmedPrice || null;
 
   return {
     name: values.name.trim(),
@@ -172,52 +175,112 @@ export function AgentForm({
     onSubmit(agentFormValuesToInput(values, originalValues ?? emptyAgentFormValues()));
   }
 
+  const inputClasses =
+    "w-full rounded-input border border-divider-light bg-canvas-light px-4 py-2.5 text-body text-ink-primary placeholder:text-ink-secondary focus:border-action-blue focus:outline-none focus:ring-2 focus:ring-action-blue/20";
+  const labelClasses = "flex flex-col gap-1.5 text-caption font-medium text-ink-secondary";
+
   return (
-    <form onSubmit={handleSubmit}>
-      <label>
+    <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+      <label className={labelClasses}>
         名称
-        <input value={values.name} onChange={handleChange("name")} required />
-      </label>
-      <label>
-        介绍
-        <textarea value={values.description} onChange={handleChange("description")} required />
-      </label>
-      <label>
-        分类
-        <input value={values.category} onChange={handleChange("category")} required />
-      </label>
-      <label>
-        技能标签（逗号分隔）
-        <input value={values.skillTagsText} onChange={handleChange("skillTagsText")} />
-      </label>
-      <label>
-        作者介绍
-        <textarea value={values.authorBio} onChange={handleChange("authorBio")} />
-      </label>
-      <label>
-        调用地址（展示用途，http/https）
-        <input value={values.invocationUrl} onChange={handleChange("invocationUrl")} />
-      </label>
-      <label>
-        收款地址
-        <input value={values.payoutAddress} onChange={handleChange("payoutAddress")} required />
-      </label>
-      <label>
-        定价模式
-        <input value={values.pricingModel} onChange={handleChange("pricingModel")} />
-      </label>
-      <label>
-        参考价格
         <input
-          type="number"
-          min="0"
-          step="any"
-          value={values.referencePriceText}
-          onChange={handleChange("referencePriceText")}
+          value={values.name}
+          onChange={handleChange("name")}
+          required
+          className={inputClasses}
         />
       </label>
-      {errorMessage && <p role="alert">{errorMessage}</p>}
-      <button type="submit" disabled={pending}>
+      <label className={labelClasses}>
+        介绍
+        <textarea
+          value={values.description}
+          onChange={handleChange("description")}
+          required
+          rows={4}
+          className={inputClasses}
+        />
+      </label>
+      <label className={labelClasses}>
+        分类
+        <input
+          value={values.category}
+          onChange={handleChange("category")}
+          required
+          className={inputClasses}
+        />
+      </label>
+      <label className={labelClasses}>
+        技能标签（逗号分隔）
+        <input
+          value={values.skillTagsText}
+          onChange={handleChange("skillTagsText")}
+          className={inputClasses}
+        />
+      </label>
+      <label className={labelClasses}>
+        作者介绍
+        <textarea
+          value={values.authorBio}
+          onChange={handleChange("authorBio")}
+          rows={3}
+          className={inputClasses}
+        />
+      </label>
+      <label className={labelClasses}>
+        调用地址（展示用途，http/https）
+        <input
+          value={values.invocationUrl}
+          onChange={handleChange("invocationUrl")}
+          className={inputClasses}
+        />
+      </label>
+      <label className={labelClasses}>
+        收款地址
+        <input
+          value={values.payoutAddress}
+          onChange={handleChange("payoutAddress")}
+          required
+          className={`${inputClasses} font-mono`}
+        />
+      </label>
+      <label className={labelClasses}>
+        定价模式
+        <input
+          value={values.pricingModel}
+          onChange={handleChange("pricingModel")}
+          className={inputClasses}
+        />
+      </label>
+      <label className={labelClasses}>
+        参考价格
+        {/* type="text" + inputMode="decimal", not type="number": a number
+            input lets the browser normalize the value through a float and
+            accepts scientific notation, both of which are exactly the
+            precision-losing/format-mismatching failure this field must
+            avoid (see agentFormValuesToInput's comment). The mobile numeric
+            keyboard still shows via inputMode. `pattern` mirrors apps/api's
+            REFERENCE_PRICE_SCHEMA regex for native browser validation
+            feedback before a round trip to the server. */}
+        <input
+          type="text"
+          inputMode="decimal"
+          pattern="^\d+(\.\d+)?$"
+          title="非负十进制数字，例如 12.5（不支持科学计数法）"
+          value={values.referencePriceText}
+          onChange={handleChange("referencePriceText")}
+          className={inputClasses}
+        />
+      </label>
+      {errorMessage && (
+        <p role="alert" className="text-caption text-warning">
+          {errorMessage}
+        </p>
+      )}
+      <button
+        type="submit"
+        disabled={pending}
+        className="self-start rounded-control bg-action-blue px-6 py-3 text-body font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+      >
         {pending ? "提交中…" : submitLabel}
       </button>
     </form>
