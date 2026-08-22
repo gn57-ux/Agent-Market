@@ -36,7 +36,7 @@ runIfOptedIn("runMigrations (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -47,14 +47,22 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0001_create_users.sql",
       "0002_create_auth_nonces.sql",
       "0003_create_sessions.sql",
+      "0004_create_agents.sql",
     ]);
     expect(result.alreadyApplied).toEqual([]);
 
     const { rows } = await pool.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables
-       WHERE table_schema = 'public' AND table_name IN ('users', 'auth_nonces', 'sessions')`,
+       WHERE table_schema = 'public'
+       AND table_name IN ('users', 'auth_nonces', 'sessions', 'agents', 'agent_skills')`,
     );
-    expect(rows.map((row) => row.table_name).sort()).toEqual(["auth_nonces", "sessions", "users"]);
+    expect(rows.map((row) => row.table_name).sort()).toEqual([
+      "agent_skills",
+      "agents",
+      "auth_nonces",
+      "sessions",
+      "users",
+    ]);
   });
 
   it("is a no-op / does not fail when run again (idempotent)", async () => {
@@ -64,6 +72,7 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0001_create_users.sql",
       "0002_create_auth_nonces.sql",
       "0003_create_sessions.sql",
+      "0004_create_agents.sql",
     ]);
   });
 });

@@ -63,7 +63,7 @@ runIfOptedIn("app.requireSession / POST /auth/logout (integration, AC-404)", () 
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
     );
     await pool.end();
   });
