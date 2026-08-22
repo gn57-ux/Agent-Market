@@ -8,9 +8,12 @@ const NAV_LINK_ACTIVE_CLASSES = "text-action-blue font-medium";
 
 /** Shared chrome for every routed page — nav links, wallet status, session
  * login. router.tsx nests every page's route element inside this via
- * `<Outlet />`. `pt-[52px]` on `<main>` clears the fixed-height Header
- * (design.md's navigation token: "48-52px height"); each page's own
- * top-level section supplies its own breathing room below that. */
+ * `<Outlet />`. No manual top offset on `<main>` (Codex review, T-505
+ * round 1, P2): Header is `sticky`, not `fixed`, so it stays in normal
+ * document flow and reserves exactly the space it actually renders at —
+ * whether that's one line or several once the nav wraps. A fixed offset
+ * here would only be correct for the one-line case and would start
+ * overlapping content the moment the header grew taller than that. */
 export function RootLayout() {
   return (
     <div className="flex min-h-screen flex-col">
@@ -29,7 +32,7 @@ export function RootLayout() {
         <WalletConnectionStatus />
         <SignInButton />
       </Header>
-      <main className="flex-grow pt-[52px]">
+      <main className="flex-grow">
         <Outlet />
       </main>
       <Footer />
