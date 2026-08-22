@@ -101,6 +101,15 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
 
     reply.setCookie("session_token", session.token, {
       httpOnly: true,
+      // Codex review (T-404 P2): without `secure`, a bearer-token cookie
+      // could still be sent over a plain HTTP request to the same host
+      // even when the deployment is normally HTTPS (a downgrade/legacy
+      // request), leaking it in transit. `NODE_ENV` gates this rather than
+      // hardcoding `true` because local dev (`pnpm dev`) runs the API over
+      // plain HTTP, where a `secure` cookie would never be sent back at
+      // all — this is not a security relaxation, `secure` protects the
+      // cookie in transit and local dev has no such transit to protect.
+      secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
       expires: session.expiresAt,

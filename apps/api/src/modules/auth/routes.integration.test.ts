@@ -192,4 +192,67 @@ runIfOptedIn("POST /auth/nonce, /auth/verify (integration, AC-402)", () => {
     expect(response.statusCode).toBe(401);
     expect(response.json().error.code).toBe("WALLET_SIGNATURE_INVALID");
   });
+
+  it("allows a cross-origin request from the configured WEB_ORIGIN with credentials (Codex P1)", async () => {
+    // Regression: without CORS support, a browser blocks the frontend's
+    // JSON POST calls outright (Vite's dev server and this API run on
+    // different origins) — this asserts the actual response headers a
+    // browser's CORS preflight/check relies on, not just that the request
+    // reaches the handler (inject bypasses same-origin restrictions
+    // entirely, so this must check headers explicitly).
+    const origin = process.env.WEB_ORIGIN ?? "http://localhost:5173";
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/nonce",
+      headers: { origin },
+      payload: { address: account.address },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBe(origin);
+    expect(response.headers["access-control-allow-credentials"]).toBe("true");
+  });
+
+  it("sets the session cookie as Secure in production, not in development (Codex P2)", async () => {
+    const { nonce, issuedAt, expiresAt } = await requestNonce();
+    const message = buildSignInMessage({
+      domain: "localhost",
+      address: account.address,
+      nonce,
+      issuedAt: new Date(issuedAt),
+      expiresAt: new Date(expiresAt),
+    });
+    const signature = await account.signMessage({ message });
+
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    let productionResponse;
+    try {
+      productionResponse = await app.inject({
+        method: "POST",
+        url: "/auth/verify",
+        payload: { address: account.address, signature, nonce },
+      });
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+    expect(String(productionResponse.headers["set-cookie"])).toContain("Secure");
+
+    // A fresh nonce/signature: the previous one was already consumed above.
+    const second = await requestNonce();
+    const secondMessage = buildSignInMessage({
+      domain: "localhost",
+      address: account.address,
+      nonce: second.nonce,
+      issuedAt: new Date(second.issuedAt),
+      expiresAt: new Date(second.expiresAt),
+    });
+    const secondSignature = await account.signMessage({ message: secondMessage });
+    const devResponse = await app.inject({
+      method: "POST",
+      url: "/auth/verify",
+      payload: { address: account.address, signature: secondSignature, nonce: second.nonce },
+    });
+    expect(String(devResponse.headers["set-cookie"])).not.toContain("Secure");
+  });
 });
