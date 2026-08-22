@@ -59,3 +59,16 @@ export type ListAgentsQuery = z.infer<typeof listAgentsQuerySchema>;
 export const agentIdParamSchema = z.object({
   agentId: z.string().uuid("agentId 必须是合法的 UUID"),
 });
+
+/**
+ * F-503: `PATCH /agents/:agentId` body — `Partial<CreateAgentInput>`
+ * (design.md's interface contract). A key genuinely absent from the
+ * request body parses to `undefined` and is left untouched by
+ * repository.ts's `updateAgent`; a key present (even `skillTags: []`) is
+ * applied as given. `ownerAddress` was never part of `createAgentSchema`
+ * to begin with, so there's nothing here a client could use to reassign
+ * ownership.
+ */
+export const updateAgentSchema = createAgentSchema.partial();
+
+export type UpdateAgentInput = z.infer<typeof updateAgentSchema>;

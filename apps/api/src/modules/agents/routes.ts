@@ -1,8 +1,20 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyReply, FastifyRequest, FastifyInstance } from "fastify";
 import type { Pool } from "pg";
+import type { AgentMutationResult } from "./service.js";
 import type { AgentRow } from "./repository.js";
-import { createAgent, getAgentDetail, listAgentsForMarket } from "./service.js";
-import { agentIdParamSchema, createAgentSchema, listAgentsQuerySchema } from "./schema.js";
+import {
+  createAgent,
+  getAgentDetail,
+  listAgentsForMarket,
+  setAgentActiveStatus,
+  updateAgent,
+} from "./service.js";
+import {
+  agentIdParamSchema,
+  createAgentSchema,
+  listAgentsQuerySchema,
+  updateAgentSchema,
+} from "./schema.js";
 
 /** Shared response shape for both the list and detail endpoints (F-502).
  * `referencePrice` comes back from `pg` as a string (NUMERIC columns aren't
@@ -31,15 +43,47 @@ function toAgentSummaryJson(agent: AgentRow) {
 }
 
 /**
- * Registers the full F-501/F-502 Agent route surface. Wrapped in its own
- * `app.register(...)` at the call site (see app.ts), not called directly
- * after `buildApp()` returns: `POST /agents` uses `app.requireSession` as a
- * preHandler, and that decorator is only guaranteed to exist once
- * `registerSessionMiddleware`'s own registration has finished — see
- * session.middleware.ts's doc comment. `GET /agents` and `GET
- * /agents/:agentId` don't need a session (public Agent-market browsing,
- * design.md's interface contract) but are registered here alongside POST
- * for one discoverable module surface rather than splitting across files.
+ * All four mutating/authenticated routes below attach `app.requireSession`
+ * as a preHandler, which either short-circuits the request with a 401 or
+ * populates `request.address`. This helper exists only to read that value
+ * back without a non-null assertion (`@typescript-eslint/no-non-null-
+ * assertion` is an error in this project) — the 401 branch here is
+ * defensive, not expected to actually trigger given requireSession already
+ * ran first.
+ */
+function requireSessionAddress(request: FastifyRequest, reply: FastifyReply): string | undefined {
+  if (!request.address) {
+    reply
+      .status(401)
+      .send({ error: { message: "未检测到会话，请先通过 POST /auth/verify 登录。" } });
+    return undefined;
+  }
+  return request.address;
+}
+
+/** Shared 404/403 handling for updateAgent/setAgentActiveStatus's
+ * not_found/forbidden results (F-503/F-504, AC-505). */
+function sendMutationFailure(
+  reply: FastifyReply,
+  result: Extract<AgentMutationResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该 Agent。" } });
+  }
+  return reply.status(403).send({ error: { message: "只有 Agent 归属地址可以执行此操作。" } });
+}
+
+/**
+ * Registers the full F-501/F-502/F-503/F-504 Agent route surface. Wrapped
+ * in its own `app.register(...)` at the call site (see app.ts), not called
+ * directly after `buildApp()` returns: the session-protected routes below
+ * use `app.requireSession` as a preHandler, and that decorator is only
+ * guaranteed to exist once `registerSessionMiddleware`'s own registration
+ * has finished — see session.middleware.ts's doc comment. `GET /agents` and
+ * `GET /agents/:agentId` don't need a session (public Agent-market
+ * browsing, design.md's interface contract) but are registered here
+ * alongside the rest for one discoverable module surface rather than
+ * splitting across files.
  */
 export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
   app.post("/agents", { preHandler: app.requireSession }, async (request, reply) => {
@@ -48,16 +92,11 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
       return reply.status(400).send({ error: { message: parsed.error.message } });
     }
 
-    // requireSession's preHandler already returned a 401 and short-circuited
-    // the request if this weren't set — this check exists only to satisfy
-    // the type system without a non-null assertion, not because it's
-    // expected to trigger in practice.
-    if (!request.address) {
-      return reply.status(401).send({
-        error: { message: "未检测到会话，请先通过 POST /auth/verify 登录。" },
-      });
+    const sessionAddress = requireSessionAddress(request, reply);
+    if (!sessionAddress) {
+      return reply;
     }
-    const agent = await createAgent(pool, request.address, parsed.data);
+    const agent = await createAgent(pool, sessionAddress, parsed.data);
 
     return reply.status(201).send({
       agentId: agent.id,
@@ -95,4 +134,82 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
     }
     return reply.send(toAgentSummaryJson(agent));
   });
+
+  app.patch("/agents/:agentId", { preHandler: app.requireSession }, async (request, reply) => {
+    const paramsParsed = agentIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+    }
+    const bodyParsed = updateAgentSchema.safeParse(request.body);
+    if (!bodyParsed.success) {
+      return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+    }
+    const sessionAddress = requireSessionAddress(request, reply);
+    if (!sessionAddress) {
+      return reply;
+    }
+
+    const result = await updateAgent(
+      pool,
+      sessionAddress,
+      paramsParsed.data.agentId,
+      bodyParsed.data,
+    );
+    if (!result.ok) {
+      return sendMutationFailure(reply, result);
+    }
+    return reply.send(toAgentSummaryJson(result.agent));
+  });
+
+  app.post(
+    "/agents/:agentId/activate",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = agentIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const result = await setAgentActiveStatus(
+        pool,
+        sessionAddress,
+        paramsParsed.data.agentId,
+        "ACTIVE",
+      );
+      if (!result.ok) {
+        return sendMutationFailure(reply, result);
+      }
+      return reply.send(toAgentSummaryJson(result.agent));
+    },
+  );
+
+  app.post(
+    "/agents/:agentId/deactivate",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = agentIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const result = await setAgentActiveStatus(
+        pool,
+        sessionAddress,
+        paramsParsed.data.agentId,
+        "INACTIVE",
+      );
+      if (!result.ok) {
+        return sendMutationFailure(reply, result);
+      }
+      return reply.send(toAgentSummaryJson(result.agent));
+    },
+  );
 }

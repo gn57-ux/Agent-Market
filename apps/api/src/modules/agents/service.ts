@@ -5,10 +5,38 @@ import {
   getAgentById,
   insertAgent,
   listAgents,
+  setAgentStatus,
+  updateAgent as updateAgentRow,
   type AgentRow,
+  type AgentStatus,
   type ListAgentsResult,
 } from "./repository.js";
-import type { CreateAgentInput, ListAgentsQuery } from "./schema.js";
+import type { CreateAgentInput, ListAgentsQuery, UpdateAgentInput } from "./schema.js";
+
+/**
+ * Shared ownership-check result shape for F-503/F-504's mutating
+ * operations: `not_found` (no such Agent — 404) and `forbidden` (Agent
+ * exists but `sessionAddress` isn't its owner — 403) need different HTTP
+ * statuses, so routes.ts must be able to tell them apart rather than this
+ * layer collapsing both into a single boolean.
+ */
+export type AgentMutationResult =
+  { ok: true; agent: AgentRow } | { ok: false; reason: "not_found" | "forbidden" };
+
+async function requireOwnedAgent(
+  pool: Queryable,
+  sessionAddress: string,
+  agentId: string,
+): Promise<AgentMutationResult> {
+  const agent = await getAgentById(pool, agentId);
+  if (!agent) {
+    return { ok: false, reason: "not_found" };
+  }
+  if (agent.ownerAddress !== normalizeAddress(sessionAddress)) {
+    return { ok: false, reason: "forbidden" };
+  }
+  return { ok: true, agent };
+}
 
 /**
  * F-501/F-506: creates an Agent owned by `sessionAddress` (the caller's
@@ -68,4 +96,65 @@ export async function listAgentsForMarket(
  * that into a 404, this layer just reports absence. */
 export async function getAgentDetail(pool: Queryable, agentId: string): Promise<AgentRow | null> {
   return getAgentById(pool, agentId);
+}
+
+/**
+ * F-503: applies a partial edit, but only after confirming `sessionAddress`
+ * owns the Agent (AC-505: "非归属地址操作被拒绝") — checked here rather than at
+ * the SQL layer so `not_found` and `forbidden` stay distinguishable for
+ * routes.ts. Normalizes `payoutAddress`/dedupes `skillTags` the same way
+ * `createAgent` does, only for whichever of those two fields is actually
+ * present in `input`.
+ */
+export async function updateAgent(
+  pool: Pool,
+  sessionAddress: string,
+  agentId: string,
+  input: UpdateAgentInput,
+): Promise<AgentMutationResult> {
+  const owned = await requireOwnedAgent(pool, sessionAddress, agentId);
+  if (!owned.ok) {
+    return owned;
+  }
+
+  const updated = await updateAgentRow(pool, agentId, {
+    name: input.name,
+    description: input.description,
+    category: input.category,
+    authorBio: input.authorBio,
+    invocationUrl: input.invocationUrl,
+    payoutAddress: input.payoutAddress ? normalizeAddress(input.payoutAddress) : undefined,
+    pricingModel: input.pricingModel,
+    referencePrice: input.referencePrice,
+    skillTags: input.skillTags ? [...new Set(input.skillTags)] : undefined,
+  });
+  if (!updated) {
+    // Agent existed at the ownership check above but is gone now — a
+    // concurrent delete would be the only way this branch is reachable
+    // (no delete endpoint exists yet, so this is defensive, not expected).
+    return { ok: false, reason: "not_found" };
+  }
+  return { ok: true, agent: updated };
+}
+
+/**
+ * F-504: activate/deactivate — same ownership check as `updateAgent`
+ * (AC-505), just a direct status assignment rather than a general patch.
+ */
+export async function setAgentActiveStatus(
+  pool: Pool,
+  sessionAddress: string,
+  agentId: string,
+  status: AgentStatus,
+): Promise<AgentMutationResult> {
+  const owned = await requireOwnedAgent(pool, sessionAddress, agentId);
+  if (!owned.ok) {
+    return owned;
+  }
+
+  const updated = await setAgentStatus(pool, agentId, status);
+  if (!updated) {
+    return { ok: false, reason: "not_found" };
+  }
+  return { ok: true, agent: updated };
 }

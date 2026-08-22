@@ -237,3 +237,109 @@ export async function getAgentById(pool: Queryable, agentId: string): Promise<Ag
   const row = rows[0];
   return row ? toAgentRow(row, row.skill_tags) : null;
 }
+
+export interface UpdateAgentInput {
+  name?: string;
+  description?: string;
+  category?: string;
+  authorBio?: string;
+  invocationUrl?: string;
+  payoutAddress?: string;
+  pricingModel?: string;
+  referencePrice?: number;
+  skillTags?: string[];
+}
+
+/**
+ * F-503: partial update. Only keys actually present in `patch` are
+ * touched — `Partial<CreateAgentInput>` (design.md's PATCH contract) means
+ * "change these fields," not "reset everything to these values with
+ * omitted ones cleared." `skillTags`, when provided, replaces the full set
+ * (delete-then-reinsert in the same transaction as the column update) since
+ * there's no meaningful "partial" skill-tag edit at this table shape.
+ * Returns `null` if `agentId` doesn't exist — service.ts turns that into a
+ * 404 rather than this layer deciding the HTTP status.
+ */
+export async function updateAgent(
+  pool: Pool,
+  agentId: string,
+  patch: UpdateAgentInput,
+): Promise<AgentRow | null> {
+  const client = await pool.connect();
+  let found: boolean;
+  try {
+    await client.query("BEGIN");
+
+    const fieldMap: Record<string, unknown> = {
+      name: patch.name,
+      description: patch.description,
+      category: patch.category,
+      author_bio: patch.authorBio,
+      invocation_url: patch.invocationUrl,
+      payout_address: patch.payoutAddress,
+      pricing_model: patch.pricingModel,
+      reference_price: patch.referencePrice,
+    };
+    const entries = Object.entries(fieldMap).filter(([, value]) => value !== undefined);
+
+    if (entries.length > 0) {
+      const setClauses = entries.map(([column], index) => `${column} = $${index + 2}`);
+      const values = entries.map(([, value]) => value);
+      const result = await client.query(
+        `UPDATE agents SET ${setClauses.join(", ")}, updated_at = now() WHERE id = $1`,
+        [agentId, ...values],
+      );
+      found = (result.rowCount ?? 0) > 0;
+    } else {
+      // No plain-column changes requested (e.g. only skillTags changing) —
+      // still confirm the agent exists before touching agent_skills, so a
+      // patch targeting a nonexistent id doesn't silently create orphan
+      // skill rows with no owning agent.
+      const exists = await client.query(`SELECT 1 FROM agents WHERE id = $1`, [agentId]);
+      found = (exists.rowCount ?? 0) > 0;
+    }
+
+    if (found && patch.skillTags !== undefined) {
+      await client.query(`DELETE FROM agent_skills WHERE agent_id = $1`, [agentId]);
+      for (const skillTag of patch.skillTags) {
+        await client.query(`INSERT INTO agent_skills (agent_id, skill_tag) VALUES ($1, $2)`, [
+          agentId,
+          skillTag,
+        ]);
+      }
+    }
+
+    if (found) {
+      await client.query("COMMIT");
+    } else {
+      await client.query("ROLLBACK");
+    }
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return found ? getAgentById(pool, agentId) : null;
+}
+
+/**
+ * F-504: sets `status` directly (`ACTIVE`/`INACTIVE`) — the activate/
+ * deactivate endpoints' only state change. Returns `null` if `agentId`
+ * doesn't exist.
+ */
+export async function setAgentStatus(
+  pool: Queryable,
+  agentId: string,
+  status: AgentStatus,
+): Promise<AgentRow | null> {
+  const result = await pool.query(
+    `UPDATE agents SET status = $2, updated_at = now() WHERE id = $1`,
+    [agentId, status],
+  );
+  if ((result.rowCount ?? 0) === 0) {
+    return null;
+  }
+  return getAgentById(pool, agentId);
+}
