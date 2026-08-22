@@ -67,6 +67,8 @@ function mockWalletContext(generationBox: { current: number }): WalletContextVal
     identityGeneration: generationBox.current,
     getIdentityGeneration: () => generationBox.current,
     signMessage: vi.fn(),
+    getWalletClient: vi.fn(),
+    getPublicClient: vi.fn(),
   };
 }
 

@@ -5,6 +5,10 @@ import { AgentMarketPage } from "../features/agents/AgentMarketPage.js";
 import { AgentCreatePage } from "../features/agents/AgentCreatePage.js";
 import { AgentDetailPage } from "../features/agents/AgentDetailPage.js";
 import { AgentEditPage } from "../features/agents/AgentEditPage.js";
+import { TaskCreatePage } from "../features/tasks/TaskCreatePage.js";
+import { MyPublishedTasksPage } from "../features/tasks/MyPublishedTasksPage.js";
+import { TaskMarketPage } from "../features/tasks/TaskMarketPage.js";
+import { TaskDetailPage } from "../features/tasks/TaskDetailPage.js";
 
 /**
  * The single route table for apps/web (Feature 5 kickoff instruction:
@@ -24,6 +28,10 @@ export const router = createBrowserRouter([
       { path: "agents/new", element: <AgentCreatePage /> },
       { path: "agents/:agentId", element: <AgentDetailPage /> },
       { path: "agents/:agentId/edit", element: <AgentEditPage /> },
+      { path: "tasks", element: <TaskMarketPage /> },
+      { path: "tasks/new", element: <TaskCreatePage /> },
+      { path: "tasks/mine", element: <MyPublishedTasksPage /> },
+      { path: "tasks/:taskId", element: <TaskDetailPage /> },
     ],
   },
 ]);

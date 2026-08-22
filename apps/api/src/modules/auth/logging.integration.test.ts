@@ -44,7 +44,7 @@ runIfOptedIn(
 
     afterAll(async () => {
       await pool.query(
-        "DROP TABLE IF EXISTS agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+        "DROP TABLE IF EXISTS task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
       );
       await pool.end();
     });

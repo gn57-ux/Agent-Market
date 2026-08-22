@@ -18,7 +18,13 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { createPublicClient, createWalletClient, custom } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  type PublicClient,
+  type WalletClient,
+} from "viem";
 import { WalletButton } from "../../shared/components/index.js";
 
 const YD_TOKEN_ABI = [
@@ -132,6 +138,33 @@ export interface WalletContextValue {
    * has no knowledge of that protocol.
    */
   signMessage: (message: string) => Promise<string>;
+  /**
+   * Returns a viem `WalletClient` bound to the injected provider — the same
+   * `createWalletClient({ transport: custom(provider) })` construction
+   * `connect()`/`signMessage()` already use internally, now exposed so a
+   * feature module (Feature 6's `TaskCreatePage`: ERC-20 `approve` +
+   * `TaskEscrow.createTask`) can build and send its own contract calls
+   * without re-deriving "how do we reach `window.ethereum`" itself
+   * (CLAUDE.md 原则 6: 设计知识只能有一个归属 — that knowledge stays here).
+   * Deliberately does NOT bind an `account` to the returned client, matching
+   * `signMessage`'s pattern of passing `account` explicitly per call — a
+   * caller sending a transaction supplies `account: wallet.address` itself.
+   * Throws (not a nullable return) when no wallet is connected: a caller
+   * that reaches for this without checking `connection.status` first has a
+   * bug that should surface immediately, not be silently swallowed into an
+   * `undefined` a transaction-building call site might not even null-check.
+   */
+  getWalletClient: () => WalletClient;
+  /**
+   * Same rationale as `getWalletClient`, for reads instead of writes —
+   * mirrors `readYdBalance`'s existing internal
+   * `createPublicClient({ transport: custom(provider) })` construction, now
+   * exposed so a consumer's `useTransactionFlow` `confirm` callback (e.g.
+   * waiting for a transaction receipt) doesn't need its own copy of "how to
+   * reach the injected provider." Throws under the same disconnected
+   * condition as `getWalletClient`.
+   */
+  getPublicClient: () => PublicClient;
 }
 
 export interface WalletProviderProps {
@@ -481,6 +514,22 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
     [connection],
   );
 
+  const getWalletClient = useCallback((): WalletClient => {
+    if (connection.status !== "connected") {
+      throw new ActionableWalletError("请先连接 MetaMask 钱包，再发起交易。");
+    }
+    const provider = requireInjectedProvider();
+    return createWalletClient({ transport: custom(provider) });
+  }, [connection.status]);
+
+  const getPublicClient = useCallback((): PublicClient => {
+    if (connection.status !== "connected") {
+      throw new ActionableWalletError("请先连接 MetaMask 钱包，再读取链上数据。");
+    }
+    const provider = requireInjectedProvider();
+    return createPublicClient({ transport: custom(provider) });
+  }, [connection.status]);
+
   // F-402: listen for account/network changes initiated *inside the wallet*
   // (not through this app's own connect/switch buttons) — MetaMask's
   // accountsChanged/chainChanged events — so the app's state can't silently
@@ -614,6 +663,8 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       identityGeneration: identityGenerationRef.current,
       getIdentityGeneration,
       signMessage,
+      getWalletClient,
+      getPublicClient,
     }),
     [
       address,
@@ -626,6 +677,8 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       switchNetwork,
       getIdentityGeneration,
       signMessage,
+      getWalletClient,
+      getPublicClient,
       // `connection` above already changes on every real identity
       // transition (each one has a corresponding `recordIdentityIfChanged`
       // call), so this recomputes whenever the generation could have

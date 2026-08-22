@@ -6,6 +6,7 @@ import { getPool } from "./db/pool.js";
 import { registerAgentsRoutes } from "./modules/agents/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerSessionMiddleware } from "./modules/auth/session.middleware.js";
+import { registerTasksRoutes } from "./modules/tasks/routes.js";
 
 export interface BuildAppOptions {
   /** Test seam: pass a Pool bound to a throwaway test database instead of
@@ -55,6 +56,14 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // session.middleware.ts's doc comment.
   void app.register(async (instance) => {
     registerAgentsRoutes(instance, pool);
+  });
+
+  // Same reasoning as the agents registration above: POST /tasks/drafts and
+  // PATCH /tasks/:taskId/draft both use `app.requireSession` as a
+  // preHandler, so this needs its own `app.register(...)` after
+  // registerSessionMiddleware has finished.
+  void app.register(async (instance) => {
+    registerTasksRoutes(instance, pool);
   });
 
   return app;

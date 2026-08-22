@@ -19,12 +19,36 @@ export function RootLayout() {
     <div className="flex min-h-screen flex-col">
       <Header>
         <NavLink
+          to="/tasks"
+          className={({ isActive }) =>
+            isActive ? `${NAV_LINK_CLASSES} ${NAV_LINK_ACTIVE_CLASSES}` : NAV_LINK_CLASSES
+          }
+        >
+          任务市场
+        </NavLink>
+        <NavLink
           to="/agents"
           className={({ isActive }) =>
             isActive ? `${NAV_LINK_CLASSES} ${NAV_LINK_ACTIVE_CLASSES}` : NAV_LINK_CLASSES
           }
         >
           Agent 市场
+        </NavLink>
+        <NavLink
+          to="/tasks/new"
+          className={({ isActive }) =>
+            isActive ? `${NAV_LINK_CLASSES} ${NAV_LINK_ACTIVE_CLASSES}` : NAV_LINK_CLASSES
+          }
+        >
+          发布任务
+        </NavLink>
+        <NavLink
+          to="/tasks/mine"
+          className={({ isActive }) =>
+            isActive ? `${NAV_LINK_CLASSES} ${NAV_LINK_ACTIVE_CLASSES}` : NAV_LINK_CLASSES
+          }
+        >
+          我的发布
         </NavLink>
         <Link to="/" className={NAV_LINK_CLASSES}>
           首页
