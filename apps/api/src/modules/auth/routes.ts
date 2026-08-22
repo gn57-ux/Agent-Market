@@ -90,7 +90,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
       return reply.status(401).send({
         error: {
           code: WALLET_SIGNATURE_INVALID,
-          message: "Nonce not found, already used, or expired.",
+          message: "nonce 不存在、已被使用或已过期。",
         },
       });
     }
@@ -107,7 +107,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
       return reply.status(401).send({
         error: {
           code: WALLET_SIGNATURE_INVALID,
-          message: "Signature does not match the expected message.",
+          message: "签名与预期消息不匹配。",
         },
       });
     }
@@ -124,7 +124,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
     const result = await completeLogin(pool, address, nonce);
     if (!result.ok) {
       return reply.status(401).send({
-        error: { code: WALLET_SIGNATURE_INVALID, message: "Nonce was already used." },
+        error: { code: WALLET_SIGNATURE_INVALID, message: "nonce 已被使用。" },
       });
     }
     const session = result.session;

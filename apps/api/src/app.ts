@@ -1,6 +1,6 @@
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { Pool } from "pg";
 import { getPool } from "./db/pool.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
@@ -11,6 +11,12 @@ export interface BuildAppOptions {
    * the module-level singleton (which reads DATABASE_URL). Production
    * callers (server.ts) omit this and get `getPool()`. */
   pool?: Pool;
+  /** Test seam (T-406, AC-405): override Fastify's `logger` option — e.g.
+   * to point pino at a captured stream so a test can assert on the actual
+   * log output (no signature/nonce/session-token content), rather than
+   * only reasoning about it. Production callers omit this and get the
+   * default `true`. */
+  logger?: FastifyServerOptions["logger"];
 }
 
 /** The frontend origin allowed to call this API with credentials
@@ -28,7 +34,7 @@ function webOrigin(): string {
 }
 
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
-  const app = Fastify({ logger: true });
+  const app = Fastify({ logger: options.logger ?? true });
   const pool = options.pool ?? getPool();
 
   void app.register(cors, { origin: webOrigin(), credentials: true });

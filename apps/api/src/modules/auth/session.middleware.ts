@@ -39,13 +39,13 @@ async function sessionMiddlewarePlugin(app: FastifyInstance, pool: Pool): Promis
       const token = request.cookies[SESSION_COOKIE_NAME];
       if (!token) {
         return reply.status(401).send({
-          error: { message: "No session cookie present. Log in via POST /auth/verify first." },
+          error: { message: "未检测到会话，请先通过 POST /auth/verify 登录。" },
         });
       }
       const verified = await verifySession(pool, token);
       if (!verified) {
         return reply.status(401).send({
-          error: { message: "Session is invalid, expired, or has been logged out." },
+          error: { message: "会话无效、已过期或已登出。" },
         });
       }
       request.address = verified.address;
