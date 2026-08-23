@@ -6,6 +6,7 @@ import { getPool } from "./db/pool.js";
 import { registerAgentsRoutes } from "./modules/agents/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerSessionMiddleware } from "./modules/auth/session.middleware.js";
+import { registerDispatchRoutes } from "./modules/dispatch/routes.js";
 import { registerTasksRoutes } from "./modules/tasks/routes.js";
 
 export interface BuildAppOptions {
@@ -64,6 +65,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // registerSessionMiddleware has finished.
   void app.register(async (instance) => {
     registerTasksRoutes(instance, pool);
+  });
+
+  // Same reasoning as the two registrations above: POST /tasks/:taskId/match
+  // uses `app.requireSession` as a preHandler (T-705).
+  void app.register(async (instance) => {
+    registerDispatchRoutes(instance, pool);
   });
 
   return app;

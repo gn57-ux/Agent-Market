@@ -8,6 +8,7 @@ import (
 // RegisterRoutes wires the dispatch service's HTTP endpoints onto mux.
 func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/match", handleMatch)
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {

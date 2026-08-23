@@ -1,4 +1,5 @@
 import { assertExhaustive, type TaskStatus } from "@agent-market/domain";
+import { CandidateSection } from "../recommendations/CandidateSection.js";
 import { FundingSection } from "./task-detail-sections/FundingSection.js";
 
 export interface TaskDetailSectionsProps {
@@ -25,6 +26,7 @@ export function TaskDetailSections({ status, taskId }: TaskDetailSectionsProps) 
     case "AWAITING_FUNDING":
       return <FundingSection taskId={taskId} />;
     case "OPEN":
+      return <CandidateSection taskId={taskId} />;
     case "ACCEPTED":
     case "SUBMITTED":
     case "DISPUTED":

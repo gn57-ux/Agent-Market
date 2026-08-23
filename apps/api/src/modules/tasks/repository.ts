@@ -776,6 +776,48 @@ export interface ChainTransactionRow {
  * response's `confirmations` figure is recovered without re-querying the
  * chain a second time.
  */
+// ---------------------------------------------------------------------
+// T-705: candidate-snapshot assembly support for POST /tasks/:taskId/match.
+// ---------------------------------------------------------------------
+
+/** The `tasks.status` values that count as "this Agent currently occupies a
+ * capacity slot" — F-711's concurrent-capacity scope, owned by `tasks`
+ * (the table that actually knows what each status means), not duplicated
+ * into `modules/dispatch` (T-705 capsule: "这是 tasks 表自己的领域知识... dispatch
+ * 模块只调用它，不复制状态集合"). Matches
+ * dispatch-matching-migration.integration.test.ts's own hardcoded
+ * `IN ('ACCEPTED','SUBMITTED','DISPUTED')` list (T-700), which this
+ * function is the real implementation of. */
+const OCCUPYING_STATUSES: readonly TaskStatusValue[] = ["ACCEPTED", "SUBMITTED", "DISPUTED"];
+
+/**
+ * T-705: counts, per Agent, how many `tasks` rows are currently occupying
+ * one of that Agent's capacity slots (`accepted_agent_id = ANY(agentIds)
+ * AND status IN (...)`) — `assembleCandidateSnapshots` (dispatch/repository.ts)
+ * is this function's only caller, feeding the result into each candidate
+ * snapshot's `activeTaskCount`.
+ *
+ * `agentIds` empty → returns an empty Map without querying at all: `= ANY('{}')`
+ * is a valid but wasted round-trip for a case the caller (an empty candidate
+ * pool) already knows produces no rows.
+ */
+export async function countActiveTasksByAgentIds(
+  client: Queryable,
+  agentIds: string[],
+): Promise<Map<string, number>> {
+  if (agentIds.length === 0) {
+    return new Map();
+  }
+  const { rows } = await client.query<{ accepted_agent_id: string; count: string }>(
+    `SELECT accepted_agent_id, COUNT(*) AS count
+     FROM tasks
+     WHERE accepted_agent_id = ANY($1) AND status = ANY($2)
+     GROUP BY accepted_agent_id`,
+    [agentIds, OCCUPYING_STATUSES],
+  );
+  return new Map(rows.map((row) => [row.accepted_agent_id, Number(row.count)]));
+}
+
 export async function getChainTransactionByHash(
   pool: Queryable,
   chainId: number,

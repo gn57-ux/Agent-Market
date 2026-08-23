@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TaskDetailSections } from "./TaskDetailSections.js";
 import * as tasksApi from "./api.js";
 import type { TaskRecord } from "./api.js";
+import * as recommendationsApi from "../recommendations/api.js";
 
 vi.mock("../session/SessionProvider.js", () => ({
   useSession: () => ({
@@ -35,11 +36,12 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
   };
 }
 
-// Every non-DRAFT/AWAITING_FUNDING variant TaskStatus currently has — kept
-// as a literal list (not derived from the union) so this test fails loudly
-// if a status this suite doesn't know about starts rendering something.
+// Every non-DRAFT/AWAITING_FUNDING/OPEN variant TaskStatus currently has —
+// kept as a literal list (not derived from the union) so this test fails
+// loudly if a status this suite doesn't know about starts rendering
+// something. OPEN has its own dedicated test below (renders
+// CandidateSection, T-707).
 const NON_FUNDING_STATUSES: TaskStatus[] = [
-  { kind: "OPEN" },
   { kind: "ACCEPTED", agent: `0x${"2".repeat(40)}` },
   {
     kind: "SUBMITTED",
@@ -72,6 +74,21 @@ describe("TaskDetailSections", () => {
       expect(await findByText("资金锁定")).toBeTruthy();
     },
   );
+
+  it("renders CandidateSection for status OPEN", async () => {
+    const getRecommendationsSpy = vi
+      .spyOn(recommendationsApi, "getRecommendations")
+      .mockResolvedValue({ recommendations: [] });
+    const { findByText } = render(
+      <MemoryRouter>
+        <TaskDetailSections status={{ kind: "OPEN" }} taskId="task-1" />
+      </MemoryRouter>,
+    );
+    // CandidateSection's own heading — proves the OPEN branch actually
+    // rendered the section, not just returned truthy JSX.
+    expect(await findByText("推荐候选")).toBeTruthy();
+    expect(getRecommendationsSpy).toHaveBeenCalledWith("task-1");
+  });
 
   it.each(NON_FUNDING_STATUSES)(
     "renders nothing (no placeholder content) for status $kind",

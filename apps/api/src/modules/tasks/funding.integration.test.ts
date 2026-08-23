@@ -31,8 +31,8 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS task_state_history, chain_events, chain_transactions, task_skills, " +
-  "tasks, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
+  "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, task_state_history, chain_events, chain_transactions, task_skills, " +
+  "tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 // A trusted, well-formed (but not really deployed) TaskEscrow address —
 // deliberately non-zero, since packages/domain's resolveChainConfig throws

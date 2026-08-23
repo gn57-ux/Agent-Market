@@ -32,7 +32,7 @@ runIfOptedIn("GET /agents, GET /agents/:agentId (integration, F-502)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
     );
     await pool.end();
   });
