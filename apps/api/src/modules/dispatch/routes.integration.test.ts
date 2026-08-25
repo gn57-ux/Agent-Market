@@ -38,7 +38,7 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, task_state_history, " +
+  "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, acceptance_permits, task_state_history, " +
   "chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, " +
   "sessions, auth_nonces, users, schema_migrations CASCADE";
 
@@ -49,20 +49,53 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
   let app: Awaited<ReturnType<typeof buildApp>>;
   const requester = privateKeyToAccount(generatePrivateKey());
   const stranger = privateKeyToAccount(generatePrivateKey());
+  const signerPrivateKey = generatePrivateKey();
+  const TASK_ESCROW_ADDRESS = "0x1234567890123456789012345678901234567890";
+
+  // T-803: `matchTask` now auto-issues+persists acceptance permits right
+  // after persisting the run, so this suite needs the same permit-signing
+  // env vars T-706's suite below already sets up — a successful `/match`
+  // call in this suite would otherwise throw inside `issueAcceptancePermit`
+  // (missing `ACCEPTANCE_PERMIT_SIGNER_KEY`).
+  const savedEnv: Record<string, string | undefined> = {};
+  const ENV_KEYS = [
+    "ACCEPTANCE_PERMIT_SIGNER_KEY",
+    "CHAIN_ID",
+    "TASK_ESCROW_ADDRESS",
+    "YD_TOKEN_ADDRESS",
+    "YD_FAUCET_ADDRESS",
+  ];
 
   beforeAll(async () => {
     pool = new Pool({ connectionString: requireTestDatabaseUrl() });
     await runMigrations(pool, migrationsDir);
     app = buildApp({ pool });
+
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+    }
+    process.env.ACCEPTANCE_PERMIT_SIGNER_KEY = signerPrivateKey;
+    process.env.CHAIN_ID = "31337";
+    process.env.TASK_ESCROW_ADDRESS = TASK_ESCROW_ADDRESS;
+    process.env.YD_TOKEN_ADDRESS = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    process.env.YD_FAUCET_ADDRESS = "0x9876543210987654321098765432109876543210";
   });
 
   afterAll(async () => {
     await pool.query(DROP_ALL_TABLES_SQL);
     await pool.end();
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = savedEnv[key];
+      }
+    }
   });
 
   afterEach(async () => {
     callMatchMock.mockReset();
+    await pool.query("DELETE FROM acceptance_permits");
     await pool.query("DELETE FROM recommendation_candidates");
     await pool.query("DELETE FROM recommendation_runs");
     await pool.query("DELETE FROM tasks");
@@ -203,6 +236,197 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     expect(candidateRows).toHaveLength(1);
     expect(candidateRows[0]?.agent_id).toBe(agentId);
     expect(candidateRows[0]?.rank).toBe(1);
+  });
+
+  // T-803 (Feature 8, confirmed scope decision #1): a successful `/match`
+  // run must auto-issue+persist one `acceptance_permits` row per recommended
+  // candidate — without any separate call to
+  // `POST /tasks/:taskId/acceptance-permits`.
+  it("auto-issues and persists one acceptance_permits row per recommended candidate, without a separate /acceptance-permits call", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase());
+    const agentId = await insertActiveAgent();
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({
+      taskId,
+      algorithmVersion: "v0.1",
+      recommendations: [
+        { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.92, reasons: ["技能匹配"] },
+      ],
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/match`,
+      cookies: { session_token: token },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const { rows } = await pool.query<{
+      agent_id: string;
+      task_id: string;
+      status: string;
+      accepting_address: string;
+      signature: string;
+    }>(
+      `SELECT agent_id, task_id, status, accepting_address, signature FROM acceptance_permits WHERE task_id = $1`,
+      [taskId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.agent_id).toBe(agentId);
+    expect(rows[0]?.status).toBe("OUTSTANDING");
+    expect(rows[0]?.signature).toMatch(/^0x[0-9a-fA-F]+$/);
+  });
+
+  // T-806 (human N6 BLOCK fix): direct reversal of T-803 round 2's
+  // "dedupe by wallet, skip lower-ranked candidates" design, which the
+  // human reviewer rejected — every recommended candidate now gets its own
+  // independent permit, even when two candidates share a wallet.
+  // Attribution is resolved later by decoding the exact nonce the on-chain
+  // transaction's calldata used (acceptance-tx-verifier.ts), not by
+  // limiting issuance up front.
+  it("issues one independent acceptance_permits row per candidate — including BOTH, when two recommended candidates share a wallet", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase());
+    // Both share `insertActiveAgent()`'s single hardcoded owner address.
+    const higherRankedAgentId = await insertActiveAgent();
+    const lowerRankedAgentId = await insertActiveAgent();
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({
+      taskId,
+      algorithmVersion: "v0.1",
+      recommendations: [
+        {
+          agentId: higherRankedAgentId,
+          rank: 1,
+          slotType: "TOP_SCORE",
+          score: 0.92,
+          reasons: ["x"],
+        },
+        {
+          agentId: lowerRankedAgentId,
+          rank: 2,
+          slotType: "EXPLORATION",
+          score: 0.5,
+          reasons: ["y"],
+        },
+      ],
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/match`,
+      cookies: { session_token: token },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const { rows } = await pool.query<{ agent_id: string; nonce: string }>(
+      `SELECT agent_id, nonce FROM acceptance_permits WHERE task_id = $1 ORDER BY agent_id`,
+      [taskId],
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.agent_id).sort()).toEqual(
+      [higherRankedAgentId, lowerRankedAgentId].sort(),
+    );
+    // Every row gets its OWN independently-generated nonce — no sharing.
+    expect(new Set(rows.map((r) => r.nonce)).size).toBe(2);
+  });
+
+  // T-806, user's item #1: fault injection at the route/HTTP level — a
+  // failure during signing (before any DB write) must leave zero rows in
+  // run/candidates/permits, proving matchTask's "sign everything first,
+  // write everything atomically" ordering end to end.
+  it("persists nothing (run, candidates, or permits) when signing fails partway through — the whole /match call fails", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase());
+    const agentId = await insertActiveAgent();
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({
+      taskId,
+      algorithmVersion: "v0.1",
+      recommendations: [{ agentId, rank: 1, slotType: "TOP_SCORE", score: 0.92, reasons: ["x"] }],
+    });
+
+    const savedKey = process.env.ACCEPTANCE_PERMIT_SIGNER_KEY;
+    delete process.env.ACCEPTANCE_PERMIT_SIGNER_KEY; // issueAcceptancePermit throws
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/tasks/${taskId}/match`,
+        cookies: { session_token: token },
+      });
+      expect(response.statusCode).toBe(500);
+    } finally {
+      process.env.ACCEPTANCE_PERMIT_SIGNER_KEY = savedKey;
+    }
+
+    const runRows = await pool.query(`SELECT id FROM recommendation_runs WHERE task_id = $1`, [
+      taskId,
+    ]);
+    const permitRows = await pool.query(`SELECT id FROM acceptance_permits WHERE task_id = $1`, [
+      taskId,
+    ]);
+    expect(runRows.rows).toHaveLength(0);
+    expect(permitRows.rows).toHaveLength(0);
+  });
+
+  // T-806, user's item #1's last sentence: two concurrent /match calls for
+  // the SAME task must both succeed with fully independent, non-interleaved
+  // writes (repeated /match is a legitimate operation, not something to
+  // reject).
+  it("handles two concurrent /match calls for the same task without cross-writing runs/candidates/permits", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase());
+    const agentA = await insertActiveAgent();
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({
+      taskId,
+      algorithmVersion: "v0.1",
+      recommendations: [
+        { agentId: agentA, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+      ],
+    });
+
+    const [responseA, responseB] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: `/tasks/${taskId}/match`,
+        cookies: { session_token: token },
+      }),
+      app.inject({
+        method: "POST",
+        url: `/tasks/${taskId}/match`,
+        cookies: { session_token: token },
+      }),
+    ]);
+    expect(responseA.statusCode).toBe(200);
+    expect(responseB.statusCode).toBe(200);
+
+    const { rows: runRows } = await pool.query<{ id: string }>(
+      `SELECT id FROM recommendation_runs WHERE task_id = $1`,
+      [taskId],
+    );
+    expect(runRows).toHaveLength(2);
+
+    const { rows: candidateRows } = await pool.query<{ run_id: string }>(
+      `SELECT rc.run_id FROM recommendation_candidates rc
+       JOIN recommendation_runs rr ON rr.id = rc.run_id
+       WHERE rr.task_id = $1`,
+      [taskId],
+    );
+    expect(candidateRows).toHaveLength(2);
+    // Every run has exactly one candidate row — no interleaving.
+    const runIds = new Set(runRows.map((r) => r.id));
+    for (const runId of runIds) {
+      expect(candidateRows.filter((c) => c.run_id === runId)).toHaveLength(1);
+    }
+
+    const { rows: permitRows } = await pool.query<{ id: string; nonce: string }>(
+      `SELECT id, nonce FROM acceptance_permits WHERE task_id = $1`,
+      [taskId],
+    );
+    expect(permitRows).toHaveLength(2);
+    expect(new Set(permitRows.map((r) => r.nonce)).size).toBe(2);
   });
 
   it("returns 502 when the dispatch service is unavailable, without persisting a run", async () => {
@@ -403,6 +627,7 @@ runIfOptedIn(
     afterEach(async () => {
       await pool.query("DELETE FROM recommendation_candidates");
       await pool.query("DELETE FROM recommendation_runs");
+      await pool.query("DELETE FROM acceptance_permits");
       await pool.query("DELETE FROM tasks");
       await pool.query("DELETE FROM agent_skills");
       await pool.query("DELETE FROM agents");
@@ -657,6 +882,32 @@ runIfOptedIn(
         expect(response.statusCode).toBe(400);
       });
 
+      // Regression for Codex round 1 P2: a task that has left OPEN (e.g.
+      // already ACCEPTED, or cancelled) must reject manual re-issuance —
+      // otherwise this endpoint would happily mint new OUTSTANDING permits
+      // for a task no candidate can actually use `acceptTask` on anymore.
+      it("409s when the task is no longer OPEN, even though a recommendation run exists", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const agentId = await insertActiveAgent("0x1283fefc63f0cd0e873a0000c6d07ef7b77e90f9");
+        await insertRecommendationRunDirect(taskId, [
+          { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+        ]);
+        await pool.query(`UPDATE tasks SET status = 'ACCEPTED' WHERE id = $1`, [taskId]);
+        const token = await login(requester);
+
+        const response = await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/acceptance-permits`,
+          cookies: { session_token: token },
+        });
+
+        expect(response.statusCode).toBe(409);
+        const { rows } = await pool.query(`SELECT id FROM acceptance_permits WHERE task_id = $1`, [
+          taskId,
+        ]);
+        expect(rows).toHaveLength(0);
+      });
+
       it("issues one permit per candidate from the latest run, each matching the candidate's owner_address and the task's derived bytes32 id", async () => {
         const taskId = await insertOpenTask(requester.address.toLowerCase());
         const ownerA = "0x5583fefc63f0cd0e873a0000c6d07ef7b77e90e5";
@@ -735,6 +986,278 @@ runIfOptedIn(
           });
           expect(valid).toBe(true);
         }
+      });
+
+      // T-801 (Feature 8): as of that Task, this route persists a row per
+      // issued permit (`insertAcceptancePermit`, dispatch/repository.ts) —
+      // Feature 7's original implementation deliberately did not (see the
+      // now-corrected doc comment on `issuePermitsForTask`, routes.ts).
+      // This asserts that persistence actually happens end to end through
+      // the real HTTP endpoint, not just at the repository-function level.
+      it("persists one acceptance_permits row per candidate, all initially unconsumed, matching the response body's nonce/signature (T-801)", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const ownerA = "0x2183fefc63f0cd0e873a0000c6d07ef7b77e90f1";
+        const ownerB = "0x3283fefc63f0cd0e873a0000c6d07ef7b77e90f2";
+        const agentA = await insertActiveAgent(ownerA);
+        const agentB = await insertActiveAgent(ownerB);
+        await insertRecommendationRunDirect(taskId, [
+          { agentId: agentA, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+          { agentId: agentB, rank: 2, slotType: "EXPLORATION", score: 0.6, reasons: ["y"] },
+        ]);
+        const token = await login(requester);
+
+        const response = await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/acceptance-permits`,
+          cookies: { session_token: token },
+        });
+        expect(response.statusCode).toBe(200);
+        const body = response.json() as {
+          permits: Array<{ agentId: string; nonce: string; signature: string }>;
+        };
+        expect(body.permits).toHaveLength(2);
+
+        const { rows } = await pool.query<{
+          agent_id: string;
+          nonce: string;
+          signature: string;
+          status: string;
+        }>(`SELECT agent_id, nonce, signature, status FROM acceptance_permits WHERE task_id = $1`, [
+          taskId,
+        ]);
+        expect(rows).toHaveLength(2);
+        expect(rows.every((row) => row.status === "OUTSTANDING")).toBe(true);
+
+        const byAgent = new Map(rows.map((row) => [row.agent_id, row]));
+        for (const permit of body.permits) {
+          const persisted = byAgent.get(permit.agentId);
+          expect(persisted?.nonce).toBe(permit.nonce);
+          expect(persisted?.signature).toBe(permit.signature);
+        }
+      });
+    });
+
+    // T-806 (human N6 BLOCK fix): replaces T-803's
+    // `GET /tasks/:taskId/my-acceptance-permit` — a single wallet can now
+    // hold outstanding permits for more than one candidate Agent, so the
+    // caller must name which `agentId` it means.
+    describe("GET /tasks/:taskId/agents/:agentId/acceptance-permit (T-806)", () => {
+      it("401s an unauthenticated request", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const agentId = await insertActiveAgent("0x1183fefc63f0cd0e873a0000c6d07ef7b77e90e1");
+        const response = await app.inject({
+          method: "GET",
+          url: `/tasks/${taskId}/agents/${agentId}/acceptance-permit`,
+        });
+        expect(response.statusCode).toBe(401);
+      });
+
+      it("returns the caller's own outstanding, unexpired permit for a specific agentId", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        // The candidate itself (not the requester) is who calls this route
+        // for its own wallet — its Agent is registered directly under a
+        // freshly generated account this test can also sign in as.
+        const candidateAccount = privateKeyToAccount(generatePrivateKey());
+        const agentId = await insertActiveAgent(candidateAccount.address.toLowerCase());
+        await insertRecommendationRunDirect(taskId, [
+          { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+        ]);
+        const requesterToken = await login(requester);
+        await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/acceptance-permits`,
+          cookies: { session_token: requesterToken },
+        });
+
+        const candidateToken = await login(candidateAccount);
+
+        const response = await app.inject({
+          method: "GET",
+          url: `/tasks/${taskId}/agents/${agentId}/acceptance-permit`,
+          cookies: { session_token: candidateToken },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const body = response.json() as {
+          agentId: string;
+          taskId: string;
+          agentWalletAddress: string;
+          nonce: string;
+          expiry: number;
+          chainId: number;
+          verifyingContract: string;
+          signature: string;
+        };
+        expect(body.agentId).toBe(agentId);
+        expect(body.taskId).toBe(taskId);
+        expect(body.agentWalletAddress).toBe(candidateAccount.address.toLowerCase());
+        expect(typeof body.nonce).toBe("string");
+        expect(BigInt(body.nonce)).toBeGreaterThan(0n);
+      });
+
+      // T-806, user's item #2: the whole point of this route change — a
+      // wallet with TWO recommended candidate Agents can fetch EACH one's
+      // own independent permit, by agentId, without either being skipped.
+      it("returns each candidate's own independent permit when the same wallet owns two recommended candidates", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const candidateAccount = privateKeyToAccount(generatePrivateKey());
+        const agentA = await insertActiveAgent(candidateAccount.address.toLowerCase());
+        const agentB = await insertActiveAgent(candidateAccount.address.toLowerCase());
+        await insertRecommendationRunDirect(taskId, [
+          { agentId: agentA, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+          { agentId: agentB, rank: 2, slotType: "EXPLORATION", score: 0.5, reasons: ["y"] },
+        ]);
+        const requesterToken = await login(requester);
+        await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/acceptance-permits`,
+          cookies: { session_token: requesterToken },
+        });
+
+        const candidateToken = await login(candidateAccount);
+        const [responseA, responseB] = await Promise.all([
+          app.inject({
+            method: "GET",
+            url: `/tasks/${taskId}/agents/${agentA}/acceptance-permit`,
+            cookies: { session_token: candidateToken },
+          }),
+          app.inject({
+            method: "GET",
+            url: `/tasks/${taskId}/agents/${agentB}/acceptance-permit`,
+            cookies: { session_token: candidateToken },
+          }),
+        ]);
+        expect(responseA.statusCode).toBe(200);
+        expect(responseB.statusCode).toBe(200);
+        const bodyA = responseA.json() as { agentId: string; nonce: string };
+        const bodyB = responseB.json() as { agentId: string; nonce: string };
+        expect(bodyA.agentId).toBe(agentA);
+        expect(bodyB.agentId).toBe(agentB);
+        expect(bodyA.nonce).not.toBe(bodyB.nonce);
+      });
+
+      it("404s when the caller does not own agentId (even if agentId IS a candidate for this task)", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const candidateAccount = privateKeyToAccount(generatePrivateKey());
+        const agentId = await insertActiveAgent(candidateAccount.address.toLowerCase());
+        await insertRecommendationRunDirect(taskId, [
+          { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+        ]);
+        const requesterToken = await login(requester);
+        await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/acceptance-permits`,
+          cookies: { session_token: requesterToken },
+        });
+
+        const strangerToken = await login(stranger);
+        const response = await app.inject({
+          method: "GET",
+          url: `/tasks/${taskId}/agents/${agentId}/acceptance-permit`,
+          cookies: { session_token: strangerToken },
+        });
+        expect(response.statusCode).toBe(404);
+      });
+
+      it("404s when agentId is not a candidate for this task", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const token = await login(stranger);
+        const notACandidateAgentId = await insertActiveAgent(stranger.address.toLowerCase());
+
+        const response = await app.inject({
+          method: "GET",
+          url: `/tasks/${taskId}/agents/${notACandidateAgentId}/acceptance-permit`,
+          cookies: { session_token: token },
+        });
+        expect(response.statusCode).toBe(404);
+      });
+
+      it("404s when the permit has already been consumed", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const candidateAccount = privateKeyToAccount(generatePrivateKey());
+        const agentId = await insertActiveAgent(candidateAccount.address.toLowerCase());
+        await insertRecommendationRunDirect(taskId, [
+          { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+        ]);
+        const requesterToken = await login(requester);
+        await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/acceptance-permits`,
+          cookies: { session_token: requesterToken },
+        });
+        await pool.query(
+          `UPDATE acceptance_permits SET status = 'CONSUMED', consumed_at = now() WHERE task_id = $1 AND agent_id = $2`,
+          [taskId, agentId],
+        );
+
+        const candidateToken = await login(candidateAccount);
+        const response = await app.inject({
+          method: "GET",
+          url: `/tasks/${taskId}/agents/${agentId}/acceptance-permit`,
+          cookies: { session_token: candidateToken },
+        });
+        expect(response.statusCode).toBe(404);
+      });
+
+      it("404s when the permit has already been invalidated", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const candidateAccount = privateKeyToAccount(generatePrivateKey());
+        const agentId = await insertActiveAgent(candidateAccount.address.toLowerCase());
+        await insertRecommendationRunDirect(taskId, [
+          { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+        ]);
+        const requesterToken = await login(requester);
+        await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/acceptance-permits`,
+          cookies: { session_token: requesterToken },
+        });
+        await pool.query(
+          `UPDATE acceptance_permits SET status = 'INVALIDATED', consumed_at = now() WHERE task_id = $1 AND agent_id = $2`,
+          [taskId, agentId],
+        );
+
+        const candidateToken = await login(candidateAccount);
+        const response = await app.inject({
+          method: "GET",
+          url: `/tasks/${taskId}/agents/${agentId}/acceptance-permit`,
+          cookies: { session_token: candidateToken },
+        });
+        expect(response.statusCode).toBe(404);
+      });
+
+      // Regression for Codex round 1 P1 (T-803): a permit whose row still
+      // reads as OUTSTANDING/unexpired must still 404 once the TASK itself
+      // has left OPEN via some path other than this candidate's own
+      // acceptance (cancellation, or a different candidate already
+      // accepted) — letting them pay for a doomed `approve` first would
+      // otherwise be possible.
+      it("404s once the task itself has left OPEN, even though this candidate's own permit row is still OUTSTANDING and unexpired", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const candidateAccount = privateKeyToAccount(generatePrivateKey());
+        const agentId = await insertActiveAgent(candidateAccount.address.toLowerCase());
+        await insertRecommendationRunDirect(taskId, [
+          { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+        ]);
+        const requesterToken = await login(requester);
+        await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/acceptance-permits`,
+          cookies: { session_token: requesterToken },
+        });
+        // Task leaves OPEN by a path that never touches this candidate's
+        // own permit row (e.g. a different candidate's acceptance,
+        // simulated directly here rather than another full acceptTask
+        // flow).
+        await pool.query(`UPDATE tasks SET status = 'ACCEPTED' WHERE id = $1`, [taskId]);
+
+        const candidateToken = await login(candidateAccount);
+        const response = await app.inject({
+          method: "GET",
+          url: `/tasks/${taskId}/agents/${agentId}/acceptance-permit`,
+          cookies: { session_token: candidateToken },
+        });
+        expect(response.statusCode).toBe(404);
       });
     });
   },

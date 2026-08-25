@@ -36,7 +36,7 @@ runIfOptedIn("runMigrations (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, acceptance_permits, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -51,6 +51,7 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0005_create_tasks.sql",
       "0006_add_dispatch_matching_fields.sql",
       "0007_create_recommendation_tables.sql",
+      "0008_create_acceptance_permits.sql",
     ]);
     expect(result.alreadyApplied).toEqual([]);
 
@@ -59,9 +60,11 @@ runIfOptedIn("runMigrations (integration)", () => {
        WHERE table_schema = 'public'
        AND table_name IN ('users', 'auth_nonces', 'sessions', 'agents', 'agent_skills',
          'tasks', 'task_skills', 'chain_transactions', 'chain_events', 'task_state_history',
-         'blocked_wallets', 'recommendation_runs', 'recommendation_candidates')`,
+         'blocked_wallets', 'recommendation_runs', 'recommendation_candidates',
+         'acceptance_permits')`,
     );
     expect(rows.map((row) => row.table_name).sort()).toEqual([
+      "acceptance_permits",
       "agent_skills",
       "agents",
       "auth_nonces",
@@ -89,6 +92,7 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0005_create_tasks.sql",
       "0006_add_dispatch_matching_fields.sql",
       "0007_create_recommendation_tables.sql",
+      "0008_create_acceptance_permits.sql",
     ]);
   });
 });

@@ -1,3 +1,4 @@
+import type { ChainConfig } from "@agent-market/domain";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +17,44 @@ vi.mock("../session/SessionProvider.js", () => ({
   }),
 }));
 
+// An OPEN task now renders Feature 8's AcceptanceSection first (it decides
+// between itself and Feature 7's CandidateSection), which reads
+// `useWallet()` unconditionally — same reason TaskCreatePage.test.tsx mocks
+// this boundary rather than driving a real injected provider through viem's
+// wire protocol (WalletProvider.test.tsx's own job, unrelated to this page).
+const CHAIN_CONFIG: ChainConfig = {
+  chainId: 31337,
+  name: "Local Hardhat",
+  addresses: {
+    taskEscrow: `0x${"2".repeat(40)}` as const,
+    ydToken: `0x${"1".repeat(40)}` as const,
+    ydFaucet: `0x${"3".repeat(40)}` as const,
+  },
+};
+
+vi.mock("../wallet/WalletProvider.js", () => ({
+  useWallet: () => ({
+    connection: { status: "disconnected" },
+    address: undefined,
+    chainId: undefined,
+    chainConfig: CHAIN_CONFIG,
+    isCorrectNetwork: false,
+    errorMessage: undefined,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    switchNetwork: vi.fn(),
+    identityGeneration: 0,
+    getIdentityGeneration: () => 0,
+    signMessage: vi.fn(),
+    getWalletClient: () => {
+      throw new Error("not connected");
+    },
+    getPublicClient: () => {
+      throw new Error("not connected");
+    },
+  }),
+}));
+
 function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
     taskId: "task-1",
@@ -31,6 +70,8 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
     fundingTxHash: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    acceptedAgentAddress: null,
+    acceptedAt: null,
     ...overrides,
   };
 }

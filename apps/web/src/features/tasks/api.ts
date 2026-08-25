@@ -41,6 +41,11 @@ export interface TaskRecord {
   fundingTxHash: string | null;
   createdAt: string;
   updatedAt: string;
+  /** T-805: mirrors apps/api's `toTaskDraftJson` extension — `null` until
+   * the task is accepted (`tasks.accepted_agent_address`/`accepted_at`,
+   * written atomically by T-801's OPEN→ACCEPTED transition). */
+  acceptedAgentAddress: string | null;
+  acceptedAt: string | null;
 }
 
 export interface CreateDraftInput {
@@ -95,6 +100,9 @@ export type FundingVerificationResponse =
 
 export interface ListTasksParams {
   requester?: string;
+  /** T-805: "我的接单" list — filters `GET /tasks?acceptedBy=`, mirroring
+   * `requester` exactly. */
+  acceptedBy?: string;
   status?: TaskStatusValue;
   category?: string;
   skillTag?: string;
@@ -112,6 +120,7 @@ export interface ListTasksResult {
 function toQueryString(params: ListTasksParams): string {
   const search = new URLSearchParams();
   if (params.requester) search.set("requester", params.requester);
+  if (params.acceptedBy) search.set("acceptedBy", params.acceptedBy);
   if (params.status) search.set("status", params.status);
   if (params.category) search.set("category", params.category);
   if (params.skillTag) search.set("skillTag", params.skillTag);

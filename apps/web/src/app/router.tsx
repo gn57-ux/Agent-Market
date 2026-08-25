@@ -7,6 +7,7 @@ import { AgentDetailPage } from "../features/agents/AgentDetailPage.js";
 import { AgentEditPage } from "../features/agents/AgentEditPage.js";
 import { TaskCreatePage } from "../features/tasks/TaskCreatePage.js";
 import { MyPublishedTasksPage } from "../features/tasks/MyPublishedTasksPage.js";
+import { MyAcceptedTasksPage } from "../features/tasks/MyAcceptedTasksPage.js";
 import { TaskMarketPage } from "../features/tasks/TaskMarketPage.js";
 import { TaskDetailPage } from "../features/tasks/TaskDetailPage.js";
 
@@ -31,6 +32,7 @@ export const router = createBrowserRouter([
       { path: "tasks", element: <TaskMarketPage /> },
       { path: "tasks/new", element: <TaskCreatePage /> },
       { path: "tasks/mine", element: <MyPublishedTasksPage /> },
+      { path: "tasks/accepted", element: <MyAcceptedTasksPage /> },
       { path: "tasks/:taskId", element: <TaskDetailPage /> },
     ],
   },

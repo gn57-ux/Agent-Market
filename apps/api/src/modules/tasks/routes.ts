@@ -6,6 +6,7 @@ import { createChainRpcClient } from "../chain/rpc.client.js";
 import type {
   FundingIntentResult,
   FundingVerificationServiceResult,
+  TaskAcceptanceVerificationServiceResult,
   TaskDraftMutationResult,
 } from "./service.js";
 import type { TaskRow } from "./repository.js";
@@ -16,6 +17,7 @@ import {
   getTaskStateHistory,
   listTasksForMarket,
   updateDraft,
+  verifyAcceptance,
   verifyFunding,
 } from "./service.js";
 import {
@@ -84,6 +86,11 @@ function toTaskDraftJson(task: TaskRow) {
     fundingTxHash: task.fundingTxHash,
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString(),
+    // T-805: exposes the `accepted_agent_address`/`accepted_at` columns
+    // T-801 already writes atomically with the OPEN→ACCEPTED transition —
+    // both `null` until a task is accepted.
+    acceptedAgentAddress: task.acceptedAgentAddress,
+    acceptedAt: task.acceptedAt?.toISOString() ?? null,
   };
 }
 
@@ -235,6 +242,34 @@ function sendFundingVerificationFailure(
       error: {
         code: TASK_STATE_CONFLICT,
         message: `任务当前状态为 ${result.currentStatus}，无法复核资金交易。`,
+      },
+    });
+  }
+  return reply
+    .status(fundingErrorStatus(result.code))
+    .send({ error: { code: result.code, message: result.message } });
+}
+
+/** T-801: `POST /tasks/:taskId/acceptance-verifications` failure handling —
+ * reuses `fundingErrorStatus`'s exact ErrorCode→HTTP mapping (the mapping
+ * is about what each *code* means, not which endpoint produced it), so
+ * this only needs its own 404/409 message text and the passthrough
+ * `chain_error` branch. No `forbidden` branch: unlike `verifyFunding`,
+ * `verifyAcceptance` never returns one — see its own doc comment
+ * (service.ts) for why ownership is enforced through verification instead
+ * of a pre-check. */
+function sendAcceptanceVerificationFailure(
+  reply: FastifyReply,
+  result: Extract<TaskAcceptanceVerificationServiceResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该任务。" } });
+  }
+  if (result.reason === "conflict") {
+    return reply.status(409).send({
+      error: {
+        code: TASK_STATE_CONFLICT,
+        message: `任务当前状态为 ${result.currentStatus}，无法复核接单交易。`,
       },
     });
   }
@@ -426,6 +461,48 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
       );
       if (!result.ok) {
         return sendFundingVerificationFailure(reply, result);
+      }
+      return reply.send({ status: result.status, confirmations: result.confirmations });
+    },
+  );
+
+  // T-801 (Feature 8, task capsule's confirmed scope decision #2): mirrors
+  // `funding-verifications` above exactly — same body schema (`txHash`
+  // only), same session requirement, same RPC-client construction pattern.
+  // `fundingVerificationSchema` is reused as-is rather than a duplicate
+  // "acceptance verification schema": both bodies are the identical
+  // `{ txHash }` shape validated by the identical rule.
+  app.post(
+    "/tasks/:taskId/acceptance-verifications",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const bodyParsed = fundingVerificationSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      // A real, independent RPC client (BACKEND_RPC_URL) — same reasoning
+      // as funding-verifications above: never the frontend wallet's
+      // provider.
+      const rpc = createChainRpcClient();
+
+      const result = await verifyAcceptance(
+        pool,
+        rpc,
+        sessionAddress,
+        paramsParsed.data.taskId,
+        bodyParsed.data.txHash,
+      );
+      if (!result.ok) {
+        return sendAcceptanceVerificationFailure(reply, result);
       }
       return reply.send({ status: result.status, confirmations: result.confirmations });
     },

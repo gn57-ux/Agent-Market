@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
+import type { HexAddress } from "@agent-market/domain";
 import { formatAmount } from "@agent-market/domain";
 import { TaskCard } from "../../shared/components/TaskCard.js";
 import { ApiError, listTasks, type TaskRecord, type TaskStatusValue } from "./api.js";
@@ -184,7 +185,7 @@ export function TaskMarketPage() {
                     taskId={task.taskId}
                     title={task.title}
                     budgetDisplay={`${formatAmount(BigInt(task.budget))} YD`}
-                    status={toTaskStatus(task)}
+                    status={toTaskStatus(task, task.acceptedAgentAddress as HexAddress | null)}
                   />
                 </Link>
               ))}

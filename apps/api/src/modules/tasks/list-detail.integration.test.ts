@@ -22,7 +22,7 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, task_state_history, chain_events, chain_transactions, task_skills, " +
+  "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, acceptance_permits, task_state_history, chain_events, chain_transactions, task_skills, " +
   "tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 const VALID_DRAFT_PAYLOAD = {
@@ -474,6 +474,69 @@ runIfOptedIn(
       });
       expect(response.statusCode).toBe(200);
       expect(response.json().items).toEqual([]);
+    });
+
+    // T-805: `acceptedBy` filters `tasks.accepted_agent_address` directly
+    // via SQL rather than driving the full acceptance flow (dispatch
+    // matching / acceptance-permits / on-chain verification) — that flow is
+    // already covered end to end by acceptance.integration.test.ts; this
+    // suite only needs to prove GET /tasks' filter and GET /tasks/:taskId's
+    // field exposure, both of which only depend on the column values being
+    // set, not on how they got there.
+    it("filters by acceptedBy, returning only tasks accepted by that address (T-805)", async () => {
+      const token = await login(requester);
+      const agentA = privateKeyToAccount(generatePrivateKey());
+      const agentB = privateKeyToAccount(generatePrivateKey());
+
+      const acceptedByAId = await createDraft(token, { title: "Accepted by A" });
+      await pool.query(
+        `UPDATE tasks SET status = 'ACCEPTED', accepted_agent_address = $2, accepted_at = now()
+         WHERE id = $1`,
+        [acceptedByAId, agentA.address.toLowerCase()],
+      );
+
+      const acceptedByBId = await createDraft(token, { title: "Accepted by B" });
+      await pool.query(
+        `UPDATE tasks SET status = 'ACCEPTED', accepted_agent_address = $2, accepted_at = now()
+         WHERE id = $1`,
+        [acceptedByBId, agentB.address.toLowerCase()],
+      );
+
+      const stillOpenId = await createDraft(token, { title: "Still open" });
+      await pool.query(`UPDATE tasks SET status = 'OPEN' WHERE id = $1`, [stillOpenId]);
+
+      const response = await app.inject({
+        method: "GET",
+        url: `/tasks?acceptedBy=${agentA.address}`,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.total).toBe(1);
+      expect(body.items[0].taskId).toBe(acceptedByAId);
+      expect(body.items[0].acceptedAgentAddress).toBe(agentA.address.toLowerCase());
+    });
+
+    it("GET /tasks/:taskId includes acceptedAgentAddress/acceptedAt — null when not accepted, real values once accepted (T-805)", async () => {
+      const token = await login(requester);
+      const openId = await createDraft(token, { title: "Not yet accepted" });
+      await pool.query(`UPDATE tasks SET status = 'OPEN' WHERE id = $1`, [openId]);
+
+      const beforeAcceptance = await app.inject({ method: "GET", url: `/tasks/${openId}` });
+      expect(beforeAcceptance.statusCode).toBe(200);
+      expect(beforeAcceptance.json().acceptedAgentAddress).toBeNull();
+      expect(beforeAcceptance.json().acceptedAt).toBeNull();
+
+      const agent = privateKeyToAccount(generatePrivateKey());
+      await pool.query(
+        `UPDATE tasks SET status = 'ACCEPTED', accepted_agent_address = $2, accepted_at = now()
+         WHERE id = $1`,
+        [openId, agent.address.toLowerCase()],
+      );
+
+      const afterAcceptance = await app.inject({ method: "GET", url: `/tasks/${openId}` });
+      expect(afterAcceptance.statusCode).toBe(200);
+      expect(afterAcceptance.json().acceptedAgentAddress).toBe(agent.address.toLowerCase());
+      expect(typeof afterAcceptance.json().acceptedAt).toBe("string");
     });
   },
 );

@@ -1,5 +1,5 @@
 import { assertExhaustive, type TaskStatus } from "@agent-market/domain";
-import { CandidateSection } from "../recommendations/CandidateSection.js";
+import { AcceptanceSection } from "../acceptance/AcceptanceSection.js";
 import { FundingSection } from "./task-detail-sections/FundingSection.js";
 
 export interface TaskDetailSectionsProps {
@@ -26,7 +26,11 @@ export function TaskDetailSections({ status, taskId }: TaskDetailSectionsProps) 
     case "AWAITING_FUNDING":
       return <FundingSection taskId={taskId} />;
     case "OPEN":
-      return <CandidateSection taskId={taskId} />;
+      // Feature 7's CandidateSection vs. Feature 8's AcceptanceSection:
+      // AcceptanceSection decides between the two itself (see its own doc
+      // comment) — this stays the one-line-import + one-case change the
+      // T-802 capsule's verification note requires.
+      return <AcceptanceSection taskId={taskId} />;
     case "ACCEPTED":
     case "SUBMITTED":
     case "DISPUTED":

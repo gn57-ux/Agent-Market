@@ -1,4 +1,5 @@
 import type { ChainRpcClient } from "./rpc.client.js";
+import { decodeTaskAcceptedLog, type DecodedTaskAcceptedEvent } from "./task-accepted-event.js";
 import {
   decodeTaskFundedLog,
   type DecodedTaskFundedEvent,
@@ -49,6 +50,37 @@ export function decodeFundedEventsFromLogs(
       continue;
     }
     const decoded = decodeTaskFundedLog(log);
+    if (decoded) {
+      results.push({ event: decoded, logIndex: log.logIndex });
+    }
+  }
+  return results;
+}
+
+export interface AcceptedEventLogDecodeResult {
+  event: DecodedTaskAcceptedEvent;
+  logIndex: number;
+}
+
+/**
+ * Decodes every `TaskAccepted` log emitted by `trustedContractAddress` in a
+ * set of receipt logs — T-801's mirror of `decodeFundedEventsFromLogs`
+ * above, same reasoning: a receipt can only reasonably contain one
+ * `TaskAccepted` log per `acceptTask` call, but this doesn't assume that,
+ * decoding all matches so a caller can detect an unexpected duplicate
+ * rather than silently keeping only the first.
+ */
+export function decodeAcceptedEventsFromLogs(
+  logs: readonly RawEventLog[],
+  trustedContractAddress: string,
+): AcceptedEventLogDecodeResult[] {
+  const normalizedTrusted = trustedContractAddress.toLowerCase();
+  const results: AcceptedEventLogDecodeResult[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== normalizedTrusted) {
+      continue;
+    }
+    const decoded = decodeTaskAcceptedLog(log);
     if (decoded) {
       results.push({ event: decoded, logIndex: log.logIndex });
     }

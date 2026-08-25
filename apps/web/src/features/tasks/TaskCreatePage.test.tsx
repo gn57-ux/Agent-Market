@@ -85,6 +85,8 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
     fundingTxHash: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    acceptedAgentAddress: null,
+    acceptedAt: null,
     ...overrides,
   };
 }

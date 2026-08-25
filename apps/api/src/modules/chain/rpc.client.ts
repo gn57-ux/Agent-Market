@@ -2,9 +2,11 @@ import {
   BlockNotFoundError,
   createPublicClient,
   http,
+  TransactionNotFoundError,
   TransactionReceiptNotFoundError,
 } from "viem";
 import type { RawEventLog } from "./task-funded-event.js";
+import { TASK_ESCROW_STAKE_RATE_BPS_ABI } from "./task-escrow-accept-abi.js";
 
 /**
  * Minimal, backend-only read shape of a transaction receipt. Deliberately
@@ -27,6 +29,21 @@ export interface TransactionReceiptResult {
 export interface BlockResult {
   hash: string;
   number: bigint;
+}
+
+/**
+ * Minimal, backend-only read shape of a transaction itself (NOT its
+ * receipt) — only the field `acceptance-tx-verifier.ts` actually needs
+ * (T-806): the raw calldata (`input`), which is the ONLY place
+ * `AcceptancePermit.nonce` is recoverable from. `TaskAccepted` (the event
+ * log, read via `getTransactionReceipt` above) carries no `nonce` at all —
+ * receipts alone can never disambiguate which of several outstanding
+ * permits for the same wallet was actually used, only the transaction's own
+ * calldata can. Same "minimal necessary fields, not viem's full
+ * `Transaction` type" discipline as `TransactionReceiptResult` above.
+ */
+export interface TransactionResult {
+  input: `0x${string}`;
 }
 
 /**
@@ -57,6 +74,19 @@ export interface ChainRpcClient {
    * reorg detection. */
   getBlock(params: { blockNumber: bigint }): Promise<BlockResult | null>;
   getChainId(): Promise<number>;
+  /** `null` means "no such transaction" (routine — same meaning as
+   * `getTransactionReceipt`'s `null`). A thrown error means the RPC call
+   * itself failed and must be treated as unknown, same discipline as every
+   * other method on this interface (T-806). */
+  getTransaction(txHash: `0x${string}`): Promise<TransactionResult | null>;
+  /** Reads `TaskEscrow.STAKE_RATE_BPS` directly from the deployed contract
+   * (T-806, independent stake verification — user's item #6) —
+   * `contractAddress` is passed explicitly (not read from env inside this
+   * client) so this stays symmetric with how every other trusted-contract
+   * value flows in from the caller (`trustedContractAddress` params
+   * elsewhere in this module), never resolved twice from two different
+   * sources. */
+  readStakeRateBps(contractAddress: `0x${string}`): Promise<bigint>;
 }
 
 const BACKEND_RPC_URL_VAR = "BACKEND_RPC_URL";
@@ -126,6 +156,24 @@ export function createChainRpcClient(env: NodeJS.ProcessEnv = process.env): Chai
     },
     getChainId() {
       return client.getChainId();
+    },
+    async getTransaction(txHash) {
+      try {
+        const tx = await client.getTransaction({ hash: txHash });
+        return { input: tx.input };
+      } catch (error) {
+        if (error instanceof TransactionNotFoundError) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    async readStakeRateBps(contractAddress) {
+      return client.readContract({
+        address: contractAddress,
+        abi: TASK_ESCROW_STAKE_RATE_BPS_ABI,
+        functionName: "STAKE_RATE_BPS",
+      });
     },
   };
 }

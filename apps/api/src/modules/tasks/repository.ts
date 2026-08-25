@@ -30,6 +30,12 @@ export interface TaskRow {
   skillTags: string[];
   createdAt: Date;
   updatedAt: Date;
+  /** T-805: `tasks.accepted_agent_address`/`accepted_at` (0006_add_dispatch_
+   * matching_fields.sql) — written atomically with the OPEN→ACCEPTED
+   * transition (T-801/service.ts) but not previously read back by this
+   * module. Both `null` until a task is accepted. */
+  acceptedAgentAddress: string | null;
+  acceptedAt: Date | null;
 }
 
 interface TaskQueryRow {
@@ -46,6 +52,8 @@ interface TaskQueryRow {
   idempotency_key: string | null;
   created_at: Date;
   updated_at: Date;
+  accepted_agent_address: string | null;
+  accepted_at: Date | null;
 }
 
 function toTaskRow(row: TaskQueryRow, skillTags: string[]): TaskRow {
@@ -64,12 +72,14 @@ function toTaskRow(row: TaskQueryRow, skillTags: string[]): TaskRow {
     skillTags,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    acceptedAgentAddress: row.accepted_agent_address,
+    acceptedAt: row.accepted_at,
   };
 }
 
 const TASK_COLUMNS = `id, requester_address, category, title, description, budget, token,
                       delivery_deadline, status, funding_tx_hash, idempotency_key,
-                      created_at, updated_at`;
+                      created_at, updated_at, accepted_agent_address, accepted_at`;
 
 export interface InsertTaskDraftInput {
   requesterAddress: string;
@@ -475,7 +485,12 @@ export interface InsertChainTransactionInput {
   txHash: string;
   chainId: number;
   taskId: string;
-  purpose: "FUNDING";
+  /** `chain_transactions.purpose` is a free TEXT column (0005_create_tasks.sql:
+   * "purpose(FUNDING|ACCEPTANCE|...)" — the full set is deliberately not a
+   * closed DB-level enum), so adding `"ACCEPTANCE"` here (T-801) needed no
+   * migration — only widening this call-site type to the two purposes this
+   * codebase actually issues today. */
+  purpose: "FUNDING" | "ACCEPTANCE";
   status: "confirmed";
   confirmations: number;
 }
@@ -600,6 +615,12 @@ const PUBLIC_MARKET_STATUSES: readonly TaskStatusValue[] = [
 
 export interface ListTasksFilter {
   requester?: string;
+  /** T-805: filters `tasks.accepted_agent_address` — same public-filter
+   * status as `category`/`skillTag` (see `listTasksQuerySchema`'s doc
+   * comment, schema.ts): no `restrictToPublicStatuses`-style authorization
+   * gate needed, an accepted agent's address is already visible on every
+   * published task. */
+  acceptedBy?: string;
   status?: TaskStatusValue;
   category?: string;
   skillTag?: string;
@@ -676,6 +697,7 @@ export async function listTasks(
     filter.category ?? null,
     filter.skillTag ?? null,
     filter.restrictToPublicStatuses ? PUBLIC_MARKET_STATUSES : null,
+    filter.acceptedBy ?? null,
   ];
   const filterWhere = `
     WHERE ($1::text IS NULL OR t.requester_address = $1)
@@ -688,13 +710,14 @@ export async function listTasks(
         )
       )
       AND ($5::text[] IS NULL OR t.status = ANY($5))
+      AND ($6::text IS NULL OR t.accepted_agent_address = $6)
   `;
 
   const [itemsResult, countResult] = await Promise.all([
     pool.query<TaskListQueryRow>(
       `SELECT t.id, t.requester_address, t.category, t.title, t.description, t.budget, t.token,
               t.delivery_deadline, t.status, t.funding_tx_hash, t.idempotency_key,
-              t.created_at, t.updated_at,
+              t.created_at, t.updated_at, t.accepted_agent_address, t.accepted_at,
               COALESCE(
                 array_agg(s.skill_tag) FILTER (WHERE s.skill_tag IS NOT NULL),
                 '{}'
@@ -704,7 +727,7 @@ export async function listTasks(
        ${filterWhere}
        GROUP BY t.id
        ORDER BY t.created_at DESC, t.id DESC
-       LIMIT $6 OFFSET $7`,
+       LIMIT $7 OFFSET $8`,
       [...filterParams, filter.pageSize, offset],
     ),
     pool.query<{ total: string }>(
@@ -818,14 +841,30 @@ export async function countActiveTasksByAgentIds(
   return new Map(rows.map((row) => [row.accepted_agent_id, Number(row.count)]));
 }
 
+/**
+ * `purpose` is optional and, when passed, narrows the lookup to rows
+ * recorded for that purpose (Codex review, T-801 round 1, P2): without it,
+ * a task's own `FUNDING` transaction hash would satisfy a caller's
+ * `(chainId, txHash, taskId)` replay check meant for a DIFFERENT purpose
+ * (e.g. `verifyAcceptance`'s idempotent-replay lookup), since both rows
+ * share the same `taskId` — `chain_transactions.purpose` is the only column
+ * that actually distinguishes them. The two `FUNDING` call sites
+ * (`verifyFunding`) don't need this: they already gate on
+ * `task.fundingTxHash === normalizedTxHash` first, so they can only ever
+ * reach a `FUNDING` row.
+ */
 export async function getChainTransactionByHash(
   pool: Queryable,
   chainId: number,
   txHash: string,
+  purpose?: string,
 ): Promise<ChainTransactionRow | null> {
   const { rows } = await pool.query<{ task_id: string; confirmations: number; status: string }>(
-    `SELECT task_id, confirmations, status FROM chain_transactions WHERE chain_id = $1 AND tx_hash = $2`,
-    [chainId, txHash.toLowerCase()],
+    purpose
+      ? `SELECT task_id, confirmations, status FROM chain_transactions
+         WHERE chain_id = $1 AND tx_hash = $2 AND purpose = $3`
+      : `SELECT task_id, confirmations, status FROM chain_transactions WHERE chain_id = $1 AND tx_hash = $2`,
+    purpose ? [chainId, txHash.toLowerCase(), purpose] : [chainId, txHash.toLowerCase()],
   );
   const row = rows[0];
   if (!row) {

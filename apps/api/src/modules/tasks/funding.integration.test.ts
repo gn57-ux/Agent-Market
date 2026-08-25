@@ -31,7 +31,7 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, task_state_history, chain_events, chain_transactions, task_skills, " +
+  "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, acceptance_permits, task_state_history, chain_events, chain_transactions, task_skills, " +
   "tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 // A trusted, well-formed (but not really deployed) TaskEscrow address —
@@ -112,6 +112,14 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     },
     async getChainId() {
       return chainId;
+    },
+    // T-806: unused by funding verification — see tx-verifier.test.ts's
+    // identical stub for why.
+    async getTransaction() {
+      throw new Error("getTransaction: not used by funding verification");
+    },
+    async readStakeRateBps() {
+      throw new Error("readStakeRateBps: not used by funding verification");
     },
   };
 }
@@ -593,6 +601,12 @@ runIfOptedIn(
         async getChainId() {
           return Number(TEST_CHAIN_ID);
         },
+        async getTransaction() {
+          throw new Error("getTransaction: not used by funding verification");
+        },
+        async readStakeRateBps() {
+          throw new Error("readStakeRateBps: not used by funding verification");
+        },
       };
 
       const result = await verifyFunding(pool, rpc, requester.address, taskId, txHash);
@@ -990,6 +1004,12 @@ runIfOptedIn(
         },
         async getChainId() {
           return Number(TEST_CHAIN_ID);
+        },
+        async getTransaction() {
+          throw new Error("getTransaction: not used by funding verification");
+        },
+        async readStakeRateBps() {
+          throw new Error("readStakeRateBps: not used by funding verification");
         },
       };
 
