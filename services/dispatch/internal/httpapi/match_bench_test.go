@@ -63,8 +63,20 @@ func benchmarkMatchRequestBody(candidateCount int) []byte {
 			status = "INACTIVE"
 		}
 
+		// completedTaskCount/successCount must satisfy successCount <=
+		// completedTaskCount and both >= 0 (T-708's new validation) —
+		// deriving successCount as a modulus of (completedTaskCount+1)
+		// guarantees that relationship holds for every i, unlike the
+		// previous (i%30)-(i%7) formula, which could go negative (e.g.
+		// i=34: 4-6=-2) and would now be rejected as invalid input.
+		completedTaskCount := i % 30
+		successCount := i % (completedTaskCount + 1)
+
 		candidates = append(candidates, map[string]any{
-			"agentId":            fmt.Sprintf("agent-%04d", i),
+			// agentId is now validated as UUID-shaped (T-708 category 4);
+			// this deterministic, i-derived hex string satisfies
+			// uuidPattern while staying unique per candidate.
+			"agentId":            fmt.Sprintf("%08x-0000-4000-8000-%012x", i, i),
 			"walletAddress":      fmt.Sprintf("0x%040x", i+1),
 			"status":             status,
 			"category":           category,
@@ -72,8 +84,8 @@ func benchmarkMatchRequestBody(candidateCount int) []byte {
 			"level":              levelLiterals[i%len(levelLiterals)],
 			"maxConcurrentTasks": 3 + i%5,
 			"activeTaskCount":    i % 4,
-			"completedTaskCount": i % 30,
-			"successCount":       (i % 30) - (i % 7),
+			"completedTaskCount": completedTaskCount,
+			"successCount":       successCount,
 			"overdueCount":       i % 3,
 			"qualityScore":       qualityScore,
 			"createdAt":          "2024-01-01T00:00:00Z",
@@ -82,7 +94,8 @@ func benchmarkMatchRequestBody(candidateCount int) []byte {
 	}
 
 	body := map[string]any{
-		"taskId":           "bench-task",
+		// taskId is now validated as UUID-shaped (T-708 category 4).
+		"taskId":           "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
 		"category":         "design",
 		"skillTags":        []string{"figma", "branding"},
 		"deliveryDeadline": "2024-06-01T00:00:00Z",
