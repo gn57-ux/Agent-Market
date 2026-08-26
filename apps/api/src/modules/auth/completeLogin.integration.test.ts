@@ -32,7 +32,7 @@ runIfOptedIn("completeLogin (integration, Codex round-2 P2 regression)", () => {
     // wasn't reached due to an earlier failure — afterAll must never leave
     // the shared test database missing a table for the next suite.
     await pool.query(
-      "DROP TABLE IF EXISTS recommendation_candidates, recommendation_runs, acceptance_permits, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
     );
     await pool.end();
   });

@@ -1,4 +1,8 @@
 import type { ChainRpcClient } from "./rpc.client.js";
+import {
+  decodeResultSubmittedLog,
+  type DecodedResultSubmittedEvent,
+} from "./result-submitted-event.js";
 import { decodeTaskAcceptedLog, type DecodedTaskAcceptedEvent } from "./task-accepted-event.js";
 import {
   decodeTaskFundedLog,
@@ -81,6 +85,38 @@ export function decodeAcceptedEventsFromLogs(
       continue;
     }
     const decoded = decodeTaskAcceptedLog(log);
+    if (decoded) {
+      results.push({ event: decoded, logIndex: log.logIndex });
+    }
+  }
+  return results;
+}
+
+export interface ResultSubmittedEventLogDecodeResult {
+  event: DecodedResultSubmittedEvent;
+  logIndex: number;
+}
+
+/**
+ * Decodes every `ResultSubmitted` log emitted by `trustedContractAddress`
+ * in a set of receipt logs — T-905's mirror of
+ * `decodeAcceptedEventsFromLogs` above, same reasoning: a receipt can only
+ * reasonably contain one `ResultSubmitted` log per `submitResult` call,
+ * but this doesn't assume that, decoding all matches so a caller can
+ * detect an unexpected duplicate rather than silently keeping only the
+ * first.
+ */
+export function decodeResultSubmittedEventsFromLogs(
+  logs: readonly RawEventLog[],
+  trustedContractAddress: string,
+): ResultSubmittedEventLogDecodeResult[] {
+  const normalizedTrusted = trustedContractAddress.toLowerCase();
+  const results: ResultSubmittedEventLogDecodeResult[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== normalizedTrusted) {
+      continue;
+    }
+    const decoded = decodeResultSubmittedLog(log);
     if (decoded) {
       results.push({ event: decoded, logIndex: log.logIndex });
     }

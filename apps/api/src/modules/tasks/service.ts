@@ -3,8 +3,13 @@ import type { Pool } from "pg";
 import type { Queryable } from "../../db/pool.js";
 import { normalizeAddress } from "../auth/nonce.store.js";
 import { verifyAcceptanceTransaction } from "../chain/acceptance-tx-verifier.js";
-import { decodeAcceptedEventsFromLogs, decodeFundedEventsFromLogs } from "../chain/event-sync.js";
+import {
+  decodeAcceptedEventsFromLogs,
+  decodeFundedEventsFromLogs,
+  decodeResultSubmittedEventsFromLogs,
+} from "../chain/event-sync.js";
 import type { ChainRpcClient } from "../chain/rpc.client.js";
+import { verifyResultSubmissionTransaction } from "../chain/result-submission-tx-verifier.js";
 import { checkTransactionNotUsed, verifyFundingTransaction } from "../chain/tx-verifier.js";
 import {
   consumeAcceptancePermits,
@@ -335,7 +340,7 @@ const DEFAULT_REQUIRED_CONFIRMATIONS = 1;
  * sets `FUNDING_REQUIRED_CONFIRMATIONS` explicitly for its own reorg-risk
  * tolerance.
  */
-function resolveRequiredConfirmations(): number {
+export function resolveRequiredConfirmations(): number {
   const raw = process.env.FUNDING_REQUIRED_CONFIRMATIONS;
   if (!raw) {
     return DEFAULT_REQUIRED_CONFIRMATIONS;
@@ -1045,4 +1050,246 @@ export async function verifyAcceptance(
   }
 
   return { ok: true, status: "ACCEPTED", confirmations: verification.confirmations };
+}
+
+/**
+ * T-905's idempotent-replay lookup: does a `chain_transactions` row already
+ * exist for `(chainId, txHash)`, and does it belong to `taskId`? Mirrors
+ * `findExistingAcceptanceForTask` exactly — `purpose: "RESULT_SUBMISSION"`
+ * for the same reason that function scopes to `purpose: "ACCEPTANCE"`:
+ * without it, this task's own `FUNDING`/`ACCEPTANCE` transaction hash would
+ * satisfy this lookup, letting a caller resubmit an unrelated txHash as if
+ * it were a valid result-submission replay.
+ */
+async function findExistingResultSubmissionForTask(
+  pool: Pool,
+  chainId: number,
+  taskId: string,
+  txHash: string,
+): Promise<{ confirmations: number } | null> {
+  const existing = await getChainTransactionByHash(pool, chainId, txHash, "RESULT_SUBMISSION");
+  if (existing && existing.taskId === taskId) {
+    return { confirmations: existing.confirmations };
+  }
+  return null;
+}
+
+export type TaskResultSubmissionVerificationServiceResult =
+  | { ok: true; status: "SUBMITTED"; confirmations: number }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "conflict"; currentStatus: TaskStatusValue }
+  | { ok: false; reason: "chain_error"; code: ErrorCode; message: string };
+
+/**
+ * F-905/T-905: mirrors `verifyAcceptance`'s exact structure (idempotent
+ * replay of an already-`SUBMITTED` task, otherwise independently RPC-verify
+ * the `ResultSubmitted` event and atomically transition
+ * `ACCEPTED`→`SUBMITTED` alongside the `chain_transactions`/`chain_events`
+ * rows, all in one `transitionTaskStatus` transaction).
+ *
+ * The one deliberate difference from `verifyAcceptance`: no
+ * `resolveAcceptingAgentId`/permit-consumption step — `submitResult`
+ * (contracts/src/TaskEscrow.sol) already enforces `task.agent ==
+ * msg.sender` on-chain, so there is no ambiguity to resolve the way
+ * acceptance's "which of possibly several outstanding permits" question
+ * required.
+ *
+ * `submitted_at`/`review_deadline` are written to `tasks` VERBATIM from
+ * the decoded event's own fields (converted from on-chain unix-seconds to
+ * `Date`, nothing else) — no `+ reviewWindow` arithmetic anywhere in this
+ * function or any other in this codebase outside the contract itself
+ * (design.md F-905/AC-908, this Feature's own repeated design decision).
+ */
+export async function verifyResultSubmission(
+  pool: Pool,
+  rpc: ChainRpcClient,
+  sessionAddress: string,
+  taskId: string,
+  txHash: string,
+): Promise<TaskResultSubmissionVerificationServiceResult> {
+  const task = await getTaskById(pool, taskId);
+  if (!task) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
+  const chainConfig = resolveFundingChainConfig();
+
+  if (task.status === "SUBMITTED") {
+    // Same reasoning as verifyAcceptance's identical guard (Codex review,
+    // T-805 round 2, P2 precedent): the idempotent-replay success below
+    // must be scoped to the actual submitting wallet, not any signed-in
+    // caller who happens to know the (publicly visible, already-mined)
+    // txHash.
+    if (normalizeAddress(sessionAddress) !== task.acceptedAgentAddress) {
+      return { ok: false, reason: "conflict", currentStatus: task.status };
+    }
+    const existing = await findExistingResultSubmissionForTask(
+      pool,
+      chainConfig.chainId,
+      taskId,
+      normalizedTxHash,
+    );
+    if (existing) {
+      return { ok: true, status: "SUBMITTED", confirmations: existing.confirmations };
+    }
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+  if (task.status !== "ACCEPTED") {
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+
+  const taskIdOnChain = deriveOnChainTaskId(task.id);
+  const requiredConfirmations = resolveRequiredConfirmations();
+  const normalizedSessionAddress = normalizeAddress(sessionAddress) as `0x${string}`;
+
+  const verification = await verifyResultSubmissionTransaction({
+    rpc,
+    txHash: normalizedTxHash,
+    expectedChainId: chainConfig.chainId,
+    trustedContractAddress: chainConfig.addresses.taskEscrow,
+    requiredConfirmations,
+    expected: {
+      taskIdOnChain,
+      agentAddress: normalizedSessionAddress,
+    },
+  });
+
+  if (!verification.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: verification.code,
+      message: verification.message,
+    };
+  }
+
+  const usage = await checkTransactionNotUsed(pool, chainConfig.chainId, normalizedTxHash, taskId);
+  if (!usage.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: usage.code ?? "TRANSACTION_ALREADY_USED",
+      message: usage.message ?? "transaction already bound to another task",
+    };
+  }
+
+  // Same reorg-safety re-fetch verifyAcceptance/verifyFunding perform and
+  // for the same reason: recover `logIndex` via event-sync.ts's shared
+  // decoder, and re-confirm this second read is the SAME receipt
+  // (blockHash equality) before trusting its logs for `chain_events`.
+  let receipt: Awaited<ReturnType<ChainRpcClient["getTransactionReceipt"]>>;
+  try {
+    receipt = await rpc.getTransactionReceipt(normalizedTxHash);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: error instanceof Error ? error.message : "unexpected RPC client error",
+    };
+  }
+  if (!receipt || receipt.blockHash.toLowerCase() !== verification.blockHash.toLowerCase()) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt snapshot changed between verification and event recording (possible reorg)",
+    };
+  }
+  const decodedEvents = decodeResultSubmittedEventsFromLogs(
+    receipt.logs,
+    chainConfig.addresses.taskEscrow,
+  );
+  const matchingEvent = decodedEvents.find(
+    (candidate) => candidate.event.taskId.toLowerCase() === taskIdOnChain.toLowerCase(),
+  );
+  if (!matchingEvent) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt logs were not available when recording the result-submission event",
+    };
+  }
+
+  let transition;
+  try {
+    transition = await transitionTaskStatus(pool, {
+      taskId,
+      allowedFromStatuses: ["ACCEPTED"],
+      toStatus: "SUBMITTED",
+      actor: normalizedSessionAddress,
+      reason: "result submission transaction verified",
+      extraColumns: {
+        submitted_at: new Date(Number(matchingEvent.event.submittedAt) * 1000),
+        review_deadline: new Date(Number(matchingEvent.event.reviewDeadline) * 1000),
+      },
+      withinTransaction: async (client) => {
+        const inserted = await insertChainTransaction(client, {
+          txHash: normalizedTxHash,
+          chainId: chainConfig.chainId,
+          taskId,
+          purpose: "RESULT_SUBMISSION",
+          status: "confirmed",
+          confirmations: verification.confirmations,
+        });
+        if (!inserted) {
+          const occupantTaskId = await findChainTransactionOwner(
+            client,
+            chainConfig.chainId,
+            normalizedTxHash,
+          );
+          if (occupantTaskId !== taskId) {
+            throw new TransactionAlreadyUsedByAnotherTaskError(occupantTaskId ?? "unknown");
+          }
+        }
+        await insertChainEvent(client, {
+          chainId: chainConfig.chainId,
+          blockHash: verification.blockHash.toLowerCase(),
+          transactionHash: normalizedTxHash,
+          logIndex: matchingEvent.logIndex,
+          eventName: "ResultSubmitted",
+          taskId,
+          payload: {
+            taskId: matchingEvent.event.taskId,
+            agent: matchingEvent.event.agent,
+            resultHash: matchingEvent.event.resultHash,
+            submittedAt: matchingEvent.event.submittedAt.toString(),
+            reviewDeadline: matchingEvent.event.reviewDeadline.toString(),
+          },
+        });
+      },
+    });
+  } catch (error) {
+    if (error instanceof TransactionAlreadyUsedByAnotherTaskError) {
+      return {
+        ok: false,
+        reason: "chain_error",
+        code: "TRANSACTION_ALREADY_USED",
+        message: `tx ${normalizedTxHash} on chain ${chainConfig.chainId} is already bound to task ${error.occupantTaskId}`,
+      };
+    }
+    throw error;
+  }
+
+  if (transition.outcome === "not_found") {
+    return { ok: false, reason: "not_found" };
+  }
+  if (transition.outcome === "conflict") {
+    if (transition.currentStatus === "SUBMITTED") {
+      const existing = await findExistingResultSubmissionForTask(
+        pool,
+        chainConfig.chainId,
+        taskId,
+        normalizedTxHash,
+      );
+      if (existing) {
+        return { ok: true, status: "SUBMITTED", confirmations: existing.confirmations };
+      }
+    }
+    return { ok: false, reason: "conflict", currentStatus: transition.currentStatus };
+  }
+
+  return { ok: true, status: "SUBMITTED", confirmations: verification.confirmations };
 }

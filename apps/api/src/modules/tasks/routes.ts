@@ -8,6 +8,7 @@ import type {
   FundingVerificationServiceResult,
   TaskAcceptanceVerificationServiceResult,
   TaskDraftMutationResult,
+  TaskResultSubmissionVerificationServiceResult,
 } from "./service.js";
 import type { TaskRow } from "./repository.js";
 import {
@@ -19,6 +20,7 @@ import {
   updateDraft,
   verifyAcceptance,
   verifyFunding,
+  verifyResultSubmission,
 } from "./service.js";
 import {
   createDraftSchema,
@@ -278,6 +280,32 @@ function sendAcceptanceVerificationFailure(
     .send({ error: { code: result.code, message: result.message } });
 }
 
+/** T-905: `POST /tasks/:taskId/result-verifications` failure handling —
+ * same structure as `sendAcceptanceVerificationFailure` above (reuses
+ * `fundingErrorStatus`'s exact ErrorCode→HTTP mapping), only its own
+ * 404/409 message text differs. No `forbidden` branch: `verifyResultSubmission`
+ * never returns one, for the same reason `verifyAcceptance` doesn't — see
+ * that function's own doc comment (service.ts). */
+function sendResultSubmissionVerificationFailure(
+  reply: FastifyReply,
+  result: Extract<TaskResultSubmissionVerificationServiceResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该任务。" } });
+  }
+  if (result.reason === "conflict") {
+    return reply.status(409).send({
+      error: {
+        code: TASK_STATE_CONFLICT,
+        message: `任务当前状态为 ${result.currentStatus}，无法复核成果提交交易。`,
+      },
+    });
+  }
+  return reply
+    .status(fundingErrorStatus(result.code))
+    .send({ error: { code: result.code, message: result.message } });
+}
+
 /** T-605: `GET /tasks/:taskId/history` response shape — one entry per
  * `task_state_history` row, `occurredAt` ISO-formatted matching every other
  * timestamp field in this module (`toTaskDraftJson`). */
@@ -503,6 +531,52 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
       );
       if (!result.ok) {
         return sendAcceptanceVerificationFailure(reply, result);
+      }
+      return reply.send({ status: result.status, confirmations: result.confirmations });
+    },
+  );
+
+  // T-905 (F-905): mirrors `acceptance-verifications` above exactly — same
+  // body schema (`txHash` only, `fundingVerificationSchema` reused as-is),
+  // same session requirement, same RPC-client construction pattern. No
+  // explicit HTTP contract is spelled out in design.md's own interface
+  // section (its `onEvent('ResultSubmitted', ...)` pseudocode is framed as
+  // "无对外 HTTP 契约") — this endpoint is the same client-submits-txHash /
+  // backend-independently-verifies shape this codebase already established
+  // for both `funding-verifications` and `acceptance-verifications`
+  // (Feature 6/8's `chain_events` mechanism T-905 is explicitly told to
+  // reuse), not a new design.
+  app.post(
+    "/tasks/:taskId/result-verifications",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const bodyParsed = fundingVerificationSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      // A real, independent RPC client (BACKEND_RPC_URL) — same reasoning
+      // as funding-verifications/acceptance-verifications above: never the
+      // frontend wallet's provider.
+      const rpc = createChainRpcClient();
+
+      const result = await verifyResultSubmission(
+        pool,
+        rpc,
+        sessionAddress,
+        paramsParsed.data.taskId,
+        bodyParsed.data.txHash,
+      );
+      if (!result.ok) {
+        return sendResultSubmissionVerificationFailure(reply, result);
       }
       return reply.send({ status: result.status, confirmations: result.confirmations });
     },
