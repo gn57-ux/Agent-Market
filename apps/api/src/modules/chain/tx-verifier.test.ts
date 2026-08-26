@@ -132,6 +132,10 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     async readStakeRateBps() {
       throw new Error("readStakeRateBps: not used by funding verification");
     },
+    // Feature 7 sync (T-709): unused by funding verification — see above.
+    async readAuthorizedSigner() {
+      throw new Error("readAuthorizedSigner: not used by funding verification");
+    },
   };
 }
 

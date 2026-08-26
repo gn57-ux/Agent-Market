@@ -155,6 +155,12 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     async readStakeRateBps() {
       return stakeRateBps;
     },
+    // Feature 7 sync (T-709): unused by verifyAcceptance's own tx
+    // verification path — its sole caller is verifySignerMatchesContract
+    // (permit.service.ts), exercised separately.
+    async readAuthorizedSigner() {
+      throw new Error("readAuthorizedSigner: not used by verifyAcceptance");
+    },
   };
 }
 
@@ -223,20 +229,40 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
     return id;
   }
 
-  /** Mirrors what `insertPermitsAtomically`/`insertRecommendationRunWithPermits`
+  /** Minimal direct `recommendation_runs` insert — this file tests
+   * `verifyAcceptance`'s ACCEPT-side logic (consume/invalidate), not
+   * round-gating, so the exact run a permit belongs to is irrelevant to
+   * what's being asserted; this only exists to satisfy `acceptance_permits
+   * .run_id`'s NOT NULL FK (Feature 7 sync, T-709). */
+  async function insertRecommendationRunDirect(taskId: string): Promise<string> {
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO recommendation_runs (task_id, algorithm_version, candidate_count, input_digest)
+       VALUES ($1, 'v0.1', 1, 'test-digest') RETURNING id`,
+      [taskId],
+    );
+    const id = rows[0]?.id;
+    if (!id) throw new Error("insertRecommendationRunDirect: no id returned");
+    return id;
+  }
+
+  /** Mirrors what `insertPermitsForRunIfAbsent`/`insertRecommendationRunWithPermits`
    * (dispatch/repository.ts) actually write for one candidate — an
    * OUTSTANDING permit row for this (task, agent), with an explicit
    * `acceptingAddress`/`nonce` (T-806: both are now load-bearing —
    * `resolveAcceptingAgentId` matches on the exact
    * `(task_id, accepting_address, nonce)` triple, not merely "this agent
-   * has some row"). */
+   * has some row"). Each call creates its own fresh recommendation run
+   * unless `runId` is passed explicitly — callers that want several permits
+   * bound to the SAME round pass the same `runId` to each call. */
   async function insertOutstandingPermit(
     taskId: string,
     agentId: string,
-    options: { acceptingAddress?: string; nonce?: string } = {},
+    options: { acceptingAddress?: string; nonce?: string; runId?: string } = {},
   ): Promise<void> {
+    const runId = options.runId ?? (await insertRecommendationRunDirect(taskId));
     await insertAcceptancePermit(pool, {
       taskId,
+      runId,
       agentId,
       acceptingAddress: options.acceptingAddress ?? agentOwner.address,
       nonce: options.nonce ?? "1",

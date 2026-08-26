@@ -371,10 +371,16 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
   });
 
   // T-806, user's item #1's last sentence: two concurrent /match calls for
-  // the SAME task must both succeed with fully independent, non-interleaved
-  // writes (repeated /match is a legitimate operation, not something to
-  // reject).
-  it("handles two concurrent /match calls for the same task without cross-writing runs/candidates/permits", async () => {
+  // the SAME task each complete their own write as an uninterrupted unit —
+  // no interleaving. Feature 7 sync (T-709) changes the OUTCOME for a
+  // permit-free task: a new round can only be created once the current
+  // one's permits have expired, so of two genuinely concurrent first-ever
+  // /match calls, exactly one creates the task's one allowed round and the
+  // other loses the race inside insertRecommendationRunWithPermits — caught
+  // as PermitsStillOutstandingError and turned into the SAME idempotent 200
+  // response describing the winner's round (matchTask's own fallback), not
+  // an error and not a second independent run.
+  it("real concurrency: of two genuinely simultaneous /match calls for the same (permit-free) task, both respond 200 but only one round is ever persisted", async () => {
     const taskId = await insertOpenTask(requester.address.toLowerCase());
     const agentA = await insertActiveAgent();
     const token = await login(requester);
@@ -401,12 +407,14 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     ]);
     expect(responseA.statusCode).toBe(200);
     expect(responseB.statusCode).toBe(200);
+    // Both requests describe the same (winning) round.
+    expect(responseA.json()).toEqual(responseB.json());
 
     const { rows: runRows } = await pool.query<{ id: string }>(
       `SELECT id FROM recommendation_runs WHERE task_id = $1`,
       [taskId],
     );
-    expect(runRows).toHaveLength(2);
+    expect(runRows).toHaveLength(1);
 
     const { rows: candidateRows } = await pool.query<{ run_id: string }>(
       `SELECT rc.run_id FROM recommendation_candidates rc
@@ -414,19 +422,13 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
        WHERE rr.task_id = $1`,
       [taskId],
     );
-    expect(candidateRows).toHaveLength(2);
-    // Every run has exactly one candidate row — no interleaving.
-    const runIds = new Set(runRows.map((r) => r.id));
-    for (const runId of runIds) {
-      expect(candidateRows.filter((c) => c.run_id === runId)).toHaveLength(1);
-    }
+    expect(candidateRows).toHaveLength(1);
 
     const { rows: permitRows } = await pool.query<{ id: string; nonce: string }>(
       `SELECT id, nonce FROM acceptance_permits WHERE task_id = $1`,
       [taskId],
     );
-    expect(permitRows).toHaveLength(2);
-    expect(new Set(permitRows.map((r) => r.nonce)).size).toBe(2);
+    expect(permitRows).toHaveLength(1);
   });
 
   it("returns 502 when the dispatch service is unavailable, without persisting a run", async () => {
@@ -710,10 +712,10 @@ runIfOptedIn(
     ): Promise<void> {
       const { rows } = await pool.query<{ id: string }>(
         requestedAt
-          ? `INSERT INTO recommendation_runs (task_id, algorithm_version, candidate_count, requested_at)
-             VALUES ($1, 'v0.1', $2, $3) RETURNING id`
-          : `INSERT INTO recommendation_runs (task_id, algorithm_version, candidate_count)
-             VALUES ($1, 'v0.1', $2) RETURNING id`,
+          ? `INSERT INTO recommendation_runs (task_id, algorithm_version, candidate_count, input_digest, requested_at)
+             VALUES ($1, 'v0.1', $2, 'test-digest', $3) RETURNING id`
+          : `INSERT INTO recommendation_runs (task_id, algorithm_version, candidate_count, input_digest)
+             VALUES ($1, 'v0.1', $2, 'test-digest') RETURNING id`,
         requestedAt ? [taskId, candidates.length, requestedAt] : [taskId, candidates.length],
       );
       const runId = rows[0]?.id;
@@ -986,6 +988,51 @@ runIfOptedIn(
           });
           expect(valid).toBe(true);
         }
+      });
+
+      // Human review finding (T-806, post-cap), required regression #2:
+      // real Promise.all concurrency over the full HTTP route — two
+      // genuinely simultaneous POST calls for a run with no existing
+      // permits must not both sign+persist independently; the loser must
+      // observe the winner's freshly-committed permits and return those
+      // unchanged (insertPermitsForRunIfAbsent's idempotency, exercised
+      // here through the real route, not called directly).
+      it("real concurrency: two genuinely simultaneous POST /tasks/:taskId/acceptance-permits calls return identical nonce/signature, and the database holds only one permit per candidate", async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const agentId = await insertActiveAgent("0x1283fefc63f0cd0e873a0000c6d07ef7b77e90fb");
+        await insertRecommendationRunDirect(taskId, [
+          { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: ["x"] },
+        ]);
+        const token = await login(requester);
+
+        const [responseA, responseB] = await Promise.all([
+          app.inject({
+            method: "POST",
+            url: `/tasks/${taskId}/acceptance-permits`,
+            cookies: { session_token: token },
+          }),
+          app.inject({
+            method: "POST",
+            url: `/tasks/${taskId}/acceptance-permits`,
+            cookies: { session_token: token },
+          }),
+        ]);
+
+        expect(responseA.statusCode).toBe(200);
+        expect(responseB.statusCode).toBe(200);
+        const bodyA = responseA.json() as { permits: Array<{ nonce: string; signature: string }> };
+        const bodyB = responseB.json() as { permits: Array<{ nonce: string; signature: string }> };
+        expect(bodyA.permits).toHaveLength(1);
+        expect(bodyB.permits).toHaveLength(1);
+        expect(bodyB.permits[0]?.nonce).toBe(bodyA.permits[0]?.nonce);
+        expect(bodyB.permits[0]?.signature).toBe(bodyA.permits[0]?.signature);
+
+        const { rows } = await pool.query(
+          `SELECT id, nonce FROM acceptance_permits WHERE task_id = $1 AND agent_id = $2`,
+          [taskId, agentId],
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.nonce).toBe(bodyA.permits[0]?.nonce);
       });
 
       // T-801 (Feature 8): as of that Task, this route persists a row per

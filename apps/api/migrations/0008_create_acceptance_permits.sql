@@ -51,11 +51,42 @@
 --   - `status`: replaces the old NULL/non-NULL `consumed_at` judgment with
 --     an explicit enum (CLAUDE.md 原则 8: 让非法状态无法表示) — OUTSTANDING
 --     (usable), CONSUMED (this exact permit's nonce was the one used
---     on-chain), INVALIDATED (a different candidate's permit won; this
---     task is no longer OPEN, so this row can never be used again).
+--     on-chain), INVALIDATED (a different candidate's permit won, OR (see
+--     Feature 7 sync note below) this task's current recommendation round
+--     was superseded — this row can never be used again). IMPORTANT:
+--     INVALIDATED is bookkeeping only — it has no on-chain enforcement
+--     weight whatsoever. TaskEscrow.acceptTask never reads this table, so
+--     marking a row INVALIDATED does not revoke the EIP-712 signature
+--     already handed to that candidate; the signature stays cryptographically
+--     usable until its own `expiry` passes. The real security invariant
+--     ("at most 3 candidates hold a valid permit at a time") is enforced by
+--     `hasUnexpiredOutstandingPermits`/round-gating in repository.ts, which
+--     refuses to start a new recommendation round while the current round
+--     still has any unexpired OUTSTANDING permit — never by this status
+--     column. Do not treat INVALIDATED as a revocation guarantee anywhere
+--     in this codebase's comments or API responses.
+--
+-- Feature 7 sync (T-708/T-709 human-supplemental-review fixes, merged onto
+-- this branch after both Features' independent N6 rounds): adds `run_id`
+-- (below) — a permit belongs to one specific recommendation run's candidate
+-- list, not loosely to the task. This is additive to, not a replacement
+-- for, the exact-nonce-attribution design above: `run_id` lets
+-- round-gating queries find "this task's current round" without scanning
+-- by timestamp, while `(task_id, agent_id, nonce)` stays the uniqueness/
+-- attribution key T-806 established. `recommendation_runs.input_digest`
+-- (bottom of this file) is also part of this sync.
 CREATE TABLE acceptance_permits (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id UUID NOT NULL REFERENCES tasks (id) ON DELETE CASCADE,
+  -- The recommendation run this permit was issued for (Feature 7 sync,
+  -- T-709). Required — every permit issuance is always in response to a
+  -- specific run's candidate list (dispatch/routes.ts's issuePermitsForTask
+  -- always reads a run's candidates before signing), so there is never a
+  -- legitimate permit with no owning run. Used by hasUnexpiredOutstandingPermits/
+  -- getLatestRecommendationRunId-style round-gating queries, NOT by the
+  -- exact-attribution lookup (which stays keyed on accepting_address+nonce,
+  -- per T-806 — see acceptance_permits_task_address_nonce_idx below).
+  run_id UUID NOT NULL REFERENCES recommendation_runs (id) ON DELETE CASCADE,
   -- No `ON DELETE CASCADE` from agents — mirrors 0006/0007's
   -- `accepted_agent_id`/`recommendation_candidates.agent_id` precedent:
   -- Agent one-period never hard-deletes a row, so this table never needs to
@@ -97,8 +128,23 @@ CREATE TABLE acceptance_permits (
 -- (task, agent) pair."
 CREATE INDEX acceptance_permits_task_agent_idx ON acceptance_permits (task_id, agent_id);
 
+-- Feature 7 sync (T-709): round-gating queries (hasUnexpiredOutstandingPermits,
+-- getOutstandingPermitsForRun-style lookups) filter by run_id directly.
+CREATE INDEX acceptance_permits_run_id_idx ON acceptance_permits (run_id);
+
 -- `resolveAcceptingAgentId`'s exact-match lookup key (T-806): given the
 -- on-chain event's accepting wallet and the calldata-decoded nonce, find the
 -- one permit row that was actually used.
 CREATE INDEX acceptance_permits_task_address_nonce_idx
   ON acceptance_permits (task_id, accepting_address, nonce);
+
+-- Feature 7 sync (T-709, P2): SHA-256 (hex) of the canonically-ordered JSON
+-- serialization of the MatchRequest sent to the Go dispatch service for
+-- that run, computed in dispatch/routes.ts via Node's built-in crypto
+-- module (no new dependency) — see dispatch/input-digest.ts. Lets a human
+-- confirm exactly what was sent for a given run without needing to retain
+-- the full request body. Added with a transitional DEFAULT so any row that
+-- predates this column does not fail the ALTER; the DEFAULT is then
+-- dropped so every future INSERT must supply a real digest explicitly.
+ALTER TABLE recommendation_runs ADD COLUMN input_digest TEXT NOT NULL DEFAULT '';
+ALTER TABLE recommendation_runs ALTER COLUMN input_digest DROP DEFAULT;

@@ -165,6 +165,11 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
       }
       return stakeRateBps;
     },
+    // Feature 7 sync (T-709): unused by acceptance-tx-verifier.ts — its sole
+    // caller is verifySignerMatchesContract (permit.service.ts).
+    async readAuthorizedSigner() {
+      throw new Error("readAuthorizedSigner: not used by acceptance-tx-verifier");
+    },
   };
 }
 

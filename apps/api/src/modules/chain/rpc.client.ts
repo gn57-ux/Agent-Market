@@ -87,7 +87,32 @@ export interface ChainRpcClient {
    * elsewhere in this module), never resolved twice from two different
    * sources. */
   readStakeRateBps(contractAddress: `0x${string}`): Promise<bigint>;
+  /**
+   * Reads `TaskEscrow.authorizedSigner()` — a `public immutable address` set
+   * once at contract deployment and never changed afterwards (Feature 7
+   * sync, T-709). Used by `permit.service.ts`'s `verifySignerMatchesContract`
+   * to confirm the locally configured `ACCEPTANCE_PERMIT_SIGNER_KEY`
+   * actually matches the signer address the deployed contract will accept —
+   * a mismatch means every `AcceptancePermit` this service issues would be
+   * rejected on-chain by `acceptTask` with `InvalidPermitSignature`.
+   */
+  readAuthorizedSigner(contractAddress: `0x${string}`): Promise<`0x${string}`>;
 }
+
+/**
+ * Minimal ABI fragment — only the one read-only view function
+ * `readAuthorizedSigner` needs (Feature 7 sync, T-709), same "smallest
+ * necessary shape" convention as `TASK_ESCROW_STAKE_RATE_BPS_ABI`.
+ */
+const AUTHORIZED_SIGNER_ABI = [
+  {
+    type: "function",
+    name: "authorizedSigner",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+] as const;
 
 const BACKEND_RPC_URL_VAR = "BACKEND_RPC_URL";
 
@@ -173,6 +198,13 @@ export function createChainRpcClient(env: NodeJS.ProcessEnv = process.env): Chai
         address: contractAddress,
         abi: TASK_ESCROW_STAKE_RATE_BPS_ABI,
         functionName: "STAKE_RATE_BPS",
+      });
+    },
+    readAuthorizedSigner(contractAddress) {
+      return client.readContract({
+        address: contractAddress,
+        abi: AUTHORIZED_SIGNER_ABI,
+        functionName: "authorizedSigner",
       });
     },
   };

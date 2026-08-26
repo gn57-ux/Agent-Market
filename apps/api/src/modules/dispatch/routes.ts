@@ -2,20 +2,27 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import { normalizeAddress } from "../auth/nonce.store.js";
 import { deriveOnChainTaskId } from "../tasks/onchain-task-id.js";
-import { getTaskById } from "../tasks/repository.js";
+import { getTaskById, type TaskStatusValue } from "../tasks/repository.js";
 import {
   callMatch,
   DispatchServiceUnavailableError,
   type MatchRequest,
 } from "./dispatch.client.js";
+import { canonicalJsonSha256 } from "./input-digest.js";
 import { issueAcceptancePermit } from "./permit.service.js";
 import {
   assembleCandidateSnapshots,
   getLatestRecommendationCandidates,
+  getLatestRecommendationRunId,
+  getOutstandingPermitsForRun,
   getPermitForAgent,
+  getRecommendationCandidatesForRun,
   getRequiredAgentLevel,
-  insertPermitsAtomically,
+  hasUnexpiredOutstandingPermits,
+  insertPermitsForRunIfAbsent,
   insertRecommendationRunWithPermits,
+  PermitsStillOutstandingError,
+  StaleRecommendationRunError,
   TaskNotOpenForPermitsError,
   type SignedAcceptancePermit,
 } from "./repository.js";
@@ -26,6 +33,12 @@ import { taskAgentIdParamSchema, taskIdParamSchema } from "./schema.js";
  * configurable (the capsule: "本 Feature 唯一实现的版本，不做成可配置").
  */
 const ALGORITHM_VERSION = "v0.1";
+
+/** The one status `POST /tasks/:taskId/match` and
+ * `POST /tasks/:taskId/acceptance-permits` operate on (Feature 7 sync,
+ * T-709, P2). Reuses `TaskStatusValue` from the tasks module rather than
+ * hand-writing the `'OPEN'` literal as though this module owned that rule. */
+const OPEN_STATUS: TaskStatusValue = "OPEN";
 
 /** Same pattern as tasks/routes.ts's/agents/routes.ts's own local copy of
  * this helper — reads `request.address` (populated by `app.requireSession`)
@@ -134,6 +147,7 @@ export type MatchTaskResult =
       recommendationCount: number;
     }
   | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "task_not_open" }
   | { ok: false; reason: "dispatch_unavailable"; message: string };
 
 /**
@@ -158,6 +172,26 @@ async function matchTask(
   const task = await getTaskById(pool, taskId);
   if (!task || task.requesterAddress !== normalizeAddress(sessionAddress)) {
     return { ok: false, reason: "not_found" };
+  }
+  if (task.status !== OPEN_STATUS) {
+    return { ok: false, reason: "task_not_open" };
+  }
+
+  // Feature 7 sync (T-709 round 2, P1): refuse to start a new round while
+  // the current round's permits are still unexpired — see
+  // hasUnexpiredOutstandingPermits' doc comment (repository.ts). Idempotent,
+  // not an error: re-matching while the current round is still live just
+  // returns that round's existing data unchanged. Fast pre-check to avoid a
+  // wasted Go call and wasted signing; insertRecommendationRunWithPermits
+  // re-does the authoritative version of this check under the task lock.
+  if (await hasUnexpiredOutstandingPermits(pool, task.id)) {
+    const currentCandidates = await getLatestRecommendationCandidates(pool, task.id);
+    return {
+      ok: true,
+      taskId: task.id,
+      algorithmVersion: ALGORITHM_VERSION,
+      recommendationCount: currentCandidates.length,
+    };
   }
 
   const requiredLevel = (await getRequiredAgentLevel(pool, taskId)) ?? "BEGINNER";
@@ -247,26 +281,55 @@ async function matchTask(
   // every recommended candidate gets its own permit, no exceptions.
   const signedPermits = await signPermitsForCandidates(task.id, permitCandidates);
 
+  // Canonical SHA-256 digest of the exact request sent to Go (Feature 7
+  // sync, T-709, P2) — computed once, over the whole `MatchRequest`, and
+  // persisted alongside the run it produced.
+  const inputDigest = canonicalJsonSha256(request);
+
   // Then persist run + candidates + every signed permit in ONE atomic
   // transaction (`insertRecommendationRunWithPermits`, repository.ts) — any
   // failure anywhere (including a permit insert hitting a real constraint
   // violation) rolls back all three tables together, so this call can never
   // leave a partially-written run behind.
-  await insertRecommendationRunWithPermits(pool, {
-    taskId: task.id,
-    algorithmVersion: ALGORITHM_VERSION,
-    // The full candidate pool sent to Go, not the recommendation count —
-    // see InsertRecommendationRunInput's own doc comment (repository.ts).
-    candidateCount: candidates.length,
-    candidates: matchResponse.recommendations.map((recommendation) => ({
-      agentId: recommendation.agentId,
-      rank: recommendation.rank,
-      slotType: recommendation.slotType,
-      score: recommendation.score,
-      reasons: recommendation.reasons,
-    })),
-    permits: signedPermits,
-  });
+  try {
+    await insertRecommendationRunWithPermits(pool, {
+      taskId: task.id,
+      algorithmVersion: ALGORITHM_VERSION,
+      // The full candidate pool sent to Go, not the recommendation count —
+      // see InsertRecommendationRunInput's own doc comment (repository.ts).
+      candidateCount: candidates.length,
+      inputDigest,
+      candidates: matchResponse.recommendations.map((recommendation) => ({
+        agentId: recommendation.agentId,
+        rank: recommendation.rank,
+        slotType: recommendation.slotType,
+        score: recommendation.score,
+        reasons: recommendation.reasons,
+      })),
+      permits: signedPermits,
+    });
+  } catch (error) {
+    if (error instanceof PermitsStillOutstandingError) {
+      // Lost the race: a concurrent /match call committed an unexpired
+      // round in the gap between this function's own pre-check and
+      // insertRecommendationRunWithPermits acquiring the task lock. Same
+      // idempotent fallback as the pre-check above.
+      const currentCandidates = await getLatestRecommendationCandidates(pool, task.id);
+      return {
+        ok: true,
+        taskId: task.id,
+        algorithmVersion: ALGORITHM_VERSION,
+        recommendationCount: currentCandidates.length,
+      };
+    }
+    if (error instanceof TaskNotOpenForPermitsError) {
+      // Lost a different race: the outside-the-transaction OPEN check above
+      // passed, but a concurrent task-status transition landed before the
+      // lock was acquired.
+      return { ok: false, reason: "task_not_open" };
+    }
+    throw error;
+  }
 
   return {
     ok: true,
@@ -280,23 +343,32 @@ export type IssuePermitsResult =
   | { ok: false; reason: "task_not_open" }
   | { ok: true; permits: AcceptancePermitJson[] }
   | { ok: false; reason: "not_found" }
-  | { ok: false; reason: "no_recommendations" };
+  | { ok: false; reason: "no_recommendations" }
+  | { ok: false; reason: "recommendation_run_churning" }
+  | { ok: false; reason: "permits_expired" };
+
+/** Bounds the stale-run retry loop below — a concurrent `POST /match` call
+ * committing a newer run in the exact gap between this function's read and
+ * `insertPermitsForRunIfAbsent`'s lock is already a narrow race; two such
+ * races landing back to back on the same request is not worth looping
+ * indefinitely for (Feature 7 sync, T-709). */
+const MAX_STALE_RUN_RETRIES = 3;
 
 /**
  * T-706's orchestration for `POST /tasks/:taskId/acceptance-permits`:
  * confirm `sessionAddress` owns `taskId` (same 404-for-both-"missing"-and-
- * "not-mine" collapsing as `matchTask`, mirroring T-605's convention),
- * read back the latest recommendation run's full candidate list, sign one
- * `AcceptancePermit` per candidate (`signPermitsForCandidates`), then
- * persist all of them atomically (`insertPermitsAtomically`, T-806). As of
- * T-801 (Feature 8), each signed permit is also persisted (one row per
- * candidate, `status = 'OUTSTANDING'`) so this Feature's `TaskAccepted`
- * event sync (`chain/task-accepted-event.ts` + `tasks/service.ts`'s
- * `verifyAcceptance`) has a row to resolve the accepting agent against and
- * mark `CONSUMED`/`INVALIDATED` once the on-chain acceptance is verified.
- * This endpoint's own auth model (requester-only) and response shape are
- * unchanged by T-803/T-806 — it remains the manual re-issuance entry point,
- * distinct from `matchTask`'s automatic issuance.
+ * "not-mine" collapsing as `matchTask`, mirroring T-605's convention), then
+ * either return the latest run's already-persisted OUTSTANDING permits as-is
+ * (true idempotency — no re-signing, no re-insert) or sign+persist a fresh
+ * set via `insertPermitsForRunIfAbsent` if none exist yet (Feature 7 sync,
+ * T-709 — replacing T-806's unconditional "always sign, always insert"
+ * behavior, which would otherwise mint an unbounded number of OUTSTANDING
+ * rows on repeated calls). Each signed permit persisted (one row per
+ * candidate, `status = 'OUTSTANDING'`, `run_id` bound to the run it came
+ * from) so this Feature's `TaskAccepted` event sync
+ * (`chain/task-accepted-event.ts` + `tasks/service.ts`'s `verifyAcceptance`)
+ * has a row to resolve the accepting agent against and mark
+ * `CONSUMED`/`INVALIDATED` once the on-chain acceptance is verified.
  */
 async function issuePermitsForTask(
   pool: Pool,
@@ -310,35 +382,99 @@ async function issuePermitsForTask(
   // Cheap pre-check (Codex review, T-806 round 1, P2): rejects the common
   // case — a task that's already left OPEN — before doing any signing work.
   // This alone cannot close the race against a concurrent status change, so
-  // `insertPermitsAtomically` re-checks for real under `FOR UPDATE` below;
-  // this is purely an early-exit optimization, not the actual guarantee.
-  if (task.status !== "OPEN") {
+  // `insertPermitsForRunIfAbsent` re-checks for real under `FOR UPDATE`
+  // below; this is purely an early-exit optimization, not the guarantee.
+  if (task.status !== OPEN_STATUS) {
     return { ok: false, reason: "task_not_open" };
   }
 
-  const candidates = await getLatestRecommendationCandidates(pool, taskId);
-  if (candidates.length === 0) {
-    return { ok: false, reason: "no_recommendations" };
+  for (let attempt = 0; attempt <= MAX_STALE_RUN_RETRIES; attempt++) {
+    // Human review finding (T-806, post-cap): runId MUST be established
+    // FIRST, and candidates must then be read scoped to that exact runId —
+    // never two independent "latest" reads. The earlier version called
+    // getLatestRecommendationCandidates() and getLatestRecommendationRunId()
+    // separately; if a concurrent /match committed a newer run B in the gap
+    // between those two calls, this function would sign permits for run A's
+    // candidates but persist them under run_id = B (insertPermitsForRunIfAbsent's
+    // own latest-run recheck could not catch this, since B genuinely WAS the
+    // latest run — the corruption was already baked into the mismatched
+    // candidates/runId pair passed into it). getRecommendationCandidatesForRun
+    // reads by explicit run_id, and a run's candidate rows are immutable and
+    // permanently tied to the run_id they were inserted under, so this single
+    // snapshot (runId, its candidates) can never be split across two rounds.
+    const runId = await getLatestRecommendationRunId(pool, taskId);
+    if (!runId) {
+      return { ok: false, reason: "no_recommendations" };
+    }
+    const candidates = await getRecommendationCandidatesForRun(pool, runId);
+    if (candidates.length === 0) {
+      // Unreachable in practice: a run is only ever created together with
+      // its candidates, in the same transaction (insertRecommendationRunWithPermits).
+      // Narrows the type without asserting away a real (if impossible) case.
+      return { ok: false, reason: "no_recommendations" };
+    }
+
+    // True idempotency (Feature 7 sync, T-709): if this run already has
+    // unexpired OUTSTANDING permits, return them unchanged — no re-signing,
+    // no re-insert.
+    //
+    // If OUTSTANDING permits exist for this run but all have expired, this
+    // round's authorization window is over — re-signing NEW permits for the
+    // SAME (already-superseded-by-time) round would extend it indefinitely
+    // via repeated GET/POST calls, defeating hasUnexpiredOutstandingPermits'
+    // whole purpose. The candidates are still valid, so the caller's fix is
+    // a fresh POST /tasks/:taskId/match — now allowed, since nothing
+    // unexpired remains — not a fresh call to this endpoint for the old run.
+    const existing = await getOutstandingPermitsForRun(pool, runId);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const unexpired = existing.filter((permit) => permit.expiry > nowSeconds);
+    if (unexpired.length > 0) {
+      return {
+        ok: true,
+        permits: unexpired.map((permit) => toAcceptancePermitJson(taskId, permit)),
+      };
+    }
+    if (existing.length > 0) {
+      return { ok: false, reason: "permits_expired" };
+    }
+
+    // Same "sign everything in memory first, write everything in one
+    // transaction" discipline as matchTask (T-806 capsule).
+    const signedPermits = await signPermitsForCandidates(taskId, candidates);
+    try {
+      // insertPermitsForRunIfAbsent re-checks both races under the task-row
+      // lock (Feature 7 sync, T-709): a genuinely concurrent second caller
+      // that also found zero OUTSTANDING permits above still can't produce
+      // a duplicate set, and if a concurrent POST /match committed a newer
+      // run in the gap between the reads above and this call acquiring the
+      // lock, it throws StaleRecommendationRunError instead of silently
+      // persisting permits for a superseded run; this loop catches that and
+      // retries against whatever is now the latest run.
+      const persisted = await insertPermitsForRunIfAbsent(pool, {
+        runId,
+        taskId,
+        permits: signedPermits,
+      });
+      return {
+        ok: true,
+        permits: persisted.map((permit) => toAcceptancePermitJson(taskId, permit)),
+      };
+    } catch (error) {
+      if (error instanceof StaleRecommendationRunError) {
+        continue;
+      }
+      if (error instanceof TaskNotOpenForPermitsError) {
+        return { ok: false, reason: "task_not_open" };
+      }
+      throw error;
+    }
   }
 
-  // Same "sign everything in memory first, write everything in one
-  // transaction" discipline as matchTask (T-806 capsule).
-  const signedPermits = await signPermitsForCandidates(taskId, candidates);
-  try {
-    await insertPermitsAtomically(pool, taskId, signedPermits);
-  } catch (error) {
-    // The race-free check inside insertPermitsAtomically's own transaction
-    // (Codex review, T-806 round 1, P2) — the task left OPEN in the gap
-    // between the pre-check above and this write actually starting.
-    if (error instanceof TaskNotOpenForPermitsError) {
-      return { ok: false, reason: "task_not_open" };
-    }
-    throw error;
-  }
-  return {
-    ok: true,
-    permits: signedPermits.map((permit) => toAcceptancePermitJson(taskId, permit)),
-  };
+  // Exhausted retries under sustained concurrent /match calls — surfacing
+  // this as "no_recommendations" would be misleading (recommendations DO
+  // exist, just churning faster than this request can persist a permit for
+  // them); a distinct reason lets routes.ts report the real situation.
+  return { ok: false, reason: "recommendation_run_churning" };
 }
 
 /**
@@ -367,6 +503,9 @@ export function registerDispatchRoutes(app: FastifyInstance, pool: Pool): void {
     if (!result.ok) {
       if (result.reason === "not_found") {
         return reply.status(404).send({ error: { message: "未找到该任务。" } });
+      }
+      if (result.reason === "task_not_open") {
+        return reply.status(409).send({ error: { message: "任务当前状态不允许发起撮合。" } });
       }
       return reply.status(502).send({
         error: { message: `撮合服务不可用：${result.message}` },
@@ -429,6 +568,16 @@ export function registerDispatchRoutes(app: FastifyInstance, pool: Pool): void {
         if (result.reason === "task_not_open") {
           return reply.status(409).send({
             error: { message: "任务当前状态不允许签发接单授权。" },
+          });
+        }
+        if (result.reason === "recommendation_run_churning") {
+          return reply.status(409).send({
+            error: { message: "推荐结果正在更新，请稍后重试。" },
+          });
+        }
+        if (result.reason === "permits_expired") {
+          return reply.status(409).send({
+            error: { message: "此轮推荐的接单授权已过期，请重新调用 POST /tasks/:taskId/match。" },
           });
         }
         return reply.status(400).send({

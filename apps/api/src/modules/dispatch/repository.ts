@@ -164,12 +164,136 @@ export interface InsertRecommendationRunInput {
    * recommendations it returned (T-705 capsule: "candidate_count 用发给 Go 的
    *候选总数，不是返回的推荐数"). */
   candidateCount: number;
+  /** SHA-256 (hex) of the canonically-ordered `MatchRequest` sent to the Go
+   * service for this run (Feature 7 sync, T-709, P2) — see
+   * `dispatch/input-digest.ts`. */
+  inputDigest: string;
   candidates: RecommendationCandidateInput[];
+}
+
+/** Thrown by `insertRecommendationRunWithPermits` when, after acquiring the
+ * task lock, the task still has an unexpired `OUTSTANDING` permit (Feature 7
+ * sync, T-709 round 1, P1 — see `hasUnexpiredOutstandingPermits`'s doc
+ * comment for why this check exists). Callers must fall back to returning
+ * the still-current round's existing data idempotently. */
+export class PermitsStillOutstandingError extends Error {
+  constructor(taskId: string) {
+    super(`task ${taskId} still has an unexpired OUTSTANDING permit`);
+    this.name = "PermitsStillOutstandingError";
+  }
+}
+
+/**
+ * Returns whether `taskId` currently has any `acceptance_permits` row that
+ * is both `status = 'OUTSTANDING'` AND not yet expired (Feature 7 sync,
+ * T-709 round 1, P1). This is the actual security mechanism for "at most 3
+ * candidates ever hold a cryptographically valid permit at a time" —
+ * `POST /tasks/:taskId/match` and `POST /tasks/:taskId/acceptance-permits`
+ * both refuse to start a NEW round (or issue a fresh set of permits) while
+ * this returns true, so a new round can only ever be created once every
+ * permit from the previous round has naturally expired. `status =
+ * 'INVALIDATED'`/`'CONSUMED'` (T-806's own richer state machine) is NOT a
+ * substitute for this check: marking a row INVALIDATED is bookkeeping for
+ * this API's own responses, not something `TaskEscrow.acceptTask` ever
+ * reads — an already-signed permit's cryptographic validity is governed
+ * purely by its own `expiry` field until the chain itself rejects it.
+ */
+export async function hasUnexpiredOutstandingPermits(
+  client: Queryable,
+  taskId: string,
+): Promise<boolean> {
+  const { rows } = await client.query<{ blocked: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM acceptance_permits
+       WHERE task_id = $1 AND status = 'OUTSTANDING' AND expiry > EXTRACT(EPOCH FROM now())
+     ) AS blocked`,
+    [taskId],
+  );
+  return rows[0]?.blocked ?? false;
+}
+
+/** Thrown by `insertPermitsForRunIfAbsent` when, after acquiring the task
+ * lock, `runId` turns out to no longer be the task's latest recommendation
+ * run (Feature 7 sync, T-709 round 1, P1): `issuePermitsForTask` reads
+ * `runId` OUTSIDE any transaction; if a concurrent `POST /tasks/:taskId/match`
+ * call commits a newer run in the gap between that read and this function
+ * acquiring the lock, inserting permits for the now-stale run would leave
+ * both the old and new run's permits briefly OUTSTANDING. The caller must
+ * re-read the latest run and its candidates and retry. */
+export class StaleRecommendationRunError extends Error {
+  constructor(taskId: string, staleRunId: string) {
+    super(`recommendation run ${staleRunId} for task ${taskId} is no longer the latest run`);
+    this.name = "StaleRecommendationRunError";
+  }
+}
+
+/**
+ * Reads the id of the most recent `recommendation_run` for `taskId` — same
+ * "latest run" ordering `getLatestRecommendationCandidates` uses
+ * (`requested_at DESC, sequence_no DESC`). `issuePermitsForTask` needs just
+ * the id (to look up outstanding permits and detect staleness), not the
+ * full candidate join that function returns.
+ */
+export async function getLatestRecommendationRunId(
+  client: Queryable,
+  taskId: string,
+): Promise<string | null> {
+  const { rows } = await client.query<{ id: string }>(
+    `SELECT id FROM recommendation_runs
+     WHERE task_id = $1
+     ORDER BY requested_at DESC, sequence_no DESC
+     LIMIT 1`,
+    [taskId],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Reads every currently-`OUTSTANDING` `acceptance_permits` row for one
+ * recommendation run (Feature 7 sync, T-709) — the read
+ * `issuePermitsForTask`'s idempotent-reissue check uses. Returns `[]` if the
+ * run has never had permits issued, or all of them have since been
+ * invalidated by a newer run superseding this one. Returns the SAME
+ * `SignedAcceptancePermit` shape `signPermitsForCandidates` (routes.ts)
+ * produces, so routes.ts can treat "freshly signed" and "read back from an
+ * existing run" permits identically.
+ */
+export async function getOutstandingPermitsForRun(
+  client: Queryable,
+  runId: string,
+): Promise<SignedAcceptancePermit[]> {
+  const { rows } = await client.query<{
+    agent_id: string;
+    accepting_address: string;
+    nonce: string;
+    expiry: string;
+    chain_id: number;
+    verifying_contract: string;
+    signature: string;
+  }>(
+    `SELECT agent_id, accepting_address, nonce, expiry, chain_id, verifying_contract, signature
+     FROM acceptance_permits
+     WHERE run_id = $1 AND status = 'OUTSTANDING'
+     ORDER BY created_at ASC`,
+    [runId],
+  );
+
+  return rows.map((row) => ({
+    agentId: row.agent_id,
+    agentWalletAddress: row.accepting_address,
+    nonce: row.nonce,
+    // BIGINT comes back as a string from `pg` — same conversion
+    // `getPermitForAgent` already performs below.
+    expiry: Number(row.expiry),
+    chainId: row.chain_id,
+    verifyingContract: row.verifying_contract,
+    signature: row.signature,
+  }));
 }
 
 /** One already-signed `AcceptancePermit` ready to persist — the shape both
  * `insertRecommendationRunWithPermits` (auto-issuance right after `/match`)
- * and `insertPermitsAtomically` (`POST /tasks/:taskId/acceptance-permits`
+ * and `insertPermitsForRunIfAbsent` (`POST /tasks/:taskId/acceptance-permits`
  * manual re-issuance) accept. Signing (`issueAcceptancePermit`,
  * dispatch/permit.service.ts) happens entirely in memory, BEFORE either of
  * these functions is ever called (T-806 capsule: "先在内存里完成全部签名，再
@@ -213,16 +337,23 @@ export interface InsertRecommendationRunWithPermitsInput extends InsertRecommend
  * (this function's now-removed T-705 predecessor) already applied to just
  * run+candidates, extended to cover permits too.
  *
- * Opens with `SELECT id FROM tasks WHERE id = $1 FOR UPDATE` (T-806, user's
- * item #1's last sentence: serializing concurrent `/match` calls) — this is
- * NOT a mechanism for rejecting a legitimate repeated `/match` call (calling
- * `/match` again for the same task is allowed and produces a fresh run with
- * fresh permits); it only ensures that two concurrent calls for the SAME
- * task each complete their own three-table write as an uninterrupted unit
- * rather than one caller's later transaction rows getting interleaved with
- * the other's mid-write. The lock is released when this transaction
- * COMMITs/ROLLBACKs, so the second concurrent caller simply waits, then
- * proceeds with its own independent run once the first has finished.
+ * Opens with `SELECT status FROM tasks WHERE id = $1 FOR UPDATE` (T-806,
+ * user's item #1's last sentence: serializing concurrent `/match` calls) —
+ * this is NOT a mechanism for rejecting a legitimate repeated `/match` call
+ * in general; it only ensures that two concurrent calls for the SAME task
+ * each complete their own write as an uninterrupted unit. The lock is
+ * released when this transaction COMMITs/ROLLBACKs.
+ *
+ * Feature 7 sync (T-709 round 1, P1) changes what "a legitimate repeated
+ * `/match` call" means: immediately after the OPEN re-check, this also
+ * re-checks `hasUnexpiredOutstandingPermits` under the same lock — a NEW
+ * round can only be created once every permit from the CURRENT round has
+ * naturally expired, throwing `PermitsStillOutstandingError` otherwise. This
+ * is the actual enforcement mechanism for "at most 3 candidates ever hold a
+ * cryptographically valid permit at a time" (see that function's own doc
+ * comment) — the `INVALIDATED` status this function also sets on the
+ * (by then guaranteed-expired) previous round's rows below is bookkeeping
+ * for API responses, not a security control.
  */
 export async function insertRecommendationRunWithPermits(
   pool: Pool,
@@ -239,8 +370,8 @@ export async function insertRecommendationRunWithPermits(
     // or cancelled task, or a status change that lands in the gap between
     // matchTask's own initial read and this transaction actually starting).
     // Same `TaskNotOpenForPermitsError`/status column as
-    // `insertPermitsAtomically`'s identical check — one shared error type
-    // for "the lock revealed this task is no longer OPEN," not two.
+    // `insertPermitsForRunIfAbsent`'s identical check — one shared error
+    // type for "the lock revealed this task is no longer OPEN," not two.
     const { rows: taskRows } = await client.query<{ status: string }>(
       `SELECT status FROM tasks WHERE id = $1 FOR UPDATE`,
       [input.taskId],
@@ -249,11 +380,17 @@ export async function insertRecommendationRunWithPermits(
       throw new TaskNotOpenForPermitsError(input.taskId);
     }
 
+    // Feature 7 sync (T-709 round 1, P1) — see this function's own doc
+    // comment above.
+    if (await hasUnexpiredOutstandingPermits(client, input.taskId)) {
+      throw new PermitsStillOutstandingError(input.taskId);
+    }
+
     const { rows } = await client.query<{ id: string }>(
-      `INSERT INTO recommendation_runs (task_id, algorithm_version, candidate_count)
-       VALUES ($1, $2, $3)
+      `INSERT INTO recommendation_runs (task_id, algorithm_version, candidate_count, input_digest)
+       VALUES ($1, $2, $3, $4)
        RETURNING id`,
-      [input.taskId, input.algorithmVersion, input.candidateCount],
+      [input.taskId, input.algorithmVersion, input.candidateCount, input.inputDigest],
     );
     const runId = rows[0]?.id;
     if (!runId) {
@@ -264,9 +401,23 @@ export async function insertRecommendationRunWithPermits(
       await insertRecommendationCandidate(client, runId, candidate);
     }
 
+    // Feature 7 sync (T-709): marks every OTHER run's still-OUTSTANDING
+    // permits for this task INVALIDATED. By the time this line runs, the
+    // hasUnexpiredOutstandingPermits check above already guarantees any
+    // such rows are expired — this is cleanup for API responses/idempotent
+    // reads, not what actually makes the old round unusable (its own
+    // expiry does that).
+    await client.query(
+      `UPDATE acceptance_permits
+       SET status = 'INVALIDATED', consumed_at = now()
+       WHERE task_id = $1 AND run_id <> $2 AND status = 'OUTSTANDING'`,
+      [input.taskId, runId],
+    );
+
     for (const permit of input.permits) {
       await insertAcceptancePermit(client, {
         taskId: input.taskId,
+        runId,
         agentId: permit.agentId,
         acceptingAddress: permit.agentWalletAddress,
         nonce: permit.nonce,
@@ -287,22 +438,13 @@ export async function insertRecommendationRunWithPermits(
   }
 }
 
-/**
- * `POST /tasks/:taskId/acceptance-permits`'s (manual re-issuance) atomic
- * write — only `acceptance_permits` rows, since the run/candidates it
- * re-issues permits for already exist (T-806 capsule: this endpoint's
- * counterpart to `insertRecommendationRunWithPermits` above, for the case
- * where no new run is being created). Same "sign everything in memory
- * first, write everything in one transaction" discipline: any single
- * insert failing ROLLBACKs the whole batch, leaving zero new permit rows.
- */
-/** Thrown by `insertPermitsAtomically` when the task-row lock reveals the
- * task has left `OPEN` between the caller's initial read and this
- * transaction's write (Codex review, T-806 round 1, P2) — a bare pre-check
- * in `issuePermitsForTask` before opening this transaction cannot close
- * that race by itself, since the task's status can still change in the gap
- * between that check and this function actually starting; only re-checking
- * while holding `FOR UPDATE` on the task row is race-free. */
+/** Thrown when the task-row lock reveals the task has left `OPEN` between
+ * the caller's initial read and this transaction's write (Codex review,
+ * T-806 round 1, P2) — a bare pre-check in `issuePermitsForTask` before
+ * opening this transaction cannot close that race by itself, since the
+ * task's status can still change in the gap between that check and this
+ * function actually starting; only re-checking while holding `FOR UPDATE`
+ * on the task row is race-free. */
 export class TaskNotOpenForPermitsError extends Error {
   constructor(taskId: string) {
     super(`task ${taskId} is no longer OPEN`);
@@ -310,11 +452,42 @@ export class TaskNotOpenForPermitsError extends Error {
   }
 }
 
-export async function insertPermitsAtomically(
+/**
+ * `POST /tasks/:taskId/acceptance-permits`'s (manual re-issuance) atomic
+ * write for one specific recommendation run — only `acceptance_permits`
+ * rows, since the run/candidates it re-issues permits for already exist
+ * (T-806 capsule: this endpoint's counterpart to
+ * `insertRecommendationRunWithPermits` above, for the case where no new run
+ * is being created). Same "sign everything in memory first, write
+ * everything in one transaction" discipline: any single insert failing
+ * ROLLBACKs the whole batch, leaving zero new permit rows.
+ *
+ * Feature 7 sync (T-709 round 1, P1) turned this into a true idempotent-
+ * reissue-if-absent operation, replacing the old unconditional-insert
+ * `insertPermitsAtomically`: `issuePermitsForTask` (routes.ts) calls this
+ * only after its own outside-the-transaction reads found `runId` to be the
+ * latest run with zero OUTSTANDING permits; this function re-does BOTH
+ * checks INSIDE the transaction, after acquiring the task lock:
+ *
+ *   1. `runId` must still be the task's latest run — a concurrent
+ *      `POST /tasks/:taskId/match` could have committed a newer run in the
+ *      gap between the caller's read and this function acquiring the lock.
+ *      Throws `StaleRecommendationRunError` rather than silently persisting
+ *      permits for a superseded run; the caller must re-fetch and retry.
+ *   2. `runId` must still have zero OUTSTANDING permits — two genuinely
+ *      concurrent `POST /tasks/:taskId/acceptance-permits` calls for the
+ *      same still-latest run can't both win the outside check and both
+ *      insert a full duplicate set; the loser sees the winner's freshly-
+ *      committed permits and returns those instead.
+ *
+ * Returns the run's OUTSTANDING permits either way (freshly inserted, or
+ * pre-existing from the winning concurrent caller) — callers never need to
+ * distinguish which happened.
+ */
+export async function insertPermitsForRunIfAbsent(
   pool: Pool,
-  taskId: string,
-  permits: SignedAcceptancePermit[],
-): Promise<void> {
+  input: { runId: string; taskId: string; permits: SignedAcceptancePermit[] },
+): Promise<SignedAcceptancePermit[]> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -325,14 +498,31 @@ export async function insertPermitsAtomically(
     // comment for why a pre-check outside this transaction isn't enough.
     const { rows: taskRows } = await client.query<{ status: string }>(
       `SELECT status FROM tasks WHERE id = $1 FOR UPDATE`,
-      [taskId],
+      [input.taskId],
     );
     if (taskRows[0]?.status !== "OPEN") {
-      throw new TaskNotOpenForPermitsError(taskId);
+      throw new TaskNotOpenForPermitsError(input.taskId);
     }
-    for (const permit of permits) {
+
+    // Feature 7 sync (T-709 round 1, P1) — see this function's own doc
+    // comment above, check 1.
+    const latestRunId = await getLatestRecommendationRunId(client, input.taskId);
+    if (latestRunId !== input.runId) {
+      throw new StaleRecommendationRunError(input.taskId, input.runId);
+    }
+
+    // Feature 7 sync (T-709 round 1, P1) — see this function's own doc
+    // comment above, check 2.
+    const existing = await getOutstandingPermitsForRun(client, input.runId);
+    if (existing.length > 0) {
+      await client.query("COMMIT");
+      return existing;
+    }
+
+    for (const permit of input.permits) {
       await insertAcceptancePermit(client, {
-        taskId,
+        taskId: input.taskId,
+        runId: input.runId,
         agentId: permit.agentId,
         acceptingAddress: permit.agentWalletAddress,
         nonce: permit.nonce,
@@ -342,7 +532,10 @@ export async function insertPermitsAtomically(
         signature: permit.signature,
       });
     }
+    const inserted = await getOutstandingPermitsForRun(client, input.runId);
+
     await client.query("COMMIT");
+    return inserted;
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -431,6 +624,53 @@ export async function getLatestRecommendationCandidates(
   }));
 }
 
+/**
+ * Reads back one SPECIFIC recommendation run's candidates by `runId` —
+ * deliberately NOT "the latest run for this task" (human review finding,
+ * T-806 post-cap): `issuePermitsForTask` (routes.ts) must sign permits for
+ * the exact same run whose id it already committed to, not re-resolve
+ * "latest" a second time after already reading candidates once. A
+ * `recommendation_candidates` row is immutable and permanently tied to the
+ * `run_id` it was inserted under (nothing ever updates or reassigns it), so
+ * scoping this query by an explicit `runId` — established once by the
+ * caller via `getLatestRecommendationRunId` — cannot be affected by a
+ * concurrent `/match` call creating a newer run afterward; that new run's
+ * candidates live under ITS OWN `run_id`, never retroactively attached to
+ * this one. Returns `[]` if `runId` has no candidate rows (defensive; not
+ * expected to happen for a run that was actually returned by
+ * `getLatestRecommendationRunId`, since a run is only ever created together
+ * with its candidates in the same transaction).
+ */
+export async function getRecommendationCandidatesForRun(
+  client: Queryable,
+  runId: string,
+): Promise<LatestRecommendationCandidate[]> {
+  const { rows } = await client.query<{
+    agent_id: string;
+    owner_address: string;
+    rank: number;
+    slot_type: string;
+    score: string;
+    reasons: string[];
+  }>(
+    `SELECT rc.agent_id, a.owner_address, rc.rank, rc.slot_type, rc.score, rc.reasons
+     FROM recommendation_candidates rc
+     JOIN agents a ON a.id = rc.agent_id
+     WHERE rc.run_id = $1
+     ORDER BY rc.rank ASC`,
+    [runId],
+  );
+
+  return rows.map((row) => ({
+    agentId: row.agent_id,
+    agentWalletAddress: row.owner_address,
+    rank: row.rank,
+    slotType: row.slot_type,
+    score: Number(row.score),
+    reasons: row.reasons,
+  }));
+}
+
 async function insertRecommendationCandidate(
   client: PoolClient,
   runId: string,
@@ -464,12 +704,16 @@ async function insertRecommendationCandidate(
 // on-chain transaction's own calldata used (see acceptance-tx-verifier.ts's
 // `decodeAcceptTaskCalldata`), not by any wallet-level dedup or ordering
 // guess. `resolveAcceptingAgentId` below is the read half of that design;
-// `insertRecommendationRunWithPermits`/`insertPermitsAtomically` above are
-// the write half.
+// `insertRecommendationRunWithPermits`/`insertPermitsForRunIfAbsent` above
+// are the write half.
 // ---------------------------------------------------------------------
 
 export interface InsertAcceptancePermitInput {
   taskId: string;
+  /** The recommendation run this permit was issued for (Feature 7 sync,
+   * T-709) — see 0008_create_acceptance_permits.sql's `run_id` column
+   * comment. */
+  runId: string;
   agentId: string;
   /** The candidate wallet address AT ISSUANCE TIME — see
    * 0008_create_acceptance_permits.sql's header comment for why this is
@@ -495,9 +739,9 @@ export interface InsertAcceptancePermitInput {
  * Persists one issued `AcceptancePermit` row, `status` defaulting to
  * `'OUTSTANDING'` (the column's own DB default). Always called from inside
  * one of the two atomic-batch functions above
- * (`insertRecommendationRunWithPermits`/`insertPermitsAtomically`) — never
- * on its own with a bare `Pool`, since every permit issuance must be part
- * of an all-or-nothing batch write (T-806 capsule's item #1). Never
+ * (`insertRecommendationRunWithPermits`/`insertPermitsForRunIfAbsent`) —
+ * never on its own with a bare `Pool`, since every permit issuance must be
+ * part of an all-or-nothing batch write (T-806 capsule's item #1). Never
  * re-uses/dedupes an existing row: each signing call mints a fresh nonce
  * (`permit.service.ts`'s `generateNonce`), so each call's rows are new,
  * independent grants — matching `UNIQUE (task_id, agent_id, nonce)`'s own
@@ -510,10 +754,11 @@ export async function insertAcceptancePermit(
 ): Promise<void> {
   await client.query(
     `INSERT INTO acceptance_permits
-       (task_id, agent_id, accepting_address, nonce, expiry, chain_id, verifying_contract, signature)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+       (task_id, run_id, agent_id, accepting_address, nonce, expiry, chain_id, verifying_contract, signature)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [
       input.taskId,
+      input.runId,
       input.agentId,
       input.acceptingAddress.toLowerCase(),
       input.nonce,

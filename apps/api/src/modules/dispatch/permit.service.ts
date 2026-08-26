@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { privateKeyToAccount } from "viem/accounts";
 import { resolveChainConfig } from "@agent-market/domain";
+import type { ChainRpcClient } from "../chain/rpc.client.js";
 
 /**
  * The EIP-712 domain/type definition an `AcceptancePermit` is signed under —
@@ -65,6 +66,42 @@ function loadSignerAccount(): ReturnType<typeof privateKeyToAccount> {
  */
 function generateNonce(): bigint {
   return BigInt(`0x${randomBytes(32).toString("hex")}`);
+}
+
+/**
+ * Startup-time (Feature 7 sync, T-709, P1) confirmation that the locally
+ * configured `ACCEPTANCE_PERMIT_SIGNER_KEY` derives the same address as the
+ * deployed `TaskEscrow` contract's `authorizedSigner()` (a `public
+ * immutable`, fixed once at deployment — contracts/src/TaskEscrow.sol). A
+ * mismatch here means every `AcceptancePermit` `issueAcceptancePermit`
+ * signs would be rejected on-chain by `acceptTask` with
+ * `InvalidPermitSignature` — a misconfiguration that should block startup,
+ * not surface only when a real user's first accept attempt fails.
+ *
+ * Lives here (not chain/rpc.client.ts) because it needs `loadSignerAccount`,
+ * which is private to this module by design (the signer key must never
+ * leave this file) — `rpc.client.ts` only gained the narrow
+ * `readAuthorizedSigner` read, not any awareness of the signer key itself.
+ *
+ * Deliberately takes `rpc`/`contractAddress` as parameters rather than
+ * constructing its own `ChainRpcClient`/resolving chain config internally:
+ * this function only compares two addresses, so it doesn't care whether
+ * `rpc` is the real viem-backed client or a test double — the caller
+ * (server.ts) owns wiring the real dependencies.
+ */
+export async function verifySignerMatchesContract(
+  rpc: ChainRpcClient,
+  contractAddress: `0x${string}`,
+): Promise<void> {
+  const account = loadSignerAccount();
+  const onChainAuthorizedSigner = await rpc.readAuthorizedSigner(contractAddress);
+  if (onChainAuthorizedSigner.toLowerCase() !== account.address.toLowerCase()) {
+    throw new Error(
+      "permit.service: ACCEPTANCE_PERMIT_SIGNER_KEY's derived address does not match " +
+        "TaskEscrow.authorizedSigner() on-chain. Every AcceptancePermit issued with this key " +
+        "would be rejected by acceptTask with InvalidPermitSignature — refusing to start.",
+    );
+  }
 }
 
 export interface IssuedAcceptancePermit {

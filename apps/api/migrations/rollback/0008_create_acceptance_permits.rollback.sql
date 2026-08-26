@@ -9,8 +9,10 @@
 -- considered un-applied.
 --
 -- DESTRUCTIVE only in the sense of losing whatever acceptance-permit
--- issuance/consumption history has been recorded since this table was
--- created; it does not touch any other table.
+-- issuance/consumption history and recommendation_runs.input_digest values
+-- have been recorded since this migration was applied; it does not touch
+-- any other table.
 DROP TABLE IF EXISTS acceptance_permits;
+ALTER TABLE recommendation_runs DROP COLUMN IF EXISTS input_digest;
 
 DELETE FROM schema_migrations WHERE id = '0008_create_acceptance_permits.sql';
