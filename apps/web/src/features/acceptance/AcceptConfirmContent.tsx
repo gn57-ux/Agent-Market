@@ -4,11 +4,16 @@ import { formatAmount, isErrorCode } from "@agent-market/domain";
 import { useWallet } from "../wallet/WalletProvider.js";
 import { TransactionStatusView } from "../../shared/components/TransactionStatus.js";
 import { useTransactionFlow, type VerifyOutcome } from "../../shared/tx-flow/useTransactionFlow.js";
-import { ERC20_APPROVE_ABI, TASK_ESCROW_ACCEPT_TASK_ABI } from "../tasks/abi.js";
+import {
+  ERC20_ALLOWANCE_ABI,
+  ERC20_APPROVE_ABI,
+  ERC20_BALANCE_OF_ABI,
+  TASK_ESCROW_ACCEPT_TASK_ABI,
+} from "../tasks/abi.js";
 import { getTask } from "../tasks/api.js";
 import {
   ApiError,
-  getMyAcceptancePermit,
+  getAcceptancePermitForAgent,
   submitAcceptanceVerification,
   type AcceptancePermitRecord,
 } from "./api.js";
@@ -65,6 +70,12 @@ const POLL_INTERVAL_MS = 1000;
 
 export interface AcceptConfirmContentProps {
   taskId: string;
+  /** Which recommended candidate `agentId` the signed-in wallet was resolved
+   * to own (`AcceptanceSection`'s `resolveCandidateAgentId`, T-807) — the new
+   * per-agent permit endpoint (`GET /tasks/:taskId/agents/:agentId/acceptance-permit`,
+   * T-806) requires this explicitly rather than inferring "my" permit from
+   * the session alone. */
+  agentId: string;
   /** Already-computed by `AcceptanceSection` — `AcceptanceSection`'s own
    * button disables itself while this is `undefined`, so by the time this
    * component ever mounts it is always a real amount. Kept as a required
@@ -74,6 +85,20 @@ export interface AcceptConfirmContentProps {
   stake: bigint;
   onAccepted?: () => void;
 }
+
+/**
+ * T-807 (human N6 BLOCK fix): the real on-chain read this component was
+ * missing before broadcasting anything. `balance`/`allowance` are only ever
+ * trusted once genuinely read from `YDToken` — an RPC failure must not be
+ * silently treated as "check passed" (capsule's explicit constraint), so
+ * this has its own `"error"` member distinct from `"ready"`, and the render
+ * logic below never renders a clickable confirm control for anything other
+ * than `"ready"`.
+ */
+type BalanceAllowanceState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ready"; balance: bigint; allowance: bigint };
 
 type PermitLoadState =
   | { status: "loading" }
@@ -115,10 +140,23 @@ function isPermitUsable(permit: AcceptancePermitRecord): boolean {
  * run at all, and (2) the fetched permit's `expiry` gates whether any
  * confirm action is offered (AC-804).
  */
-export function AcceptConfirmContent({ taskId, stake, onAccepted }: AcceptConfirmContentProps) {
+export function AcceptConfirmContent({
+  taskId,
+  agentId,
+  stake,
+  onAccepted,
+}: AcceptConfirmContentProps) {
   const wallet = useWallet();
   const address = wallet.address;
   const [permitState, setPermitState] = useState<PermitLoadState>({ status: "loading" });
+  const [balanceAllowanceState, setBalanceAllowanceState] = useState<BalanceAllowanceState>({
+    status: "loading",
+  });
+  // T-807 round 1, P1 fix: true for the entire `handleStartAccept` call,
+  // including its pre-`useTransactionFlow` async reads — see that
+  // function's own comment for why `approveFlow`/`acceptFlow`'s `idle`
+  // status alone isn't enough to prevent a concurrent second click.
+  const [isStarting, setIsStarting] = useState(false);
 
   // Read by `pollForAlreadyAccepted` (方案 B) before every poll step, mirroring
   // this file's existing `ignore`-flag pattern for the permit-fetch effect
@@ -173,7 +211,7 @@ export function AcceptConfirmContent({ taskId, stake, onAccepted }: AcceptConfir
   useEffect(() => {
     let ignore = false;
     setPermitState({ status: "loading" });
-    getMyAcceptancePermit(taskId)
+    getAcceptancePermitForAgent(taskId, agentId)
       .then((permit) => {
         if (ignore) return;
         setPermitState(
@@ -190,7 +228,66 @@ export function AcceptConfirmContent({ taskId, stake, onAccepted }: AcceptConfir
     return () => {
       ignore = true;
     };
-  }, [taskId]);
+  }, [taskId, agentId]);
+
+  // T-807: real on-chain `YDToken.balanceOf`/`allowance` reads — the exact
+  // check the human reviewer flagged as missing. `readBalanceAllowance` is
+  // also called directly (not through this effect) at click time by
+  // `handleStartAccept` below, mirroring this file's existing "re-check
+  // expiry at click time" convention for `permitState`: the value read here
+  // at mount can go stale (RPC state, or the connected account/allowance
+  // changing) by the time the user actually clicks, so a second real read
+  // happens right before any transaction is allowed to start.
+  async function readBalanceAllowance(): Promise<{ balance: bigint; allowance: bigint }> {
+    if (!address) throw new Error("请先连接 MetaMask 钱包。");
+    const publicClient = wallet.getPublicClient();
+    const [balance, allowance] = await Promise.all([
+      publicClient.readContract({
+        address: wallet.chainConfig.addresses.ydToken,
+        abi: ERC20_BALANCE_OF_ABI,
+        functionName: "balanceOf",
+        args: [address],
+      }),
+      publicClient.readContract({
+        address: wallet.chainConfig.addresses.ydToken,
+        abi: ERC20_ALLOWANCE_ABI,
+        functionName: "allowance",
+        args: [address, wallet.chainConfig.addresses.taskEscrow],
+      }),
+    ]);
+    return { balance, allowance };
+  }
+
+  useEffect(() => {
+    let ignore = false;
+    setBalanceAllowanceState({ status: "loading" });
+    // `wallet.getPublicClient()` (inside `readBalanceAllowance`) throws
+    // SYNCHRONOUSLY when no wallet is connected (same hazard
+    // `AcceptanceSection.tsx`'s own stake-read effect documents, Codex
+    // review T-802 round 1, P1) — the async IIFE turns that into an
+    // ordinary rejection this single `try/catch` already handles, instead
+    // of crashing the render.
+    void (async () => {
+      try {
+        const result = await readBalanceAllowance();
+        if (!ignore) setBalanceAllowanceState({ status: "ready", ...result });
+      } catch {
+        // RPC failure (or no wallet connected) must NOT be treated as
+        // "check passed" (capsule's explicit constraint) — surfaced as its
+        // own "error" state, which the render logic below never treats as
+        // clearable to a clickable confirm control.
+        if (!ignore) setBalanceAllowanceState({ status: "error" });
+      }
+    })();
+    return () => {
+      ignore = true;
+    };
+    // `wallet.identityGeneration` is listed explicitly (capsule requirement)
+    // even though `address`/`wallet.chainConfig` already change whenever a
+    // real wallet-identity transition happens — this is the one dependency
+    // whose entire purpose here is "re-read on wallet switch", so it stays
+    // spelled out rather than relying on that correlation implicitly.
+  }, [address, wallet.chainConfig, wallet.identityGeneration]);
 
   async function confirmOnChain(txHash: `0x${string}`): Promise<{ confirmations: number }> {
     const publicClient = wallet.getPublicClient();
@@ -379,19 +476,57 @@ export function AcceptConfirmContent({ taskId, stake, onAccepted }: AcceptConfir
     (!address || address.toLowerCase() !== permitState.permit.agentWalletAddress.toLowerCase());
 
   async function handleStartAccept() {
-    // Re-check expiry at the moment the user actually clicks, not just at
-    // GET-time (Codex review, T-803 round 1, P2): a panel left open past
-    // `permit.expiry` must not still let `approve` succeed before
-    // `acceptTask` inevitably reverts on an expired permit.
-    if (permitState.status !== "ready" || !isPermitUsable(permitState.permit)) {
-      setPermitState({ status: "unavailable" });
-      return;
-    }
-    const approveResult = await approveFlow.start();
-    if (approveResult.outcome !== "confirmed") return;
-    const acceptResult = await acceptFlow.start();
-    if (acceptResult.outcome === "confirmed") {
-      onAccepted?.();
+    // T-807 round 1, P1 (Codex): the two RPC reads below are awaited before
+    // either `useTransactionFlow` leaves `idle`, so `canStart` alone stayed
+    // true for that entire window — a second click (or a fast double-click)
+    // re-entered this function and could start two concurrent
+    // approve/acceptTask sequences. `isStarting` closes that window
+    // synchronously, the instant the first click is handled, before any
+    // `await` — the same "flip state before the first await" shape as this
+    // file's expiry/permit checks above, just guarding entry instead of a
+    // single condition.
+    if (isStarting) return;
+    setIsStarting(true);
+    try {
+      // Re-check expiry at the moment the user actually clicks, not just at
+      // GET-time (Codex review, T-803 round 1, P2): a panel left open past
+      // `permit.expiry` must not still let `approve` succeed before
+      // `acceptTask` inevitably reverts on an expired permit.
+      if (permitState.status !== "ready" || !isPermitUsable(permitState.permit)) {
+        setPermitState({ status: "unavailable" });
+        return;
+      }
+      // T-807: re-read balance/allowance right now, not just whatever was read
+      // at mount (design.md's "余额与授权额度检查" — "以及点击确认的那一刻，防止钱包
+      // 切换/RPC 状态在展示与点击之间变化"). A failed read here (RPC error, or no
+      // wallet) must block just like an insufficient balance would — never
+      // silently fall back to the stale mounted-time value.
+      let fresh: { balance: bigint; allowance: bigint };
+      try {
+        fresh = await readBalanceAllowance();
+      } catch {
+        setBalanceAllowanceState({ status: "error" });
+        return;
+      }
+      setBalanceAllowanceState({ status: "ready", ...fresh });
+      if (fresh.balance < stake) {
+        return;
+      }
+      // allowance >= stake: approve is treated as already satisfied — skip it
+      // entirely rather than broadcasting a no-op `approve(spender, 0)` just to
+      // "keep both steps uniform" (capsule's explicit constraint).
+      const approveResult =
+        fresh.allowance >= stake ? ({ outcome: "confirmed" } as const) : await approveFlow.start();
+      if (approveResult.outcome !== "confirmed") return;
+      const acceptResult = await acceptFlow.start();
+      if (acceptResult.outcome === "confirmed") {
+        onAccepted?.();
+      }
+    } finally {
+      // `onAccepted?.()` above can close/unmount this panel before this
+      // `finally` runs — guarded by the file's existing `mountedRef`, same
+      // convention as `pollForAlreadyAccepted`'s own mounted checks.
+      if (mountedRef.current) setIsStarting(false);
     }
   }
 
@@ -423,9 +558,24 @@ export function AcceptConfirmContent({ taskId, stake, onAccepted }: AcceptConfir
   }
 
   const permitReady = permitState.status === "ready";
+  // T-807: only a genuine, successful on-chain read counts as "checked" —
+  // `"loading"`/`"error"` must never be treated as "balance is fine",
+  // matching the capsule's explicit RPC-failure constraint.
+  const balanceAllowanceReady = balanceAllowanceState.status === "ready";
+  const balanceInsufficient =
+    balanceAllowanceState.status === "ready" && balanceAllowanceState.balance < stake;
+  const balanceSufficient = balanceAllowanceReady && !balanceInsufficient;
+  const allowanceSufficient =
+    balanceAllowanceState.status === "ready" && balanceAllowanceState.allowance >= stake;
+  // design.md's "余额与授权额度检查": allowance >= stake degrades the two-step
+  // flow to one step — the approve row isn't rendered at all in that case,
+  // matching "跳过 approve 步骤" (not "render it in some no-op done state").
+  const showApproveStep = balanceSufficient && !allowanceSufficient;
   const canStart =
     permitReady &&
+    balanceSufficient &&
     !walletMismatch &&
+    !isStarting &&
     approveFlow.status.kind === "idle" &&
     acceptFlow.status.kind === "idle";
   const approveRecoverable =
@@ -465,26 +615,48 @@ export function AcceptConfirmContent({ taskId, stake, onAccepted }: AcceptConfir
         </p>
       )}
 
-      {permitReady && (
+      {permitReady && balanceAllowanceState.status === "loading" && (
+        <p className="text-caption text-ink-secondary">正在读取 YD 余额与授权额度…</p>
+      )}
+
+      {permitReady && balanceAllowanceState.status === "error" && (
+        <p role="alert" className="text-caption text-warning">
+          读取 YD 余额或授权额度失败，请刷新页面重试。
+        </p>
+      )}
+
+      {permitReady && balanceInsufficient && (
+        <p role="alert" className="text-caption text-warning">
+          YD 余额不足，无法接单。
+        </p>
+      )}
+
+      {permitReady && balanceSufficient && (
         <div className="flex flex-col gap-4">
           <p className="text-caption text-ink-secondary">质押金额：{formatAmount(stake)} YD</p>
 
-          <div className="flex items-center justify-between text-caption">
-            <span className="font-medium text-ink-primary">第一步：授权（approve）</span>
-            <TransactionStatusView status={approveFlow.status} />
-          </div>
-          {approveRecoverable && (
-            <button
-              type="button"
-              onClick={() => void handleRetryApprove()}
-              className="self-start rounded-control border border-divider-light px-4 py-1.5 text-caption font-medium text-action-blue hover:bg-canvas-warm"
-            >
-              重试授权
-            </button>
+          {showApproveStep && (
+            <>
+              <div className="flex items-center justify-between text-caption">
+                <span className="font-medium text-ink-primary">第一步：授权（approve）</span>
+                <TransactionStatusView status={approveFlow.status} />
+              </div>
+              {approveRecoverable && (
+                <button
+                  type="button"
+                  onClick={() => void handleRetryApprove()}
+                  className="self-start rounded-control border border-divider-light px-4 py-1.5 text-caption font-medium text-action-blue hover:bg-canvas-warm"
+                >
+                  重试授权
+                </button>
+              )}
+            </>
           )}
 
           <div className="flex items-center justify-between text-caption">
-            <span className="font-medium text-ink-primary">第二步：接单（acceptTask）</span>
+            <span className="font-medium text-ink-primary">
+              {showApproveStep ? "第二步：接单（acceptTask）" : "接单（acceptTask）"}
+            </span>
             <TransactionStatusView status={acceptFlow.status} />
           </div>
           {acceptRecoverable && (

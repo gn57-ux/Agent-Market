@@ -14,10 +14,18 @@ export interface AcceptanceSectionProps {
   taskId: string;
 }
 
+/** One recommended Agent the signed-in wallet owns for this task — see
+ * `resolveCandidateAgentIds`'s doc comment for why this is a list, not a
+ * single value. */
+export interface CandidateAgentOption {
+  agentId: string;
+  agentName: string;
+}
+
 type LoadState =
   | { status: "loading" }
   | { status: "not_candidate" }
-  | { status: "ready"; task: TaskRecord }
+  | { status: "ready"; task: TaskRecord; candidates: CandidateAgentOption[] }
   | { status: "error"; message: string };
 
 const SECTION_CLASSES = "mt-8 rounded-card border border-divider-light bg-surface-light p-6 md:p-8";
@@ -28,28 +36,51 @@ const SECTION_CLASSES = "mt-8 rounded-card border border-divider-light bg-surfac
 const BPS_DENOMINATOR = 10_000n;
 
 /**
- * Determines "is the signed-in wallet one of this task's recommended
- * candidates" by fetching each of the (at most 3, F-704's hard slot cap)
- * `GET .../recommendations` agentIds' own Agent record and comparing
- * `ownerAddress` against the session address. `GET /tasks/:taskId/recommendations`'s
- * response has no wallet address (design.md's fixed, already-shipped
- * contract — `agentId/rank/slotType/score/reasons`) and `GET /agents` has no
- * `owner` query filter (`listAgentsQuerySchema` in apps/api's schema.ts) —
- * this reverses the lookup instead of asking either existing endpoint to
- * grow a field/filter it doesn't have for this Feature's sake (capsule's
- * "经验" note).
+ * Determines ALL (T-807 round 2, human N4 BLOCK fix) of this task's (at
+ * most 3, F-704's hard slot cap) `GET .../recommendations` `agentId`s the
+ * signed-in wallet owns, by fetching each one's own Agent record and
+ * comparing `ownerAddress` against the session address.
+ * `GET /tasks/:taskId/recommendations`'s response has no wallet address
+ * (design.md's fixed, already-shipped contract —
+ * `agentId/rank/slotType/score/reasons`) and `GET /agents` has no `owner`
+ * query filter (`listAgentsQuerySchema` in apps/api's schema.ts) — this
+ * reverses the lookup instead of asking either existing endpoint to grow a
+ * field/filter it doesn't have for this Feature's sake (capsule's "经验"
+ * note).
+ *
+ * Returns EVERY matched `agentId`/`agentName`, in `recommendations`' own
+ * rank order — NOT just the first match. A previous version of this
+ * function returned only one `agentId` under the assumption "a wallet owns
+ * at most one recommended Agent per task," which is FALSE: the backend
+ * explicitly supports and tests this (`routes.integration.test.ts`'s
+ * "returns each candidate's own independent permit when the same wallet
+ * owns two recommended candidates" — two Agent records under one owner
+ * address, both recommended, each with its own permit via `GET
+ * /tasks/:taskId/agents/:agentId/acceptance-permit`, T-806). Silently
+ * picking the first match would hide the second Agent's invitation from
+ * the user entirely, with no way to accept as it. The caller now decides
+ * how to handle 0 / 1 / >1 matches (`AcceptanceSection`'s "ready" state
+ * carries the whole list; >1 requires an explicit pick before mounting
+ * `AcceptConfirmContent`, which still only ever acts as a single
+ * `agentId`).
  */
-async function resolveIsCandidate(taskId: string, sessionAddress: string): Promise<boolean> {
+async function resolveCandidateAgentIds(
+  taskId: string,
+  sessionAddress: string,
+): Promise<CandidateAgentOption[]> {
   const { recommendations } = await getRecommendations(taskId);
-  const owners = await Promise.all(
+  const matches = await Promise.all(
     recommendations.map((candidate) =>
       getAgent(candidate.agentId).then(
-        (agent) => agent.ownerAddress,
+        (agent) =>
+          agent.ownerAddress === sessionAddress
+            ? { agentId: candidate.agentId, agentName: agent.name }
+            : undefined,
         () => undefined, // an individual Agent lookup failing must not fail the whole check
       ),
     ),
   );
-  return owners.some((ownerAddress) => ownerAddress === sessionAddress);
+  return matches.filter((match): match is CandidateAgentOption => match !== undefined);
 }
 
 /**
@@ -81,6 +112,12 @@ export function AcceptanceSection({ taskId }: AcceptanceSectionProps) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [stake, setStake] = useState<bigint | undefined>(undefined);
   const [sheetOpen, setSheetOpen] = useState(false);
+  // T-807 round 2 fix: which of possibly several owned candidate Agents the
+  // user wants to act as. Auto-selected below when there is exactly one
+  // (the common case, unchanged UX); left `undefined` — forcing an explicit
+  // pick — when the wallet owns more than one recommended candidate for
+  // this task, so a second owned Agent is never silently hidden.
+  const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     let ignore = false;
@@ -96,21 +133,23 @@ export function AcceptanceSection({ taskId }: AcceptanceSectionProps) {
     // open to Feature 7's existing view, per this component's own doc
     // comment — this `.catch` is scoped to ONLY that first async stage
     // (Codex review, T-802 round 1, P2): without it, an `ApiError` thrown by
-    // `resolveIsCandidate` and one thrown by the LATER `getTask` call both
-    // landed in the same final `.catch` below and were treated identically
-    // as a real "error" state, contradicting the fail-open behavior this
-    // component documents and is tested for.
-    resolveIsCandidate(taskId, sessionAddress)
-      .catch(() => false)
-      .then((isCandidate) => {
-        if (ignore || !isCandidate) {
+    // `resolveCandidateAgentIds` and one thrown by the LATER `getTask` call
+    // both landed in the same final `.catch` below and were treated
+    // identically as a real "error" state, contradicting the fail-open
+    // behavior this component documents and is tested for.
+    resolveCandidateAgentIds(taskId, sessionAddress)
+      .catch(() => [] as CandidateAgentOption[])
+      .then((candidates) => {
+        if (ignore || candidates.length === 0) {
           if (!ignore) setState({ status: "not_candidate" });
           return undefined;
         }
-        return getTask(taskId);
+        return getTask(taskId).then((task) => ({ task, candidates }));
       })
-      .then((task) => {
-        if (!ignore && task) setState({ status: "ready", task });
+      .then((result) => {
+        if (!ignore && result) {
+          setState({ status: "ready", task: result.task, candidates: result.candidates });
+        }
       })
       .catch((error: unknown) => {
         // Only a `getTask` failure (AFTER candidacy is already confirmed)
@@ -134,6 +173,20 @@ export function AcceptanceSection({ taskId }: AcceptanceSectionProps) {
       ignore = true;
     };
   }, [taskId, session.status, session.address]);
+
+  // Auto-select the only candidate (the common case) so the flow is
+  // unchanged for a wallet that owns exactly one recommended Agent here;
+  // reset to "no selection yet" whenever the candidate list itself changes
+  // (a re-fetch, or the wallet switching to a different set of owned
+  // Agents) rather than carrying a stale selection over.
+  useEffect(() => {
+    if (state.status !== "ready") {
+      setSelectedAgentId(undefined);
+      return;
+    }
+    const [onlyCandidate] = state.candidates;
+    setSelectedAgentId(state.candidates.length === 1 ? onlyCandidate?.agentId : undefined);
+  }, [state]);
 
   useEffect(() => {
     if (state.status !== "ready") {
@@ -223,10 +276,39 @@ export function AcceptanceSection({ taskId }: AcceptanceSectionProps) {
         </div>
       </dl>
 
+      {state.candidates.length > 1 && (
+        // T-807 round 2 fix: this wallet owns more than one of this task's
+        // recommended Agents — never silently act as just the first one.
+        // `radiogroup`/`radio` (not a plain button list) since exactly one
+        // of these must end up chosen before "质押接单" is offered at all.
+        <div className="mt-6" role="radiogroup" aria-label="选择用于接单的 Agent">
+          <p className="mb-2 text-caption font-medium text-ink-primary">
+            你名下有多个 Agent 是本任务的候选，请选择用哪个 Agent 接单：
+          </p>
+          <div className="flex flex-col gap-2">
+            {state.candidates.map((candidate) => (
+              <label
+                key={candidate.agentId}
+                className="flex items-center gap-2 text-caption text-ink-primary"
+              >
+                <input
+                  type="radio"
+                  name="candidate-agent"
+                  value={candidate.agentId}
+                  checked={selectedAgentId === candidate.agentId}
+                  onChange={() => setSelectedAgentId(candidate.agentId)}
+                />
+                {candidate.agentName}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="mt-6">
         <button
           type="button"
-          disabled={stake === undefined}
+          disabled={stake === undefined || selectedAgentId === undefined}
           onClick={() => setSheetOpen(true)}
           className="inline-block rounded-control bg-action-blue px-6 py-3 text-body font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
@@ -234,13 +316,14 @@ export function AcceptanceSection({ taskId }: AcceptanceSectionProps) {
         </button>
       </div>
 
-      {stake !== undefined && (
+      {stake !== undefined && selectedAgentId !== undefined && (
         <ActionSheet
           open={sheetOpen}
           onClose={() => setSheetOpen(false)}
           content={
             <AcceptConfirmContent
               taskId={taskId}
+              agentId={selectedAgentId}
               stake={stake}
               onAccepted={() => setSheetOpen(false)}
             />

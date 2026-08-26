@@ -23,6 +23,13 @@ const CHAIN_CONFIG: ChainConfig = {
 
 const writeContract = vi.fn();
 const waitForTransactionReceipt = vi.fn();
+const readContract = vi.fn();
+// Mutable outside the mocked module so individual tests (e.g. the wallet
+// switch regression below) can bump it and observe the component re-read
+// balance/allowance — mirrors AcceptanceSection.test.tsx's own
+// `getPublicClientImpl` mutable-closure convention for the same wallet mock
+// boundary.
+let identityGeneration = 1;
 
 // Same boundary TaskCreatePage.test.tsx mocks at — this Task's own
 // orchestration logic is what's under test, not viem's/MetaMask's wire
@@ -38,13 +45,31 @@ vi.mock("../wallet/WalletProvider.js", () => ({
     connect: vi.fn(),
     disconnect: vi.fn(),
     switchNetwork: vi.fn(),
-    identityGeneration: 1,
-    getIdentityGeneration: () => 1,
+    identityGeneration,
+    getIdentityGeneration: () => identityGeneration,
     signMessage: vi.fn(),
     getWalletClient: () => ({ writeContract }),
-    getPublicClient: () => ({ waitForTransactionReceipt }),
+    getPublicClient: () => ({ waitForTransactionReceipt, readContract }),
   }),
 }));
+
+/** Default T-807 balance/allowance fixture used by every test that doesn't
+ * care about the balance/allowance check itself (i.e. every regression test
+ * ported forward from before T-807): balance comfortably covers a 100n
+ * stake, allowance stays 0 so those tests keep exercising the existing
+ * approve→acceptTask two-step flow unchanged. Tests that DO care about the
+ * check override `readContract`'s implementation themselves. */
+function mockSufficientBalanceInsufficientAllowance() {
+  readContract.mockImplementation(async ({ functionName }: { functionName: string }) =>
+    functionName === "balanceOf" ? 1000n : 0n,
+  );
+}
+
+function mockBalanceAllowance(balance: bigint, allowance: bigint) {
+  readContract.mockImplementation(async ({ functionName }: { functionName: string }) =>
+    functionName === "balanceOf" ? balance : allowance,
+  );
+}
 
 const FUTURE_EXPIRY = Math.floor(Date.now() / 1000) + 3600;
 
@@ -116,6 +141,9 @@ function taskNotOpenRevertError(status = 1): BaseError {
 beforeEach(() => {
   writeContract.mockReset();
   waitForTransactionReceipt.mockReset();
+  readContract.mockReset();
+  identityGeneration = 1;
+  mockSufficientBalanceInsufficientAllowance();
 });
 
 afterEach(() => {
@@ -123,29 +151,29 @@ afterEach(() => {
 });
 
 async function reachReadyState(permit = permitFixture()) {
-  vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(permit);
-  render(<AcceptConfirmContent taskId="task-1" stake={100n} />);
+  vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
+  render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
   await screen.findByRole("button", { name: "开始质押接单" });
 }
 
 describe("AcceptConfirmContent", () => {
   it("shows an unavailable message and no confirm control when no permit is found (404)", async () => {
-    vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockRejectedValue(
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockRejectedValue(
       new ApiError(404, "未找到可用的接单授权。"),
     );
 
-    render(<AcceptConfirmContent taskId="task-1" stake={100n} />);
+    render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
 
     expect((await screen.findByRole("alert")).textContent).toContain("过期或不可用");
     expect(screen.queryByRole("button", { name: "开始质押接单" })).toBeNull();
   });
 
   it("shows an unavailable message when the fetched permit's expiry has already lapsed (AC-804)", async () => {
-    vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(
       permitFixture({ expiry: Math.floor(Date.now() / 1000) - 10 }),
     );
 
-    render(<AcceptConfirmContent taskId="task-1" stake={100n} />);
+    render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
 
     expect((await screen.findByRole("alert")).textContent).toContain("过期或不可用");
     expect(screen.queryByRole("button", { name: "开始质押接单" })).toBeNull();
@@ -170,7 +198,7 @@ describe("AcceptConfirmContent", () => {
   // `canStart` requires approve to be `idle`).
   it("continues on to acceptTask after a successful 重试授权 (approve retry)", async () => {
     const permit = permitFixture();
-    vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(permit);
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
     writeContract
       .mockRejectedValueOnce(new Error("user rejected the request")) // first approve attempt fails
       .mockResolvedValueOnce(`0x${"1".repeat(64)}`) // retried approve succeeds
@@ -181,7 +209,14 @@ describe("AcceptConfirmContent", () => {
       confirmations: 1,
     });
     const onAccepted = vi.fn();
-    render(<AcceptConfirmContent taskId="task-1" stake={100n} onAccepted={onAccepted} />);
+    render(
+      <AcceptConfirmContent
+        taskId="task-1"
+        agentId="agent-1"
+        stake={100n}
+        onAccepted={onAccepted}
+      />,
+    );
     await screen.findByRole("button", { name: "开始质押接单" });
 
     fireEvent.click(screen.getByRole("button", { name: "开始质押接单" }));
@@ -202,7 +237,7 @@ describe("AcceptConfirmContent", () => {
   // silently skip it.
   it("calls onAccepted after a successful 重试接单 (acceptTask retry)", async () => {
     const permit = permitFixture();
-    vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(permit);
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
     writeContract
       .mockResolvedValueOnce(`0x${"1".repeat(64)}`) // approve tx hash
       .mockResolvedValueOnce(`0x${"2".repeat(64)}`) // acceptTask, first attempt
@@ -212,7 +247,14 @@ describe("AcceptConfirmContent", () => {
       .mockRejectedValueOnce(new Error("network blip")) // first acceptTask verify: transient
       .mockResolvedValueOnce({ status: "ACCEPTED", confirmations: 1 }); // retried verify succeeds
     const onAccepted = vi.fn();
-    render(<AcceptConfirmContent taskId="task-1" stake={100n} onAccepted={onAccepted} />);
+    render(
+      <AcceptConfirmContent
+        taskId="task-1"
+        agentId="agent-1"
+        stake={100n}
+        onAccepted={onAccepted}
+      />,
+    );
     await screen.findByRole("button", { name: "开始质押接单" });
 
     fireEvent.click(screen.getByRole("button", { name: "开始质押接单" }));
@@ -227,7 +269,7 @@ describe("AcceptConfirmContent", () => {
 
   it("invokes acceptTask only after approve confirms, and reports success", async () => {
     const permit = permitFixture();
-    vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(permit);
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
 
     writeContract
       .mockResolvedValueOnce(`0x${"1".repeat(64)}`) // approve tx hash
@@ -238,7 +280,14 @@ describe("AcceptConfirmContent", () => {
       confirmations: 1,
     });
     const onAccepted = vi.fn();
-    render(<AcceptConfirmContent taskId="task-1" stake={100n} onAccepted={onAccepted} />);
+    render(
+      <AcceptConfirmContent
+        taskId="task-1"
+        agentId="agent-1"
+        stake={100n}
+        onAccepted={onAccepted}
+      />,
+    );
     await screen.findByRole("button", { name: "开始质押接单" });
 
     fireEvent.click(screen.getByRole("button", { name: "开始质押接单" }));
@@ -287,10 +336,10 @@ describe("AcceptConfirmContent", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const soon = Math.floor(Date.now() / 1000) + 5;
-      vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(
+      vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(
         permitFixture({ expiry: soon }),
       );
-      render(<AcceptConfirmContent taskId="task-1" stake={100n} />);
+      render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
       await vi.waitFor(() => screen.getByRole("button", { name: "开始质押接单" }));
 
       // Advance real+fake time past `expiry` without ever re-fetching the
@@ -315,7 +364,7 @@ describe("AcceptConfirmContent", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const soon = Math.floor(Date.now() / 1000) + 5;
-      vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(
+      vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(
         permitFixture({ expiry: soon }),
       );
       writeContract
@@ -323,7 +372,7 @@ describe("AcceptConfirmContent", () => {
         .mockRejectedValueOnce(new Error("network blip")); // first acceptTask attempt fails
       waitForTransactionReceipt.mockResolvedValue({ status: "success" });
 
-      render(<AcceptConfirmContent taskId="task-1" stake={100n} />);
+      render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
       await vi.waitFor(() => screen.getByRole("button", { name: "开始质押接单" }));
 
       fireEvent.click(screen.getByRole("button", { name: "开始质押接单" }));
@@ -465,7 +514,7 @@ describe("AcceptConfirmContent", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const permit = permitFixture();
-      vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(permit);
+      vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
       writeContract
         .mockResolvedValueOnce(`0x${"1".repeat(64)}`)
         .mockResolvedValueOnce(`0x${"2".repeat(64)}`);
@@ -476,7 +525,9 @@ describe("AcceptConfirmContent", () => {
         .spyOn(tasksApi, "getTask")
         .mockResolvedValue(taskRecordFixture({ status: "OPEN" }));
 
-      const { unmount } = render(<AcceptConfirmContent taskId="task-1" stake={100n} />);
+      const { unmount } = render(
+        <AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />,
+      );
       await vi.waitFor(() => screen.getByRole("button", { name: "开始质押接单" }));
 
       fireEvent.click(screen.getByRole("button", { name: "开始质押接单" }));
@@ -509,7 +560,7 @@ describe("AcceptConfirmContent", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const permit = permitFixture();
-      vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockResolvedValue(permit);
+      vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
       writeContract
         .mockResolvedValueOnce(`0x${"1".repeat(64)}`)
         .mockResolvedValueOnce(`0x${"2".repeat(64)}`);
@@ -525,7 +576,7 @@ describe("AcceptConfirmContent", () => {
 
       render(
         <StrictMode>
-          <AcceptConfirmContent taskId="task-1" stake={100n} />
+          <AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />
         </StrictMode>,
       );
       await vi.waitFor(() => screen.getByRole("button", { name: "开始质押接单" }));
@@ -542,4 +593,196 @@ describe("AcceptConfirmContent", () => {
       vi.useRealTimers();
     }
   }, 10_000);
+
+  // T-807 (human N6 BLOCK fix): a real on-chain `balanceOf` read reporting
+  // less than `stake` must block ALL transaction initiation — no clickable
+  // confirm button rendered at all (same "unclickable state, not a button
+  // that then immediately fails" pattern the permit-expiry handling above
+  // already uses), plus a clear message.
+  it("blocks with a clear message and renders no clickable confirm button when the real on-chain balance is below stake", async () => {
+    mockBalanceAllowance(50n, 0n); // balance 50 < stake 100
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permitFixture());
+    render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("YD 余额不足");
+    expect(screen.queryByRole("button", { name: "开始质押接单" })).toBeNull();
+    expect(writeContract).not.toHaveBeenCalled();
+  });
+
+  // T-807: allowance already covering stake must skip `approve` entirely —
+  // clicking confirm goes straight to `acceptTask`, exactly one
+  // `writeContract` call, none of them `approve` (the capsule explicitly
+  // forbids a no-op `approve(spender, 0)` "to keep both steps uniform").
+  it("skips approve and calls acceptTask directly when the real on-chain allowance already covers stake", async () => {
+    mockBalanceAllowance(1000n, 100n); // allowance 100 >= stake 100
+    const permit = permitFixture();
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
+    writeContract.mockResolvedValueOnce(`0x${"2".repeat(64)}`); // acceptTask tx hash
+    waitForTransactionReceipt.mockResolvedValue({ status: "success" });
+    vi.spyOn(acceptanceApi, "submitAcceptanceVerification").mockResolvedValue({
+      status: "ACCEPTED",
+      confirmations: 1,
+    });
+    const onAccepted = vi.fn();
+    render(
+      <AcceptConfirmContent
+        taskId="task-1"
+        agentId="agent-1"
+        stake={100n}
+        onAccepted={onAccepted}
+      />,
+    );
+    await screen.findByRole("button", { name: "开始质押接单" });
+
+    fireEvent.click(screen.getByRole("button", { name: "开始质押接单" }));
+
+    await waitFor(() => expect(onAccepted).toHaveBeenCalledTimes(1));
+    expect(writeContract).toHaveBeenCalledTimes(1);
+    expect(writeContract.mock.calls[0]?.[0]).toMatchObject({ functionName: "acceptTask" });
+  });
+
+  // T-807 round 1, P1 regression (Codex review): a double-click during the
+  // async balance/allowance read window (before either `useTransactionFlow`
+  // leaves `idle`) must not start two concurrent accept sequences — exactly
+  // one `readContract`-driven check should lead to exactly one
+  // `writeContract` broadcast. `readContract` is made to resolve on a
+  // controllable promise so the second click fires WHILE the first click's
+  // balance/allowance read is still in flight, reproducing the exact race
+  // window the finding described.
+  it("ignores a second click fired while the first click's balance/allowance read is still in flight", async () => {
+    // `readBalanceAllowance` calls `readContract` twice per invocation
+    // (`Promise.all([balanceOf, allowance])) — buffer every pending
+    // resolver so both can be settled together, rather than one
+    // `resolveRead` variable being overwritten by the second call and
+    // leaving the first `Promise.all` permanently unresolved.
+    let pendingResolvers: Array<(value: bigint) => void> = [];
+    function queueReads() {
+      readContract.mockImplementation(
+        () =>
+          new Promise<bigint>((resolve) => {
+            pendingResolvers.push(resolve);
+          }),
+      );
+    }
+    function resolvePendingReads(value: bigint) {
+      const resolvers = pendingResolvers;
+      pendingResolvers = [];
+      resolvers.forEach((resolve) => resolve(value));
+    }
+    queueReads();
+    const permit = permitFixture();
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
+    writeContract.mockResolvedValueOnce(`0x${"2".repeat(64)}`); // acceptTask tx hash
+    waitForTransactionReceipt.mockResolvedValue({ status: "success" });
+    vi.spyOn(acceptanceApi, "submitAcceptanceVerification").mockResolvedValue({
+      status: "ACCEPTED",
+      confirmations: 1,
+    });
+    render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
+    // Let the mount-time balance/allowance effect resolve first, with a
+    // sufficient balance/allowance so a confirm button actually renders.
+    await waitFor(() => expect(pendingResolvers).toHaveLength(2));
+    resolvePendingReads(1000n);
+    await screen.findByRole("button", { name: "开始质押接单" });
+
+    // Fresh in-flight reads for the click-time re-read, then click twice
+    // before that re-read settles.
+    queueReads();
+    const button = screen.getByRole("button", { name: "开始质押接单" });
+    fireEvent.click(button);
+    await waitFor(() => expect(pendingResolvers).toHaveLength(2));
+    fireEvent.click(button); // fired while the first click's read is still pending
+    resolvePendingReads(1000n); // settle balanceOf/allowance for the in-flight read(s)
+
+    await waitFor(() => expect(writeContract).toHaveBeenCalledTimes(1));
+    expect(writeContract.mock.calls[0]?.[0]).toMatchObject({ functionName: "acceptTask" });
+    // No second read pair was ever queued by a re-entrant second call.
+    expect(pendingResolvers).toHaveLength(0);
+  });
+
+  // T-807 regression: insufficient allowance must still run the existing
+  // two-step approve→acceptTask flow unchanged.
+  it("still runs the two-step approve→acceptTask flow when the real on-chain allowance is below stake", async () => {
+    mockBalanceAllowance(1000n, 0n); // allowance 0 < stake 100
+    const permit = permitFixture();
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
+    writeContract
+      .mockResolvedValueOnce(`0x${"1".repeat(64)}`) // approve tx hash
+      .mockResolvedValueOnce(`0x${"2".repeat(64)}`); // acceptTask tx hash
+    waitForTransactionReceipt.mockResolvedValue({ status: "success" });
+    vi.spyOn(acceptanceApi, "submitAcceptanceVerification").mockResolvedValue({
+      status: "ACCEPTED",
+      confirmations: 1,
+    });
+    render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
+    await screen.findByRole("button", { name: "开始质押接单" });
+
+    fireEvent.click(screen.getByRole("button", { name: "开始质押接单" }));
+
+    await waitFor(() => expect(writeContract).toHaveBeenCalledTimes(2));
+    expect(writeContract.mock.calls[0]?.[0]).toMatchObject({ functionName: "approve" });
+    expect(writeContract.mock.calls[1]?.[0]).toMatchObject({ functionName: "acceptTask" });
+  });
+
+  // T-807: the read-only balance/allowance call itself failing (RPC error)
+  // must NOT be treated as "check passed" — no clickable confirm button, no
+  // transaction ever initiated.
+  it("keeps the confirm control unavailable when the real balance/allowance read itself fails (RPC error)", async () => {
+    readContract.mockRejectedValue(new Error("RPC unavailable"));
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permitFixture());
+    render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("失败");
+    expect(screen.queryByRole("button", { name: "开始质押接单" })).toBeNull();
+    expect(writeContract).not.toHaveBeenCalled();
+  });
+
+  // T-807: balance/allowance must be re-read at the moment of clicking
+  // confirm, not just trusted from whatever was read at mount — mirrors this
+  // file's existing permit-expiry "re-check at click time" convention. Here,
+  // allowance becomes sufficient between mount and click; the click-time
+  // re-read must pick that up and skip approve, rather than acting on the
+  // stale (insufficient) mounted-time reading.
+  it("re-reads balance/allowance at click time, not just at mount", async () => {
+    mockBalanceAllowance(1000n, 0n); // insufficient allowance at mount
+    const permit = permitFixture();
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
+    render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
+    await screen.findByRole("button", { name: "开始质押接单" });
+
+    // Allowance becomes sufficient before the click — a real scenario e.g.
+    // if the user separately approved the spender in MetaMask directly.
+    mockBalanceAllowance(1000n, 100n);
+    writeContract.mockResolvedValueOnce(`0x${"2".repeat(64)}`); // acceptTask tx hash
+    waitForTransactionReceipt.mockResolvedValue({ status: "success" });
+    vi.spyOn(acceptanceApi, "submitAcceptanceVerification").mockResolvedValue({
+      status: "ACCEPTED",
+      confirmations: 1,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "开始质押接单" }));
+
+    await waitFor(() => expect(writeContract).toHaveBeenCalledTimes(1));
+    expect(writeContract.mock.calls[0]?.[0]).toMatchObject({ functionName: "acceptTask" });
+  });
+
+  // T-807: a wallet switch (`identityGeneration` change, `useWallet()`'s own
+  // exposed counter) must trigger a fresh balance/allowance read — a stale
+  // reading from the PREVIOUS wallet must never gate the CURRENTLY connected
+  // one's transaction.
+  it("re-reads balance/allowance when the wallet's identityGeneration changes (wallet switch)", async () => {
+    mockBalanceAllowance(1000n, 0n);
+    const permit = permitFixture();
+    vi.spyOn(acceptanceApi, "getAcceptancePermitForAgent").mockResolvedValue(permit);
+    const { rerender } = render(
+      <AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />,
+    );
+    await screen.findByRole("button", { name: "开始质押接单" });
+    const callsBeforeSwitch = readContract.mock.calls.length;
+
+    identityGeneration = 2; // simulates the wallet switching account/network
+    rerender(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
+
+    await waitFor(() => expect(readContract.mock.calls.length).toBeGreaterThan(callsBeforeSwitch));
+  });
 });

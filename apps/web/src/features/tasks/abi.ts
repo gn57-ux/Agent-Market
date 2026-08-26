@@ -101,6 +101,39 @@ export const TASK_ESCROW_ACCEPT_TASK_ABI = [
   },
 ] as const;
 
+/** Standard ERC-20 `balanceOf(account) returns (uint256)` — deliberately a
+ * separate, exported fragment from `WalletProvider.tsx`'s own private
+ * `YD_TOKEN_ABI` (which also declares `balanceOf`, for its unrelated wallet
+ * balance display): that ABI is internal to `WalletProvider` and not meant
+ * to be imported by feature code, so Feature 8's own real-balance check
+ * (T-807) gets its own fragment here instead, matching `ERC20_APPROVE_ABI`'s
+ * existing convention of one fragment per call site's needs. */
+export const ERC20_BALANCE_OF_ABI = [
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+/** Standard ERC-20 `allowance(owner, spender) returns (uint256)` — T-807's
+ * real on-chain allowance check (`YDToken.allowance(候选钱包, TaskEscrow 地址)`),
+ * same convention as `ERC20_APPROVE_ABI`/`ERC20_BALANCE_OF_ABI` above. */
+export const ERC20_ALLOWANCE_ABI = [
+  {
+    type: "function",
+    name: "allowance",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
 export const TASK_ESCROW_STAKE_RATE_BPS_ABI = [
   {
     type: "function",

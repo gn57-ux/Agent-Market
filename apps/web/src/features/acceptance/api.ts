@@ -20,15 +20,22 @@ export interface AcceptancePermitRecord {
 }
 
 /**
- * `GET /tasks/:taskId/my-acceptance-permit` (T-803): session-authenticated,
- * any signed-in user may call it for themselves — not requester-only. A 404
- * (no usable permit — expired, consumed, or never issued) surfaces as a
- * thrown `ApiError` via `apiFetch`, same as every other non-2xx response;
- * `AcceptConfirmContent` is what interprets that 404 into AC-804's
- * "已过期或不可用" state.
+ * `GET /tasks/:taskId/agents/:agentId/acceptance-permit` (T-806, replacing
+ * T-803's `GET /tasks/:taskId/my-acceptance-permit`): session-authenticated,
+ * any signed-in user may call it for an `agentId` they in fact own — not
+ * requester-only. `AcceptanceSection` now resolves and remembers WHICH
+ * recommended `agentId` matched the signed-in wallet (T-807), so this call
+ * is indexed by that explicit `agentId` rather than an implicit "my"
+ * permit. A 404 (no usable permit — expired, consumed, or never issued)
+ * surfaces as a thrown `ApiError` via `apiFetch`, same as every other
+ * non-2xx response; `AcceptConfirmContent` is what interprets that 404 into
+ * AC-804's "已过期或不可用" state.
  */
-export function getMyAcceptancePermit(taskId: string): Promise<AcceptancePermitRecord> {
-  return apiFetch<AcceptancePermitRecord>(`/tasks/${taskId}/my-acceptance-permit`);
+export function getAcceptancePermitForAgent(
+  taskId: string,
+  agentId: string,
+): Promise<AcceptancePermitRecord> {
+  return apiFetch<AcceptancePermitRecord>(`/tasks/${taskId}/agents/${agentId}/acceptance-permit`);
 }
 
 /**

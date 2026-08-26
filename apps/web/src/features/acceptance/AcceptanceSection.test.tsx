@@ -183,7 +183,9 @@ describe("AcceptanceSection", () => {
     mockAsCandidate();
     vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture());
     readContract.mockResolvedValue(600n);
-    vi.spyOn(acceptanceApi, "getMyAcceptancePermit").mockReturnValue(new Promise(() => undefined));
+    const permitSpy = vi
+      .spyOn(acceptanceApi, "getAcceptancePermitForAgent")
+      .mockReturnValue(new Promise(() => undefined));
 
     render(<AcceptanceSection taskId="task-1" />);
 
@@ -192,6 +194,104 @@ describe("AcceptanceSection", () => {
     fireEvent.click(button);
 
     expect(await screen.findByText("确认质押接单")).toBeTruthy();
+    // T-807: `AcceptanceSection` must have resolved WHICH `agentId` matched
+    // the signed-in wallet (not just a boolean "is a candidate") and passed
+    // it through as a prop — verified here via the specific `agentId`
+    // `AcceptConfirmContent` actually called the new per-agent permit
+    // endpoint with, matching this file's existing style of asserting
+    // through the real API call rather than mocking the child component.
+    expect(permitSpy).toHaveBeenCalledWith("task-1", "agent-1");
+  });
+
+  // T-807: `resolveCandidateAgentId` (the renamed/reworked `resolveIsCandidate`)
+  // must resolve the SPECIFIC matching `agentId`, not just a boolean — this
+  // is what lets it be threaded through to `AcceptConfirmContent` correctly
+  // when the task has multiple recommended candidates and only one is owned
+  // by the signed-in wallet.
+  it("resolves and passes the specific matching agentId when multiple candidates are recommended", async () => {
+    mockSession = { status: "signed_in", address: SESSION_ADDRESS };
+    vi.spyOn(recommendationsApi, "getRecommendations").mockResolvedValue({
+      recommendations: [
+        { agentId: "agent-other", rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: [] },
+        { agentId: "agent-mine", rank: 2, slotType: "TOP_SCORE", score: 0.8, reasons: [] },
+      ],
+    });
+    vi.spyOn(agentsApi, "getAgent").mockImplementation((agentId: string) =>
+      Promise.resolve(
+        agentFixture({
+          agentId,
+          ownerAddress:
+            agentId === "agent-mine"
+              ? SESSION_ADDRESS
+              : "0x1111111111111111111111111111111111111111",
+        }),
+      ),
+    );
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture());
+    readContract.mockResolvedValue(600n);
+    const permitSpy = vi
+      .spyOn(acceptanceApi, "getAcceptancePermitForAgent")
+      .mockReturnValue(new Promise(() => undefined));
+
+    render(<AcceptanceSection taskId="task-1" />);
+
+    const button = await screen.findByRole("button", { name: "质押接单" });
+    await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(button);
+
+    await screen.findByText("确认质押接单");
+    expect(permitSpy).toHaveBeenCalledWith("task-1", "agent-mine");
+  });
+
+  // T-807 round 2, human N4 BLOCK fix (Codex): the backend explicitly
+  // supports and tests a single wallet owning MULTIPLE Agent records, more
+  // than one of which can be recommended for the same task
+  // (`routes.integration.test.ts`'s "returns each candidate's own
+  // independent permit when the same wallet owns two recommended
+  // candidates"). A prior version of `resolveCandidateAgentId` silently
+  // picked only the first match — this verifies the fix: both owned
+  // candidates are offered, an explicit pick is required before the sheet
+  // can open, and the confirm flow acts as whichever one was actually
+  // selected (not always the first).
+  it("requires an explicit pick and acts as the selected agent when the wallet owns two recommended candidates", async () => {
+    mockSession = { status: "signed_in", address: SESSION_ADDRESS };
+    vi.spyOn(recommendationsApi, "getRecommendations").mockResolvedValue({
+      recommendations: [
+        { agentId: "agent-a", rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: [] },
+        { agentId: "agent-b", rank: 2, slotType: "EXPLORATION", score: 0.5, reasons: [] },
+      ],
+    });
+    vi.spyOn(agentsApi, "getAgent").mockImplementation((agentId: string) =>
+      Promise.resolve(
+        agentFixture({
+          agentId,
+          ownerAddress: SESSION_ADDRESS, // both owned by the same wallet
+          name: agentId === "agent-a" ? "Agent A" : "Agent B",
+        }),
+      ),
+    );
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture());
+    readContract.mockResolvedValue(600n);
+    const permitSpy = vi
+      .spyOn(acceptanceApi, "getAcceptancePermitForAgent")
+      .mockReturnValue(new Promise(() => undefined));
+
+    render(<AcceptanceSection taskId="task-1" />);
+
+    await screen.findByText("Agent A");
+    screen.getByText("Agent B");
+    const button = await screen.findByRole("button", { name: "质押接单" });
+    // No candidate picked yet — the button must stay disabled rather than
+    // defaulting to either agent.
+    expect(button.hasAttribute("disabled")).toBe(true);
+    expect(permitSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Agent B" }));
+    await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(button);
+
+    await screen.findByText("确认质押接单");
+    expect(permitSpy).toHaveBeenCalledWith("task-1", "agent-b");
   });
 
   it("falls back to Feature 7's CandidateSection when the signed-in wallet is not a recommended candidate", async () => {
