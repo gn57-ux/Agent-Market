@@ -6,6 +6,7 @@ import { getPool } from "./db/pool.js";
 import { registerAgentsRoutes } from "./modules/agents/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerSessionMiddleware } from "./modules/auth/session.middleware.js";
+import { registerDeliverablesRoutes } from "./modules/deliverables/routes.js";
 import { registerDispatchRoutes } from "./modules/dispatch/routes.js";
 import { registerTasksRoutes } from "./modules/tasks/routes.js";
 
@@ -71,6 +72,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // uses `app.requireSession` as a preHandler (T-705).
   void app.register(async (instance) => {
     registerDispatchRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: POST /tasks/:taskId/deliverables
+  // uses `app.requireSession` as a preHandler (T-902).
+  void app.register(async (instance) => {
+    registerDeliverablesRoutes(instance, pool);
   });
 
   return app;
