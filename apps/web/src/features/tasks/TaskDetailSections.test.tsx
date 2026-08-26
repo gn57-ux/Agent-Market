@@ -1,5 +1,5 @@
 import type { ChainConfig, TaskStatus } from "@agent-market/domain";
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDetailSections } from "./TaskDetailSections.js";
@@ -8,6 +8,8 @@ import type { TaskRecord } from "./api.js";
 import * as recommendationsApi from "../recommendations/api.js";
 import * as agentsApi from "../agents/api.js";
 import type { Agent } from "../agents/api.js";
+import * as deliverablesApi from "../deliverables/api.js";
+import { ApiError as DeliverablesApiError } from "../deliverables/api.js";
 
 const SESSION_ADDRESS = "0x9999999999999999999999999999999999999999" as const;
 
@@ -105,19 +107,14 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
   };
 }
 
-// Every non-DRAFT/AWAITING_FUNDING/OPEN variant TaskStatus currently has —
+// Every remaining TaskStatus variant this suite doesn't otherwise cover —
 // kept as a literal list (not derived from the union) so this test fails
 // loudly if a status this suite doesn't know about starts rendering
 // something. OPEN has its own dedicated tests below (CandidateSection vs.
-// AcceptanceSection, T-707/T-802).
-const NON_FUNDING_STATUSES: TaskStatus[] = [
-  { kind: "ACCEPTED", agent: `0x${"2".repeat(40)}` },
-  {
-    kind: "SUBMITTED",
-    agent: `0x${"2".repeat(40)}`,
-    submittedAt: "2026-01-01T00:00:00.000Z",
-    reviewDeadline: "2026-01-08T00:00:00.000Z",
-  },
+// AcceptanceSection, T-707/T-802); ACCEPTED/SUBMITTED have their own
+// dedicated SubmissionSection tests below (T-908) — they used to render
+// nothing here, but this Task adds a real section for both.
+const STATUSES_RENDERING_NOTHING: TaskStatus[] = [
   { kind: "DISPUTED", agent: `0x${"2".repeat(40)}` },
   { kind: "RELEASED" },
   { kind: "REFUNDED" },
@@ -214,7 +211,7 @@ describe("TaskDetailSections", () => {
     expect(await findByText("质押接单")).toBeTruthy();
   });
 
-  it.each(NON_FUNDING_STATUSES)(
+  it.each(STATUSES_RENDERING_NOTHING)(
     "renders nothing (no placeholder content) for status $kind",
     (status) => {
       const getTaskSpy = vi.spyOn(tasksApi, "getTask");
@@ -230,10 +227,130 @@ describe("TaskDetailSections", () => {
     },
   );
 
+  // T-908 (AC-907): ACCEPTED/SUBMITTED now render SubmissionSection —
+  // both need `getTask`/`getLatestDeliverable` mocked, matching
+  // SubmissionSection's own "each section fetches its own data" pattern.
+  const ACCEPTED_OR_SUBMITTED_STATUSES: TaskStatus[] = [
+    { kind: "ACCEPTED", agent: `0x${"2".repeat(40)}` },
+    {
+      kind: "SUBMITTED",
+      agent: `0x${"2".repeat(40)}`,
+      submittedAt: "2026-01-01T00:00:00.000Z",
+      reviewDeadline: "2026-01-08T00:00:00.000Z",
+    },
+  ];
+
+  it.each(ACCEPTED_OR_SUBMITTED_STATUSES)(
+    "renders SubmissionSection's read-only view for status $kind when signed out (no accepted-Agent session)",
+    async (status) => {
+      vi.spyOn(tasksApi, "getTask").mockResolvedValue(
+        taskFixture({
+          status: status.kind,
+          acceptedAgentAddress: `0x${"2".repeat(40)}`,
+          acceptedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      vi.spyOn(deliverablesApi, "getLatestDeliverable").mockRejectedValue(
+        new DeliverablesApiError(404, "该任务尚无成果提交记录。"),
+      );
+      const { findByText } = render(
+        <MemoryRouter>
+          <TaskDetailSections status={status} taskId="task-1" />
+        </MemoryRouter>,
+      );
+      // SubmissionSection's own heading — proves the ACCEPTED/SUBMITTED
+      // branch rendered the new section (AC-907), not the old `null`.
+      expect(await findByText("成果提交")).toBeTruthy();
+      expect(await findByText("该任务尚无成果提交记录。")).toBeTruthy();
+    },
+  );
+
+  it("renders SubmissionSection's upload form for status ACCEPTED when signed in as the accepted Agent", async () => {
+    mockSession = { status: "signed_in", address: SESSION_ADDRESS };
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(
+      taskFixture({
+        status: "ACCEPTED",
+        acceptedAgentAddress: SESSION_ADDRESS,
+        acceptedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    vi.spyOn(deliverablesApi, "getLatestDeliverable").mockRejectedValue(
+      new DeliverablesApiError(404, "该任务尚无成果提交记录。"),
+    );
+    const { findByText } = render(
+      <MemoryRouter>
+        <TaskDetailSections status={{ kind: "ACCEPTED", agent: SESSION_ADDRESS }} taskId="task-1" />
+      </MemoryRouter>,
+    );
+    expect(await findByText("成果提交")).toBeTruthy();
+    expect(await findByText("计算成果哈希")).toBeTruthy();
+  });
+
+  // N4 round 1 P1 (Codex): navigating from one task to another while
+  // `SubmissionSection` stays mounted (the same route re-rendering with a
+  // new `taskId`, exactly what `react-router`'s `useParams` does) must not
+  // let a hash already staged for task A leak into task B's `submitResult`
+  // call. `key={taskId}` (TaskDetailSections.tsx) is the fix — this test
+  // proves the OBSERVABLE effect (a fresh, reset section) rather than
+  // asserting on React internals: a hash computed while viewing task-1
+  // must be completely gone once the SAME rendered tree re-renders for
+  // task-2, with the upload step starting over from scratch.
+  it("resets SubmissionSection's local state (no leaked staged hash) when taskId changes while ACCEPTED (N4 round 1 P1 regression)", async () => {
+    mockSession = { status: "signed_in", address: SESSION_ADDRESS };
+    vi.spyOn(tasksApi, "getTask").mockImplementation((taskId: string) =>
+      Promise.resolve(
+        taskFixture({
+          taskId,
+          status: "ACCEPTED",
+          acceptedAgentAddress: SESSION_ADDRESS,
+          acceptedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      ),
+    );
+    vi.spyOn(deliverablesApi, "getLatestDeliverable").mockRejectedValue(
+      new DeliverablesApiError(404, "该任务尚无成果提交记录。"),
+    );
+    const staleHash = `0x${"f".repeat(64)}` as const;
+    vi.spyOn(deliverablesApi, "uploadDeliverableFile").mockResolvedValue({
+      deliverableId: "d-1",
+      resultHash: staleHash,
+      storedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const status = { kind: "ACCEPTED" as const, agent: SESSION_ADDRESS };
+    const { rerender } = render(
+      <MemoryRouter>
+        <TaskDetailSections status={status} taskId="task-1" />
+      </MemoryRouter>,
+    );
+
+    const file = new File(["hello"], "result.txt", { type: "text/plain" });
+    const input = await screen.findByLabelText("上传成果文件");
+    fireEvent.change(input, { target: { files: [file] } });
+    fireEvent.click(await screen.findByRole("button", { name: "计算成果哈希" }));
+    expect(await screen.findByText(staleHash)).toBeTruthy();
+
+    // Same route, same rendered tree, only `taskId` changes — exactly the
+    // `useParams` scenario `TaskDetailPage` produces when navigating
+    // between two tasks without a full page reload.
+    rerender(
+      <MemoryRouter>
+        <TaskDetailSections status={status} taskId="task-2" />
+      </MemoryRouter>,
+    );
+
+    // The old task's staged hash must be gone, and the upload step must
+    // start fresh — never resurrected for task-2's own submission.
+    expect(screen.queryByText(staleHash)).toBeNull();
+    expect(await screen.findByRole("button", { name: "计算成果哈希" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "提交成果" })).toBeNull();
+  });
+
   // Exhaustiveness itself (a missing case failing to compile) is a
   // TypeScript-level guarantee enforced by `assertExhaustive` in the
   // component's `default` branch — not something expressible as a runtime
-  // assertion here. The two `it.each` blocks above already cover every
-  // variant `TaskStatus` currently has (DRAFT/AWAITING_FUNDING render
-  // FundingSection; the rest render null).
+  // assertion here. The `it.each` blocks above already cover every variant
+  // `TaskStatus` currently has (DRAFT/AWAITING_FUNDING render
+  // FundingSection; ACCEPTED/SUBMITTED render SubmissionSection; the rest
+  // render null).
 });

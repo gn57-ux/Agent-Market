@@ -1,5 +1,6 @@
 import { assertExhaustive, type TaskStatus } from "@agent-market/domain";
 import { AcceptanceSection } from "../acceptance/AcceptanceSection.js";
+import { SubmissionSection } from "../deliverables/SubmissionSection.js";
 import { FundingSection } from "./task-detail-sections/FundingSection.js";
 
 export interface TaskDetailSectionsProps {
@@ -33,6 +34,26 @@ export function TaskDetailSections({ status, taskId }: TaskDetailSectionsProps) 
       return <AcceptanceSection taskId={taskId} />;
     case "ACCEPTED":
     case "SUBMITTED":
+      // Feature 9's SubmissionSection decides for itself (session address
+      // vs. `task.acceptedAgentAddress`, task status) whether to render
+      // the upload/submit form or a read-only view — this stays the one
+      // import + one case AC-907 requires.
+      //
+      // `key={taskId}` (N4 round 1 P1, Codex): this route (`/tasks/:taskId`)
+      // can navigate from one task to another WITHOUT unmounting
+      // `TaskDetailPage`'s component tree — `react-router`'s `useParams`
+      // just returns a new value, the same `SubmissionSection` instance
+      // stays mounted. Without a key, a hash already computed (and staged
+      // for signing) for task A would still be sitting in that instance's
+      // local state after navigating to task B, and could be submitted
+      // against B's `submitResult` call instead — the exact bug this
+      // finding identified. Keying on `taskId` forces React to fully
+      // unmount/remount the section (discarding ALL of its local state,
+      // including `useTransactionFlow`'s own internal status, which this
+      // component has no other way to reset) whenever the task identity
+      // changes, rather than SubmissionSection trying to enumerate and
+      // manually clear every piece of state that could go stale.
+      return <SubmissionSection key={taskId} taskId={taskId} />;
     case "DISPUTED":
     case "RELEASED":
     case "REFUNDED":

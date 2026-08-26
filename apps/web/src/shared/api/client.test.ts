@@ -79,6 +79,20 @@ describe("apiFetch — Content-Type header", () => {
     expect(result).toEqual({ ok: true });
   });
 
+  // T-908 (Feature 9's multipart deliverable upload): a `FormData` body
+  // must never get the JSON default — the browser needs to set its own
+  // `multipart/form-data; boundary=...` Content-Type itself, which a
+  // conflicting explicit header would break.
+  it("does not set Content-Type on a request whose body is FormData (T-908)", async () => {
+    const fetchMock = stubFetchOk();
+    const formData = new FormData();
+    formData.append("file", new Blob(["x"]), "x.txt");
+    await apiFetch("/tasks/some-id/deliverables", { method: "POST", body: formData });
+
+    const headers = new Headers(lastCallInit(fetchMock).headers);
+    expect(headers.has("Content-Type")).toBe(false);
+  });
+
   it("throws ApiError with the server's message on a non-ok response", async () => {
     vi.stubGlobal(
       "fetch",
