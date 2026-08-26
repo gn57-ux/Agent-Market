@@ -12,6 +12,7 @@ import { canonicalJsonSha256 } from "./input-digest.js";
 import { issueAcceptancePermit } from "./permit.service.js";
 import {
   assembleCandidateSnapshots,
+  getCandidateInvitationsForSession,
   getLatestRecommendationCandidates,
   getLatestRecommendationRunId,
   getOutstandingPermitsForRun,
@@ -26,7 +27,11 @@ import {
   TaskNotOpenForPermitsError,
   type SignedAcceptancePermit,
 } from "./repository.js";
-import { taskAgentIdParamSchema, taskIdParamSchema } from "./schema.js";
+import {
+  candidateInvitationsQuerySchema,
+  taskAgentIdParamSchema,
+  taskIdParamSchema,
+} from "./schema.js";
 
 /**
  * T-705's single implemented algorithm version — deliberately not
@@ -640,6 +645,51 @@ export function registerDispatchRoutes(app: FastifyInstance, pool: Pool): void {
         chainId: permit.chainId,
         verifyingContract: permit.verifyingContract,
         signature: permit.signature,
+      });
+    },
+  );
+
+  // T-808 (human N6 BLOCK fix, item #4): F-806/AC-805's "候选邀请" state for
+  // "我的接单" (`MyAcceptedTasksPage.tsx`). Session-scoped, NOT `:agentId`-
+  // scoped — see `getCandidateInvitationsForSession`'s (repository.ts) own
+  // header comment for the full reasoning on why this deviates from
+  // design.md's draft path shape (pre-authorized by the T-808 capsule).
+  // `session.address` is the ONLY permission input; no client-supplied
+  // address or agentId is ever read for authorization.
+  app.get(
+    "/tasks/agents/candidate-invitations",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const queryParsed = candidateInvitationsQuerySchema.safeParse(request.query);
+      if (!queryParsed.success) {
+        return reply.status(400).send({ error: { message: queryParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const { page, pageSize } = queryParsed.data;
+      const { items, total } = await getCandidateInvitationsForSession(
+        pool,
+        normalizeAddress(sessionAddress),
+        { page, pageSize },
+      );
+
+      return reply.send({
+        items: items.map((item) => ({
+          taskId: item.taskId,
+          category: item.category,
+          title: item.title,
+          budget: item.budget,
+          deliveryDeadline: item.deliveryDeadline.toISOString(),
+          rank: item.rank,
+          slotType: item.slotType,
+          agentId: item.agentId,
+        })),
+        total,
+        page,
+        pageSize,
       });
     },
   );

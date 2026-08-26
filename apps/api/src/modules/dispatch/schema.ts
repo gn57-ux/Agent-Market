@@ -24,3 +24,23 @@ export const taskAgentIdParamSchema = z.object({
   taskId: taskIdParamSchema.shape.taskId,
   agentId: agentIdParamSchema.shape.agentId,
 });
+
+/**
+ * `GET /tasks/agents/candidate-invitations`'s (T-808) query params —
+ * pagination only, no filter params, since the ONLY scoping input this
+ * endpoint accepts is the caller's own session address (never a
+ * client-supplied address/agentId). Same coercion/bounds as
+ * `tasks/schema.ts`'s `listTasksQuerySchema` (`page`/`pageSize`): bounded
+ * `page` so `(page - 1) * pageSize` can never approach PostgreSQL's int4
+ * range, `pageSize` capped at 20 (F-608's "分页默认每页不超过 20 条" convention),
+ * both re-derived here rather than imported — this module already
+ * re-exports `taskIdParamSchema` from `tasks/schema.ts` for an identical
+ * shared-shape reason, but a pagination schema is generic enough (no
+ * task-specific validation) that duplicating the two bounded-number
+ * fields costs less than an import coupling this module to
+ * `tasks/schema.ts`'s pagination internals.
+ */
+export const candidateInvitationsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(20).default(20),
+});

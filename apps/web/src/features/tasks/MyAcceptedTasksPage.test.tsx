@@ -1,10 +1,10 @@
 import type { ChainConfig } from "@agent-market/domain";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MyAcceptedTasksPage } from "./MyAcceptedTasksPage.js";
 import * as tasksApi from "./api.js";
-import type { TaskRecord } from "./api.js";
+import type { CandidateInvitation, TaskRecord } from "./api.js";
 
 const ADDRESS = "0x1234567890123456789012345678901234567890" as const;
 const OTHER_ADDRESS = "0x9876543210987654321098765432109876543210" as const;
@@ -84,6 +84,20 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
   };
 }
 
+function invitationFixture(overrides: Partial<CandidateInvitation> = {}): CandidateInvitation {
+  return {
+    taskId: "task-invited-1",
+    category: "writing",
+    title: "A task recommending me",
+    budget: "2000000000000000000",
+    deliveryDeadline: "2033-02-01T00:00:00.000Z",
+    rank: 1,
+    slotType: "TOP_SCORE",
+    agentId: "agent-1",
+    ...overrides,
+  };
+}
+
 function renderPage() {
   return render(
     <MemoryRouter>
@@ -91,6 +105,19 @@ function renderPage() {
     </MemoryRouter>,
   );
 }
+
+beforeEach(() => {
+  // Default: no candidate invitations, so every existing "已接单"-focused
+  // test below is unaffected by this page now also issuing a second fetch.
+  // Individual tests override this via a fresh `vi.spyOn` call where the
+  // INVITED state matters.
+  vi.spyOn(tasksApi, "listCandidateInvitations").mockResolvedValue({
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: 20,
+  });
+});
 
 afterEach(() => {
   mockAddress = ADDRESS;
@@ -106,14 +133,16 @@ describe("MyAcceptedTasksPage", () => {
     expect(screen.getByText("请先连接 MetaMask 钱包，才能查看你的接单记录。")).toBeTruthy();
   });
 
-  it("does not fetch the list, and prompts to sign in, when wallet is connected but the session is not signed in", async () => {
+  it("does not fetch either list, and prompts to sign in, when wallet is connected but the session is not signed in", async () => {
     mockSessionStatus = "signed_out";
     const listTasksSpy = vi.spyOn(tasksApi, "listTasks");
+    const listInvitationsSpy = vi.spyOn(tasksApi, "listCandidateInvitations");
 
     renderPage();
 
     expect(await screen.findByText("请先登录以查看你的接单记录。")).toBeTruthy();
     expect(listTasksSpy).not.toHaveBeenCalled();
+    expect(listInvitationsSpy).not.toHaveBeenCalled();
   });
 
   it("fetches the AUTHENTICATED session address's accepted tasks via acceptedBy and renders them", async () => {
@@ -287,5 +316,222 @@ describe("MyAcceptedTasksPage", () => {
     expect(listTasksSpy).toHaveBeenCalledTimes(2);
     expect(listTasksSpy).toHaveBeenNthCalledWith(1, { acceptedBy: ADDRESS, page: 1 });
     expect(listTasksSpy).toHaveBeenNthCalledWith(2, { acceptedBy: ADDRESS, page: 1 });
+  });
+
+  // --- F-806/AC-805: candidate-invitation state (T-808 fix) ---
+
+  describe("candidate invitations (F-806/AC-805)", () => {
+    it("does not fetch listTasks's acceptedBy filter to discover invitations — uses the dedicated session-scoped endpoint", async () => {
+      vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 20,
+      });
+      const listInvitationsSpy = vi
+        .spyOn(tasksApi, "listCandidateInvitations")
+        .mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20 });
+
+      renderPage();
+
+      await waitFor(() =>
+        expect(listInvitationsSpy).toHaveBeenCalledWith({ page: 1, pageSize: 20 }),
+      );
+    });
+
+    it("renders a candidate invitation the caller has received, with its title/budget/rank", async () => {
+      vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 20,
+      });
+      vi.spyOn(tasksApi, "listCandidateInvitations").mockResolvedValue({
+        items: [invitationFixture({ taskId: "task-invited-1", title: "A task recommending me" })],
+        total: 1,
+        page: 1,
+        pageSize: 20,
+      });
+
+      renderPage();
+
+      expect(await screen.findByText("A task recommending me")).toBeTruthy();
+      expect(document.querySelector('[data-task-id="task-invited-1"]')).toBeTruthy();
+      expect(document.querySelector('[data-invitation-kind="INVITED"]')).toBeTruthy();
+    });
+
+    it("shows an empty-state message for the invitations section when there are none", async () => {
+      vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 20,
+      });
+      vi.spyOn(tasksApi, "listCandidateInvitations").mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 20,
+      });
+
+      renderPage();
+      expect(await screen.findByText("你还没有收到候选邀请。")).toBeTruthy();
+    });
+
+    it("renders both the INVITED and ACCEPTED states together, as genuinely distinct sections, when both exist", async () => {
+      vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+        items: [
+          taskFixture({ taskId: "task-accepted-1", title: "Accepted task", status: "ACCEPTED" }),
+        ],
+        total: 1,
+        page: 1,
+        pageSize: 20,
+      });
+      vi.spyOn(tasksApi, "listCandidateInvitations").mockResolvedValue({
+        items: [invitationFixture({ taskId: "task-invited-1", title: "Invited task" })],
+        total: 1,
+        page: 1,
+        pageSize: 20,
+      });
+
+      renderPage();
+
+      expect(await screen.findByText("Invited task")).toBeTruthy();
+      expect(await screen.findByText("Accepted task")).toBeTruthy();
+      expect(document.querySelector('[data-invitation-kind="INVITED"]')).toBeTruthy();
+      expect(document.querySelector('[data-task-id="task-accepted-1"]')).toBeTruthy();
+    });
+
+    it("links an invited task card to its detail route", async () => {
+      vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 20,
+      });
+      vi.spyOn(tasksApi, "listCandidateInvitations").mockResolvedValue({
+        items: [invitationFixture({ taskId: "task-invited-1" })],
+        total: 1,
+        page: 1,
+        pageSize: 20,
+      });
+
+      renderPage();
+      await screen.findByText("A task recommending me");
+
+      const card = document.querySelector('[data-task-id="task-invited-1"]');
+      const link = card?.closest("a");
+      expect(link?.getAttribute("href")).toBe("/tasks/task-invited-1");
+    });
+
+    // T-808 round 1, P2 (Codex): "at most 3 candidates per task" doesn't
+    // bound invitations across DIFFERENT tasks — a wallet recommended on
+    // more than 20 tasks would silently lose everything past page 1
+    // without the invited section's own, independent pagination.
+    it("paginates the candidate-invitations section independently of the accepted-tasks section", async () => {
+      vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 20,
+      });
+      const listInvitationsSpy = vi.spyOn(tasksApi, "listCandidateInvitations").mockResolvedValue({
+        items: [invitationFixture({ taskId: "task-invited-1", title: "Invited 1" })],
+        total: 25,
+        page: 1,
+        pageSize: 20,
+      });
+
+      renderPage();
+
+      await screen.findByText("第 1 页 / 共 25 条");
+      const nextButton = screen.getByRole("button", { name: "下一页" }) as HTMLButtonElement;
+      expect(nextButton.disabled).toBe(false);
+
+      listInvitationsSpy.mockResolvedValue({
+        items: [invitationFixture({ taskId: "task-invited-21", title: "Invited 21" })],
+        total: 25,
+        page: 2,
+        pageSize: 20,
+      });
+      nextButton.click();
+
+      await waitFor(() =>
+        expect(listInvitationsSpy).toHaveBeenLastCalledWith({ page: 2, pageSize: 20 }),
+      );
+      expect(await screen.findByText("Invited 21")).toBeTruthy();
+      // The accepted-tasks section's own `listTasks` call must be
+      // unaffected by paging the (independent) invited section.
+      expect(tasksApi.listTasks).toHaveBeenCalledWith({ acceptedBy: ADDRESS, page: 1 });
+    });
+
+    // T-808 round 1, P2 (Codex): the backend's `getCandidateInvitationsForSession`
+    // returns one row per (taskId, agentId) pair — the same wallet can own
+    // two different recommended Agents on the SAME task. A prior version
+    // dropped `agentId` from the rendered item and keyed solely on `taskId`,
+    // silently collapsing two real, independent invitations into one and
+    // producing a duplicate React key.
+    it("renders two distinct invitations for the same task when the wallet owns two recommended Agents on it", async () => {
+      vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 20,
+      });
+      vi.spyOn(tasksApi, "listCandidateInvitations").mockResolvedValue({
+        items: [
+          invitationFixture({ taskId: "task-shared", agentId: "agent-a", rank: 1 }),
+          invitationFixture({ taskId: "task-shared", agentId: "agent-b", rank: 2 }),
+        ],
+        total: 2,
+        page: 1,
+        pageSize: 20,
+      });
+
+      renderPage();
+      await screen.findAllByText("A task recommending me");
+
+      const cards = document.querySelectorAll('[data-task-id="task-shared"]');
+      expect(cards).toHaveLength(2);
+      const agentIds = Array.from(cards).map((card) => card.getAttribute("data-agent-id"));
+      expect(agentIds.sort()).toEqual(["agent-a", "agent-b"]);
+    });
+
+    it("re-fetches candidate invitations from the server on remount — no reliance on stale local state (AC-805)", async () => {
+      vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 20,
+      });
+      const listInvitationsSpy = vi
+        .spyOn(tasksApi, "listCandidateInvitations")
+        .mockResolvedValueOnce({
+          items: [invitationFixture({ taskId: "task-invited-1", title: "First invitation" })],
+          total: 1,
+          page: 1,
+          pageSize: 20,
+        })
+        .mockResolvedValueOnce({
+          items: [],
+          total: 0,
+          page: 1,
+          pageSize: 20,
+        });
+
+      const { unmount } = renderPage();
+      expect(await screen.findByText("First invitation")).toBeTruthy();
+      unmount();
+
+      // Simulates the invitation having been consumed/expired server-side
+      // between the two mounts (e.g. someone else accepted the task) — the
+      // remounted page must reflect the NEW server truth, not the stale
+      // "First invitation" it rendered before.
+      renderPage();
+      expect(await screen.findByText("你还没有收到候选邀请。")).toBeTruthy();
+      expect(screen.queryByText("First invitation")).toBeNull();
+
+      expect(listInvitationsSpy).toHaveBeenCalledTimes(2);
+    });
   });
 });

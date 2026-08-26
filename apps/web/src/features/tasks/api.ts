@@ -186,4 +186,63 @@ export function submitFundingVerification(
   });
 }
 
+/**
+ * One entry in `GET /tasks/agents/candidate-invitations`'s response
+ * (T-808, F-806/AC-805) — a task where the caller's session owns an Agent
+ * that is currently a live (task still OPEN, permit still OUTSTANDING and
+ * unexpired, latest recommendation round) recommended candidate. Mirrors
+ * `dispatch/repository.ts`'s `CandidateInvitation` (apps/api), minus the
+ * `agentWalletAddress` field that response shape has no reason to expose
+ * to the frontend (the session already knows its own address).
+ */
+export interface CandidateInvitation {
+  taskId: string;
+  category: string;
+  title: string;
+  /** Minimal-unit unsigned integer string — same convention as
+   * `TaskRecord.budget`, never `Number()`-coerced here. */
+  budget: string;
+  deliveryDeadline: string;
+  rank: number;
+  slotType: string;
+  /** Which of the caller's own Agents this invitation belongs to — a
+   * single session can own more than one candidate Agent on the same or
+   * different tasks (T-808 capsule: "同一钱包名下多个 Agent 各自独立评估，不
+   * conflate"). */
+  agentId: string;
+}
+
+export interface ListCandidateInvitationsParams {
+  page?: number;
+  pageSize?: number;
+}
+
+export interface ListCandidateInvitationsResult {
+  items: CandidateInvitation[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+/**
+ * `GET /tasks/agents/candidate-invitations` (T-808) — session-scoped, no
+ * `agentId`/address parameter accepted by this call or the endpoint: the
+ * server derives "which invitations belong to me" entirely from the
+ * authenticated session cookie `apiFetch` already sends. This is the
+ * deliberate deviation from design.md's draft `:agentId`-scoped path —
+ * see `dispatch/repository.ts`'s `getCandidateInvitationsForSession` doc
+ * comment (apps/api) for the full reasoning.
+ */
+export function listCandidateInvitations(
+  params: ListCandidateInvitationsParams = {},
+): Promise<ListCandidateInvitationsResult> {
+  const search = new URLSearchParams();
+  if (params.page) search.set("page", String(params.page));
+  if (params.pageSize) search.set("pageSize", String(params.pageSize));
+  const query = search.toString();
+  return apiFetch<ListCandidateInvitationsResult>(
+    `/tasks/agents/candidate-invitations${query ? `?${query}` : ""}`,
+  );
+}
+
 export { ApiError };

@@ -981,3 +981,168 @@ export async function invalidateOtherOutstandingPermits(
     [taskId, excludeAgentId, excludeNonce],
   );
 }
+
+// ---------------------------------------------------------------------
+// T-808 (human N6 BLOCK fix, item #4): "我的接单" (`MyAcceptedTasksPage.tsx`)
+// must show BOTH the already-accepted state (T-805's `GET
+// /tasks?acceptedBy=`) AND the candidate-invitation state (F-806/AC-805) —
+// an earlier implementation attempt (T-805) simplified this away on the
+// grounds that no "which Agents does this wallet own" query existed yet;
+// the human reviewer rejected that simplification as invalid.
+//
+// Endpoint shape deviation from design.md's draft (pre-authorized by the
+// T-808 capsule, not a new business rule): design.md's interface-contract
+// section sketches `GET /tasks/agents/:agentId/candidate-invitations`
+// (`:agentId`-scoped). This function instead backs a SESSION-scoped
+// endpoint, `GET /tasks/agents/candidate-invitations` (no `:agentId`) —
+// resolving "every Agent this session owns, and each one's candidacy"
+// entirely inside the one query below, in the same module that already
+// owns the `recommendation_candidates`/`acceptance_permits` join
+// (`getLatestRecommendationCandidates`, `getPermitForAgent`, above). The
+// `:agentId`-scoped variant would additionally require a brand-new "list
+// my Agents" endpoint plus client-side fan-out across N calls (one per
+// owned Agent) — splitting "which Agents do I own" and "which of my
+// Agents holds a live invitation" knowledge across two places instead of
+// one. Ownership (`agents.owner_address = session.address`) is therefore
+// the ONLY permission input this query accepts — never a client-supplied
+// address or agentId.
+// ---------------------------------------------------------------------
+
+/** One row of `GET /tasks/agents/candidate-invitations` — a task where the
+ * caller's session owns an Agent that is currently a live (still-OPEN
+ * task, still-OUTSTANDING-and-unexpired permit, latest recommendation
+ * round) candidate. Field list matches design.md's interface-contract
+ * response shape verbatim, minus the wrapping `{items, total, page,
+ * pageSize}` envelope routes.ts adds. */
+export interface CandidateInvitation {
+  taskId: string;
+  category: string;
+  title: string;
+  /** Decimal text — see `TaskRow.budget`'s (tasks/repository.ts) identical
+   * "NUMERIC comes back from pg as a string, never `Number()`-coerced"
+   * convention. */
+  budget: string;
+  deliveryDeadline: Date;
+  rank: number;
+  slotType: string;
+  /** Which of the caller's own Agents holds this invitation — needed
+   * because a single session can own more than one candidate Agent, and
+   * `MyAcceptedTasksPage.tsx`'s discriminated-union item shape (T-808
+   * capsule) surfaces it per invitation, same reasoning as
+   * `resolveAcceptingAgentId`'s "never conflate two Agents behind one
+   * wallet" precedent above. */
+  agentId: string;
+}
+
+export interface CandidateInvitationsPage {
+  items: CandidateInvitation[];
+  total: number;
+}
+
+/**
+ * `GET /tasks/agents/candidate-invitations`'s (T-808) sole query: every
+ * task where a task still `OPEN`, still-`OUTSTANDING`-and-unexpired permit
+ * naming one of the CALLER's OWN Agents (via `agents.owner_address =
+ * $1`, normalized-lowercase `sessionAddress` — never a client-supplied
+ * address or agentId, T-808 capsule's explicit constraint) exists, scoped
+ * to that task's LATEST recommendation round only.
+ *
+ * Each of the four AND-ed conditions below corresponds to one part of
+ * "still a live invitation":
+ *   - `a.owner_address = $1`: ownership — the only permission input.
+ *     Same-wallet-multiple-Agents is never conflated: this join keys off
+ *     `rc.agent_id`/`ap.agent_id`/`a.id` throughout, so each Agent's own
+ *     candidacy is evaluated independently, exactly like
+ *     `resolveAcceptingAgentId`'s "never guess across Agents sharing a
+ *     wallet" design (above) — a caller who owns two candidate Agents on
+ *     the same task gets two independent rows, one per `agentId`.
+ *   - `t.status = 'OPEN'`: a task that has already left OPEN (accepted by
+ *     someone else, cancelled, etc.) can no longer be validly invited
+ *     into, regardless of what `acceptance_permits.status` says.
+ *   - `ap.status = 'OUTSTANDING' AND ap.expiry > extract(epoch from
+ *     now())`: the permit itself must still be usable — mirrors
+ *     `getPermitForAgent`'s identical "usable" judgment above (this
+ *     function is that same query's session-scoped, multi-task,
+ *     multi-Agent sibling rather than a re-derivation of the rule).
+ *   - the `rr.id = (SELECT ... ORDER BY requested_at DESC, sequence_no
+ *     DESC LIMIT 1)` subquery: scopes to the task's LATEST recommendation
+ *     round only, same "requested_at DESC, sequence_no DESC" deterministic
+ *     tiebreak `getLatestRecommendationCandidates` already established —
+ *     a candidate from a SUPERSEDED round must not appear as "still
+ *     invited." In practice T-709's round-gating (`hasUnexpiredOutstandingPermits`)
+ *     already guarantees at most one round ever has unexpired OUTSTANDING
+ *     permits for a given task at a time, so this subquery is redundant
+ *     with the `ap.status`/`ap.expiry` filters above for any row that
+ *     could otherwise pass them — it is kept anyway as an explicit,
+ *     self-contained correctness condition rather than relying on that
+ *     invariant holding forever elsewhere in the codebase (defense in
+ *     depth, not a second competing rule).
+ *
+ * `total` comes from an independent `count(*)` query over the same WHERE
+ * clause (not a window function) — same reasoning as `listTasks`
+ * (tasks/repository.ts): a page beyond the last populated one must not
+ * misreport `total` as 0.
+ */
+export async function getCandidateInvitationsForSession(
+  client: Queryable,
+  sessionAddress: string,
+  pagination: { page: number; pageSize: number },
+): Promise<CandidateInvitationsPage> {
+  const normalizedAddress = sessionAddress.toLowerCase();
+  const offset = (pagination.page - 1) * pagination.pageSize;
+
+  const whereClause = `
+    FROM recommendation_candidates rc
+    JOIN recommendation_runs rr ON rr.id = rc.run_id
+    JOIN tasks t ON t.id = rr.task_id
+    JOIN agents a ON a.id = rc.agent_id
+    JOIN acceptance_permits ap ON ap.task_id = t.id AND ap.agent_id = rc.agent_id
+    WHERE a.owner_address = $1
+      AND t.status = 'OPEN'
+      AND ap.status = 'OUTSTANDING'
+      AND ap.expiry > extract(epoch from now())
+      AND rr.id = (
+        SELECT id FROM recommendation_runs
+        WHERE task_id = t.id
+        ORDER BY requested_at DESC, sequence_no DESC
+        LIMIT 1
+      )
+  `;
+
+  const [itemsResult, countResult] = await Promise.all([
+    client.query<{
+      task_id: string;
+      category: string;
+      title: string;
+      budget: string;
+      delivery_deadline: Date;
+      rank: number;
+      slot_type: string;
+      agent_id: string;
+    }>(
+      `SELECT t.id AS task_id, t.category, t.title, t.budget, t.delivery_deadline,
+              rc.rank, rc.slot_type, rc.agent_id
+       ${whereClause}
+       ORDER BY t.created_at DESC, t.id DESC
+       LIMIT $2 OFFSET $3`,
+      [normalizedAddress, pagination.pageSize, offset],
+    ),
+    client.query<{ total: string }>(`SELECT count(*)::text AS total ${whereClause}`, [
+      normalizedAddress,
+    ]),
+  ]);
+
+  return {
+    items: itemsResult.rows.map((row) => ({
+      taskId: row.task_id,
+      category: row.category,
+      title: row.title,
+      budget: row.budget,
+      deliveryDeadline: row.delivery_deadline,
+      rank: row.rank,
+      slotType: row.slot_type,
+      agentId: row.agent_id,
+    })),
+    total: Number(countResult.rows[0]?.total ?? "0"),
+  };
+}
