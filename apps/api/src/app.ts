@@ -6,6 +6,10 @@ import { getPool } from "./db/pool.js";
 import { registerAgentsRoutes } from "./modules/agents/routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerSessionMiddleware } from "./modules/auth/session.middleware.js";
+import { registerDeliverablesRoutes } from "./modules/deliverables/routes.js";
+import { registerDisputesRoutes } from "./modules/disputes/routes.js";
+import { registerDispatchRoutes } from "./modules/dispatch/routes.js";
+import { registerRatingsRoutes } from "./modules/ratings/routes.js";
 import { registerTasksRoutes } from "./modules/tasks/routes.js";
 
 export interface BuildAppOptions {
@@ -64,6 +68,30 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // registerSessionMiddleware has finished.
   void app.register(async (instance) => {
     registerTasksRoutes(instance, pool);
+  });
+
+  // Same reasoning as the two registrations above: POST /tasks/:taskId/match
+  // uses `app.requireSession` as a preHandler (T-705).
+  void app.register(async (instance) => {
+    registerDispatchRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: POST /tasks/:taskId/deliverables
+  // uses `app.requireSession` as a preHandler (T-902).
+  void app.register(async (instance) => {
+    registerDeliverablesRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: POST /tasks/:taskId/disputes
+  // uses `app.requireSession` as a preHandler (T-1002).
+  void app.register(async (instance) => {
+    registerDisputesRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: POST /tasks/:taskId/ratings
+  // uses `app.requireSession` as a preHandler (T-1003).
+  void app.register(async (instance) => {
+    registerRatingsRoutes(instance, pool);
   });
 
   return app;

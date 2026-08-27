@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
+import type { HexAddress } from "@agent-market/domain";
 import { formatAmount } from "@agent-market/domain";
 import { StatusBadge } from "../../shared/components/StatusBadge.js";
 import { ApiError, getTask, type TaskRecord } from "./api.js";
@@ -74,7 +75,10 @@ export function TaskDetailPage() {
   }
 
   const { task } = state;
-  const status = toTaskStatus(task);
+  // `GET /tasks/:taskId` now serializes `acceptedAgentAddress` (T-805) —
+  // see MyPublishedTasksPage.tsx's `toTaskStatus` doc comment for the
+  // CHECK-constraint-backed cast reasoning.
+  const status = toTaskStatus(task, task.acceptedAgentAddress as HexAddress | null);
 
   return (
     <section className={PAGE_WRAP_CLASSES}>

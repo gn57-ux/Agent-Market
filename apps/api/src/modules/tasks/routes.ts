@@ -6,7 +6,12 @@ import { createChainRpcClient } from "../chain/rpc.client.js";
 import type {
   FundingIntentResult,
   FundingVerificationServiceResult,
+  TaskAcceptanceVerificationServiceResult,
+  TaskDisputeOpenVerificationServiceResult,
+  TaskDisputeResolveVerificationServiceResult,
   TaskDraftMutationResult,
+  TaskResultSubmissionVerificationServiceResult,
+  TaskSettlementVerificationServiceResult,
 } from "./service.js";
 import type { TaskRow } from "./repository.js";
 import {
@@ -16,7 +21,12 @@ import {
   getTaskStateHistory,
   listTasksForMarket,
   updateDraft,
+  verifyAcceptance,
+  verifyDisputeOpen,
+  verifyDisputeResolution,
   verifyFunding,
+  verifyResultSubmission,
+  verifySettlement,
 } from "./service.js";
 import {
   createDraftSchema,
@@ -84,6 +94,11 @@ function toTaskDraftJson(task: TaskRow) {
     fundingTxHash: task.fundingTxHash,
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString(),
+    // T-805: exposes the `accepted_agent_address`/`accepted_at` columns
+    // T-801 already writes atomically with the OPEN→ACCEPTED transition —
+    // both `null` until a task is accepted.
+    acceptedAgentAddress: task.acceptedAgentAddress,
+    acceptedAt: task.acceptedAt?.toISOString() ?? null,
   };
 }
 
@@ -235,6 +250,129 @@ function sendFundingVerificationFailure(
       error: {
         code: TASK_STATE_CONFLICT,
         message: `任务当前状态为 ${result.currentStatus}，无法复核资金交易。`,
+      },
+    });
+  }
+  return reply
+    .status(fundingErrorStatus(result.code))
+    .send({ error: { code: result.code, message: result.message } });
+}
+
+/** T-801: `POST /tasks/:taskId/acceptance-verifications` failure handling —
+ * reuses `fundingErrorStatus`'s exact ErrorCode→HTTP mapping (the mapping
+ * is about what each *code* means, not which endpoint produced it), so
+ * this only needs its own 404/409 message text and the passthrough
+ * `chain_error` branch. No `forbidden` branch: unlike `verifyFunding`,
+ * `verifyAcceptance` never returns one — see its own doc comment
+ * (service.ts) for why ownership is enforced through verification instead
+ * of a pre-check. */
+function sendAcceptanceVerificationFailure(
+  reply: FastifyReply,
+  result: Extract<TaskAcceptanceVerificationServiceResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该任务。" } });
+  }
+  if (result.reason === "conflict") {
+    return reply.status(409).send({
+      error: {
+        code: TASK_STATE_CONFLICT,
+        message: `任务当前状态为 ${result.currentStatus}，无法复核接单交易。`,
+      },
+    });
+  }
+  return reply
+    .status(fundingErrorStatus(result.code))
+    .send({ error: { code: result.code, message: result.message } });
+}
+
+/** T-905: `POST /tasks/:taskId/result-verifications` failure handling —
+ * same structure as `sendAcceptanceVerificationFailure` above (reuses
+ * `fundingErrorStatus`'s exact ErrorCode→HTTP mapping), only its own
+ * 404/409 message text differs. No `forbidden` branch: `verifyResultSubmission`
+ * never returns one, for the same reason `verifyAcceptance` doesn't — see
+ * that function's own doc comment (service.ts). */
+function sendResultSubmissionVerificationFailure(
+  reply: FastifyReply,
+  result: Extract<TaskResultSubmissionVerificationServiceResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该任务。" } });
+  }
+  if (result.reason === "conflict") {
+    return reply.status(409).send({
+      error: {
+        code: TASK_STATE_CONFLICT,
+        message: `任务当前状态为 ${result.currentStatus}，无法复核成果提交交易。`,
+      },
+    });
+  }
+  return reply
+    .status(fundingErrorStatus(result.code))
+    .send({ error: { code: result.code, message: result.message } });
+}
+
+/** T-1001: `POST /tasks/:taskId/settlement-verifications` failure handling —
+ * same structure as `sendResultSubmissionVerificationFailure` above. No
+ * `forbidden` branch: `verifySettlement` never returns one — see that
+ * function's own doc comment (service.ts) for why no caller-identity
+ * cross-check is needed here. */
+function sendSettlementVerificationFailure(
+  reply: FastifyReply,
+  result: Extract<TaskSettlementVerificationServiceResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该任务。" } });
+  }
+  if (result.reason === "conflict") {
+    return reply.status(409).send({
+      error: {
+        code: TASK_STATE_CONFLICT,
+        message: `任务当前状态为 ${result.currentStatus}，无法复核结算交易。`,
+      },
+    });
+  }
+  return reply
+    .status(fundingErrorStatus(result.code))
+    .send({ error: { code: result.code, message: result.message } });
+}
+
+/** T-1002: `POST /tasks/:taskId/dispute-open-verifications` failure
+ * handling — same structure as `sendSettlementVerificationFailure` above. */
+function sendDisputeOpenVerificationFailure(
+  reply: FastifyReply,
+  result: Extract<TaskDisputeOpenVerificationServiceResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该任务。" } });
+  }
+  if (result.reason === "conflict") {
+    return reply.status(409).send({
+      error: {
+        code: TASK_STATE_CONFLICT,
+        message: `任务当前状态为 ${result.currentStatus}，无法复核发起争议交易。`,
+      },
+    });
+  }
+  return reply
+    .status(fundingErrorStatus(result.code))
+    .send({ error: { code: result.code, message: result.message } });
+}
+
+/** T-1002: `POST /tasks/:taskId/dispute-resolve-verifications` failure
+ * handling — same structure as `sendSettlementVerificationFailure` above. */
+function sendDisputeResolveVerificationFailure(
+  reply: FastifyReply,
+  result: Extract<TaskDisputeResolveVerificationServiceResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该任务。" } });
+  }
+  if (result.reason === "conflict") {
+    return reply.status(409).send({
+      error: {
+        code: TASK_STATE_CONFLICT,
+        message: `任务当前状态为 ${result.currentStatus}，无法复核仲裁裁决交易。`,
       },
     });
   }
@@ -426,6 +564,214 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
       );
       if (!result.ok) {
         return sendFundingVerificationFailure(reply, result);
+      }
+      return reply.send({ status: result.status, confirmations: result.confirmations });
+    },
+  );
+
+  // T-801 (Feature 8, task capsule's confirmed scope decision #2): mirrors
+  // `funding-verifications` above exactly — same body schema (`txHash`
+  // only), same session requirement, same RPC-client construction pattern.
+  // `fundingVerificationSchema` is reused as-is rather than a duplicate
+  // "acceptance verification schema": both bodies are the identical
+  // `{ txHash }` shape validated by the identical rule.
+  app.post(
+    "/tasks/:taskId/acceptance-verifications",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const bodyParsed = fundingVerificationSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      // A real, independent RPC client (BACKEND_RPC_URL) — same reasoning
+      // as funding-verifications above: never the frontend wallet's
+      // provider.
+      const rpc = createChainRpcClient();
+
+      const result = await verifyAcceptance(
+        pool,
+        rpc,
+        sessionAddress,
+        paramsParsed.data.taskId,
+        bodyParsed.data.txHash,
+      );
+      if (!result.ok) {
+        return sendAcceptanceVerificationFailure(reply, result);
+      }
+      return reply.send({ status: result.status, confirmations: result.confirmations });
+    },
+  );
+
+  // T-905 (F-905): mirrors `acceptance-verifications` above exactly — same
+  // body schema (`txHash` only, `fundingVerificationSchema` reused as-is),
+  // same session requirement, same RPC-client construction pattern. No
+  // explicit HTTP contract is spelled out in design.md's own interface
+  // section (its `onEvent('ResultSubmitted', ...)` pseudocode is framed as
+  // "无对外 HTTP 契约") — this endpoint is the same client-submits-txHash /
+  // backend-independently-verifies shape this codebase already established
+  // for both `funding-verifications` and `acceptance-verifications`
+  // (Feature 6/8's `chain_events` mechanism T-905 is explicitly told to
+  // reuse), not a new design.
+  app.post(
+    "/tasks/:taskId/result-verifications",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const bodyParsed = fundingVerificationSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      // A real, independent RPC client (BACKEND_RPC_URL) — same reasoning
+      // as funding-verifications/acceptance-verifications above: never the
+      // frontend wallet's provider.
+      const rpc = createChainRpcClient();
+
+      const result = await verifyResultSubmission(
+        pool,
+        rpc,
+        sessionAddress,
+        paramsParsed.data.taskId,
+        bodyParsed.data.txHash,
+      );
+      if (!result.ok) {
+        return sendResultSubmissionVerificationFailure(reply, result);
+      }
+      return reply.send({ status: result.status, confirmations: result.confirmations });
+    },
+  );
+
+  // T-1001 (F-1001/F-1002): same client-submits-txHash / backend-
+  // independently-verifies shape as result-verifications above — covers
+  // all three of `approveResult`/`claimDeliveryTimeout`/
+  // `finalizeReviewTimeout` (verifySettlement's own decoded-event
+  // discriminant decides which one). Session-gated for consistency with
+  // every other verification route in this file, even though
+  // `verifySettlement` itself does not cross-check caller identity
+  // (finalizeReviewTimeout is callable by anyone on-chain, so nothing
+  // here would gain from restricting who may REPORT a real, independently
+  // re-verified transaction).
+  app.post(
+    "/tasks/:taskId/settlement-verifications",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const bodyParsed = fundingVerificationSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const rpc = createChainRpcClient();
+
+      const result = await verifySettlement(
+        pool,
+        rpc,
+        paramsParsed.data.taskId,
+        bodyParsed.data.txHash,
+      );
+      if (!result.ok) {
+        return sendSettlementVerificationFailure(reply, result);
+      }
+      return reply.send({ status: result.status, confirmations: result.confirmations });
+    },
+  );
+
+  // T-1002: `POST /tasks/:taskId/dispute-open-verifications` re-verifies a
+  // DisputeOpened transaction directly against RPC and transitions
+  // SUBMITTED -> DISPUTED. Session-gated for consistency with every other
+  // verification route in this file; caller identity is not itself trusted
+  // for correctness — verifyDisputeOpen cross-checks the decoded on-chain
+  // evidenceHash against the already-recorded open dispute row instead.
+  app.post(
+    "/tasks/:taskId/dispute-open-verifications",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const bodyParsed = fundingVerificationSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const rpc = createChainRpcClient();
+
+      const result = await verifyDisputeOpen(
+        pool,
+        rpc,
+        paramsParsed.data.taskId,
+        bodyParsed.data.txHash,
+      );
+      if (!result.ok) {
+        return sendDisputeOpenVerificationFailure(reply, result);
+      }
+      return reply.send({ status: result.status, confirmations: result.confirmations });
+    },
+  );
+
+  // T-1002: `POST /tasks/:taskId/dispute-resolve-verifications` re-verifies a
+  // DisputeResolved transaction and transitions DISPUTED -> RELEASED or
+  // REFUNDED depending on the decoded `supportAgent` flag. Session-gated
+  // for consistency with every other verification route in this file, but
+  // `sessionAddress` itself is NOT passed to `verifyDisputeResolution` —
+  // `disputes.resolved_by`/`audit_logs.actor_address` are sourced from the
+  // transaction's own verified signer instead (see service.ts's doc
+  // comment; Codex review, T-1002 round 1, P1).
+  app.post(
+    "/tasks/:taskId/dispute-resolve-verifications",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const bodyParsed = fundingVerificationSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const rpc = createChainRpcClient();
+
+      const result = await verifyDisputeResolution(
+        pool,
+        rpc,
+        paramsParsed.data.taskId,
+        bodyParsed.data.txHash,
+      );
+      if (!result.ok) {
+        return sendDisputeResolveVerificationFailure(reply, result);
       }
       return reply.send({ status: result.status, confirmations: result.confirmations });
     },

@@ -36,7 +36,7 @@ runIfOptedIn("runMigrations (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -49,6 +49,13 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0003_create_sessions.sql",
       "0004_create_agents.sql",
       "0005_create_tasks.sql",
+      "0006_add_dispatch_matching_fields.sql",
+      "0007_create_recommendation_tables.sql",
+      "0008_create_acceptance_permits.sql",
+      "0009_create_deliverables.sql",
+      "0010_create_pending_result_submissions.sql",
+      "0011_create_disputes.sql",
+      "0012_create_ratings.sql",
     ]);
     expect(result.alreadyApplied).toEqual([]);
 
@@ -56,14 +63,26 @@ runIfOptedIn("runMigrations (integration)", () => {
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = 'public'
        AND table_name IN ('users', 'auth_nonces', 'sessions', 'agents', 'agent_skills',
-         'tasks', 'task_skills', 'chain_transactions', 'chain_events', 'task_state_history')`,
+         'tasks', 'task_skills', 'chain_transactions', 'chain_events', 'task_state_history',
+         'blocked_wallets', 'recommendation_runs', 'recommendation_candidates',
+         'acceptance_permits', 'deliverables', 'pending_result_submissions', 'disputes',
+         'audit_logs', 'ratings')`,
     );
     expect(rows.map((row) => row.table_name).sort()).toEqual([
+      "acceptance_permits",
       "agent_skills",
       "agents",
+      "audit_logs",
       "auth_nonces",
+      "blocked_wallets",
       "chain_events",
       "chain_transactions",
+      "deliverables",
+      "disputes",
+      "pending_result_submissions",
+      "ratings",
+      "recommendation_candidates",
+      "recommendation_runs",
       "sessions",
       "task_skills",
       "task_state_history",
@@ -81,6 +100,13 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0003_create_sessions.sql",
       "0004_create_agents.sql",
       "0005_create_tasks.sql",
+      "0006_add_dispatch_matching_fields.sql",
+      "0007_create_recommendation_tables.sql",
+      "0008_create_acceptance_permits.sql",
+      "0009_create_deliverables.sql",
+      "0010_create_pending_result_submissions.sql",
+      "0011_create_disputes.sql",
+      "0012_create_ratings.sql",
     ]);
   });
 });

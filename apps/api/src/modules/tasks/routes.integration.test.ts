@@ -22,8 +22,8 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS task_state_history, chain_events, chain_transactions, task_skills, " +
-  "tasks, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
+  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, " +
+  "tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 const VALID_DRAFT_PAYLOAD = {
   category: "writing",
