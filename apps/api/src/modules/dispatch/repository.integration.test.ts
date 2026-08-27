@@ -443,7 +443,7 @@ runIfOptedIn(
   },
 );
 
-describe("resolveAcceptingAgentId (integration, T-806)", () => {
+runIfOptedIn("resolveAcceptingAgentId (integration, T-806)", () => {
   let pool: Pool;
 
   beforeAll(async () => {
