@@ -187,6 +187,28 @@ export function submitFundingVerification(
 }
 
 /**
+ * `POST /tasks/:taskId/settlement-verifications` (T-1001) — same "2xx
+ * still-pending outcome returned as data, only 4xx/409 thrown" shape as
+ * `FundingVerificationResponse` above. Covers all three of
+ * `approveResult`/`claimDeliveryTimeout`/`finalizeReviewTimeout` — the
+ * backend's own `verifySettlement` decides which one a given `txHash`
+ * actually was from the decoded on-chain event, not this module.
+ */
+export type SettlementVerificationResponse =
+  | { status: "RELEASED" | "REFUNDED"; confirmations: number }
+  | { error: { code: ErrorCode; message: string } };
+
+export function submitSettlementVerification(
+  taskId: string,
+  txHash: `0x${string}`,
+): Promise<SettlementVerificationResponse> {
+  return apiFetch<SettlementVerificationResponse>(`/tasks/${taskId}/settlement-verifications`, {
+    method: "POST",
+    body: JSON.stringify({ txHash }),
+  });
+}
+
+/**
  * One entry in `GET /tasks/agents/candidate-invitations`'s response
  * (T-808, F-806/AC-805) — a task where the caller's session owns an Agent
  * that is currently a live (task still OPEN, permit still OUTSTANDING and
