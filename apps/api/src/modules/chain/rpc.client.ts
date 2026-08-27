@@ -33,17 +33,23 @@ export interface BlockResult {
 
 /**
  * Minimal, backend-only read shape of a transaction itself (NOT its
- * receipt) — only the field `acceptance-tx-verifier.ts` actually needs
- * (T-806): the raw calldata (`input`), which is the ONLY place
- * `AcceptancePermit.nonce` is recoverable from. `TaskAccepted` (the event
- * log, read via `getTransactionReceipt` above) carries no `nonce` at all —
- * receipts alone can never disambiguate which of several outstanding
- * permits for the same wallet was actually used, only the transaction's own
- * calldata can. Same "minimal necessary fields, not viem's full
- * `Transaction` type" discipline as `TransactionReceiptResult` above.
+ * receipt) — the raw calldata (`input`), which is the ONLY place
+ * `AcceptancePermit.nonce` is recoverable from (T-806; `TaskAccepted`, the
+ * event log read via `getTransactionReceipt` above, carries no `nonce` at
+ * all), plus the transaction's signer (`from`), which
+ * `dispute-resolve-tx-verifier.ts` needs (T-1002, Codex review round 1,
+ * P1): `DisputeResolved` carries no arbitrator address in its event data,
+ * so the only independently-verifiable source of "who actually resolved
+ * this dispute" is the transaction's own sender — never the identity of
+ * whichever authenticated caller happens to POST the txHash to this
+ * backend (anyone logged in could otherwise report a real, already-mined
+ * transaction and get themselves recorded as the arbitrator). Same
+ * "minimal necessary fields, not viem's full `Transaction` type"
+ * discipline as `TransactionReceiptResult` above.
  */
 export interface TransactionResult {
   input: `0x${string}`;
+  from: `0x${string}`;
 }
 
 /**
@@ -97,6 +103,22 @@ export interface ChainRpcClient {
    * rejected on-chain by `acceptTask` with `InvalidPermitSignature`.
    */
   readAuthorizedSigner(contractAddress: `0x${string}`): Promise<`0x${string}`>;
+  /**
+   * Reads OpenZeppelin `AccessControl.hasRole(bytes32 role, address
+   * account)` directly from the deployed contract (T-1002 human-review
+   * fix, Codex round 2 P1: `GET /tasks/:taskId/disputes` needs an
+   * independently-verifiable way to know whether the CALLER currently
+   * holds `TaskEscrow.ARBITRATOR_ROLE`, since that role is the only
+   * authority who may see full dispute evidence pre-resolution — trusting
+   * a self-claimed identity would let anyone request evidence by simply
+   * asserting they are the arbitrator). `disputes/access-guard.ts` is the
+   * one caller.
+   */
+  readHasRole(
+    contractAddress: `0x${string}`,
+    role: `0x${string}`,
+    account: `0x${string}`,
+  ): Promise<boolean>;
 }
 
 /**
@@ -111,6 +133,23 @@ const AUTHORIZED_SIGNER_ABI = [
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "address" }],
+  },
+] as const;
+
+/**
+ * OpenZeppelin `AccessControl.hasRole` — the standard signature every role
+ * `TaskEscrow` grants (including `ARBITRATOR_ROLE`) is checked through.
+ */
+const HAS_ROLE_ABI = [
+  {
+    type: "function",
+    name: "hasRole",
+    stateMutability: "view",
+    inputs: [
+      { name: "role", type: "bytes32" },
+      { name: "account", type: "address" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
   },
 ] as const;
 
@@ -185,7 +224,7 @@ export function createChainRpcClient(env: NodeJS.ProcessEnv = process.env): Chai
     async getTransaction(txHash) {
       try {
         const tx = await client.getTransaction({ hash: txHash });
-        return { input: tx.input };
+        return { input: tx.input, from: tx.from };
       } catch (error) {
         if (error instanceof TransactionNotFoundError) {
           return null;
@@ -205,6 +244,14 @@ export function createChainRpcClient(env: NodeJS.ProcessEnv = process.env): Chai
         address: contractAddress,
         abi: AUTHORIZED_SIGNER_ABI,
         functionName: "authorizedSigner",
+      });
+    },
+    readHasRole(contractAddress, role, account) {
+      return client.readContract({
+        address: contractAddress,
+        abi: HAS_ROLE_ABI,
+        functionName: "hasRole",
+        args: [role, account],
       });
     },
   };

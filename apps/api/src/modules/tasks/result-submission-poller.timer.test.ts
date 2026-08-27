@@ -53,6 +53,9 @@ function buildFakeRpc(currentBlock: bigint): ChainRpcClient {
     async readAuthorizedSigner() {
       throw new Error("not used");
     },
+    async readHasRole() {
+      throw new Error("not used");
+    },
   };
 }
 

@@ -33,7 +33,7 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, " +
+  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, " +
   "tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 const TASK_ESCROW_ADDRESS = "0x1234567890123456789012345678901234567890";
@@ -117,6 +117,9 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     },
     async readAuthorizedSigner() {
       throw new Error("readAuthorizedSigner: not used by verifyResultSubmission");
+    },
+    async readHasRole() {
+      throw new Error("readHasRole: not used by verifyResultSubmission");
     },
   };
 }

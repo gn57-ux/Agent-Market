@@ -136,6 +136,9 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     async readAuthorizedSigner() {
       throw new Error("readAuthorizedSigner: not used by funding verification");
     },
+    async readHasRole() {
+      throw new Error("readHasRole: not used by funding verification");
+    },
   };
 }
 

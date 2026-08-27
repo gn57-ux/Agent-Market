@@ -125,7 +125,10 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     canonicalBlock = { hash: BLOCK_HASH, number: RECEIPT_BLOCK_NUMBER },
     getTransactionReceiptError,
     getBlockError,
-    transaction = { input: buildAcceptTaskCalldata() },
+    transaction = {
+      input: buildAcceptTaskCalldata(),
+      from: "0x3333333333333333333333333333333333333c",
+    },
     stakeRateBps = DEFAULT_STAKE_RATE_BPS,
     getTransactionError,
     readStakeRateBpsError,
@@ -169,6 +172,9 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     // caller is verifySignerMatchesContract (permit.service.ts).
     async readAuthorizedSigner() {
       throw new Error("readAuthorizedSigner: not used by acceptance-tx-verifier");
+    },
+    async readHasRole() {
+      throw new Error("readHasRole: not used by acceptance-tx-verifier");
     },
   };
 }
@@ -249,7 +255,12 @@ describe("verifyAcceptanceTransaction", () => {
   it("returns FUNDING_EVENT_MISMATCH when the transaction's calldata does not decode as acceptTask", async () => {
     const result = await verifyAcceptanceTransaction(
       buildParams({
-        rpc: buildFakeRpc({ transaction: { input: "0xdeadbeef" } }),
+        rpc: buildFakeRpc({
+          transaction: {
+            input: "0xdeadbeef",
+            from: "0x3333333333333333333333333333333333333c",
+          },
+        }),
       }),
     );
     expect(result).toMatchObject({ ok: false, code: "FUNDING_EVENT_MISMATCH" });

@@ -3,19 +3,33 @@ import type { Pool } from "pg";
 import type { Queryable } from "../../db/pool.js";
 import { normalizeAddress } from "../auth/nonce.store.js";
 import { verifyAcceptanceTransaction } from "../chain/acceptance-tx-verifier.js";
+import { verifyDisputeOpenTransaction } from "../chain/dispute-open-tx-verifier.js";
+import { verifyDisputeResolveTransaction } from "../chain/dispute-resolve-tx-verifier.js";
 import {
   decodeAcceptedEventsFromLogs,
+  decodeDeliveryTimeoutClaimedEventsFromLogs,
+  decodeDisputeOpenedEventsFromLogs,
+  decodeDisputeResolvedEventsFromLogs,
   decodeFundedEventsFromLogs,
+  decodeResultApprovedEventsFromLogs,
   decodeResultSubmittedEventsFromLogs,
+  decodeReviewTimeoutFinalizedEventsFromLogs,
 } from "../chain/event-sync.js";
 import type { ChainRpcClient } from "../chain/rpc.client.js";
 import { verifyResultSubmissionTransaction } from "../chain/result-submission-tx-verifier.js";
+import { applySettlementStats, type SettlementEventKind } from "../chain/settlement-stats.js";
+import { verifySettlementTransaction } from "../chain/settlement-tx-verifier.js";
 import { checkTransactionNotUsed, verifyFundingTransaction } from "../chain/tx-verifier.js";
 import {
   consumeAcceptancePermits,
   invalidateOtherOutstandingPermits,
   resolveAcceptingAgentId,
 } from "../dispatch/repository.js";
+import {
+  getOpenDisputeForTask,
+  insertAuditLog,
+  resolveDispute as resolveDisputeRow,
+} from "../disputes/repository.js";
 import { deriveOnChainTaskId } from "./onchain-task-id.js";
 import {
   findChainTransactionOwner,
@@ -324,6 +338,34 @@ class TransactionAlreadyUsedByAnotherTaskError extends Error {
     super(`transaction already bound to task ${occupantTaskId}`);
     this.name = "TransactionAlreadyUsedByAnotherTaskError";
     this.occupantTaskId = occupantTaskId;
+  }
+}
+
+/**
+ * Thrown from inside `transitionTaskStatus`'s `withinTransaction` callback
+ * (never caught there — `transitionTaskStatus` already ROLLBACKs and
+ * rethrows on any error) when `resolveDisputeRow`'s `UPDATE ... WHERE
+ * task_id = $1 AND status = 'OPEN'` matches zero rows.
+ *
+ * By this point in `verifyDisputeResolution`, the task's own row is
+ * confirmed `DISPUTED` under `transitionTaskStatus`'s row lock (the
+ * transaction only reaches this callback for `allowedFromStatuses:
+ * ["DISPUTED"]`) — a legitimate retried/idempotent replay of an ALREADY-
+ * resolved dispute is handled entirely by the earlier RELEASED/REFUNDED +
+ * `findExistingDisputeResolveForTask` branch, before this transaction ever
+ * opens. So reaching here with zero matching rows means the `disputes` row
+ * itself is missing or already resolved while `tasks.status` still says
+ * DISPUTED — a genuine `tasks`/`disputes` inconsistency, not a routine
+ * no-op. `verifyDisputeResolution` catches this specifically to roll back
+ * the whole transaction (status UPDATE, stats, chain_transactions,
+ * chain_events, the `users` upsert, and the audit log all undone together)
+ * instead of silently committing a settlement with an unresolved dispute
+ * row underneath it.
+ */
+class DisputeRowNotOpenError extends Error {
+  constructor(taskId: string) {
+    super(`no OPEN dispute row for task ${taskId} despite task.status = DISPUTED`);
+    this.name = "DisputeRowNotOpenError";
   }
 }
 
@@ -1292,4 +1334,806 @@ export async function verifyResultSubmission(
   }
 
   return { ok: true, status: "SUBMITTED", confirmations: verification.confirmations };
+}
+
+/**
+ * T-1001's idempotent-replay lookup — mirrors
+ * `findExistingResultSubmissionForTask` exactly, scoped to
+ * `purpose: "SETTLEMENT"` for the same reason: without it, this task's
+ * own `FUNDING`/`ACCEPTANCE`/`RESULT_SUBMISSION` transaction hash would
+ * satisfy this lookup.
+ */
+async function findExistingSettlementForTask(
+  pool: Pool,
+  chainId: number,
+  taskId: string,
+  txHash: string,
+): Promise<{ confirmations: number } | null> {
+  const existing = await getChainTransactionByHash(pool, chainId, txHash, "SETTLEMENT");
+  if (existing && existing.taskId === taskId) {
+    return { confirmations: existing.confirmations };
+  }
+  return null;
+}
+
+/** What a settlement transaction's decoded event determines this call must
+ * do — computed once, up front, from `verifySettlementTransaction`'s own
+ * `decoded.kind` discriminant, so the rest of `verifySettlement` never has
+ * a second place that maps event kind → allowed-from-status/target-status/
+ * settlement-stats outcome. */
+interface SettlementPlan {
+  allowedFromStatuses: readonly TaskStatusValue[];
+  toStatus: "RELEASED" | "REFUNDED";
+  statsKind: SettlementEventKind;
+  eventName: string;
+}
+
+function planForSettlementKind(
+  kind: "RESULT_APPROVED" | "DELIVERY_TIMEOUT_CLAIMED" | "REVIEW_TIMEOUT_FINALIZED",
+): SettlementPlan {
+  switch (kind) {
+    case "RESULT_APPROVED":
+      return {
+        allowedFromStatuses: ["SUBMITTED"],
+        toStatus: "RELEASED",
+        statsKind: "RESULT_APPROVED",
+        eventName: "ResultApproved",
+      };
+    case "REVIEW_TIMEOUT_FINALIZED":
+      return {
+        allowedFromStatuses: ["SUBMITTED"],
+        toStatus: "RELEASED",
+        statsKind: "REVIEW_TIMEOUT_FINALIZED",
+        eventName: "ReviewTimeoutFinalized",
+      };
+    case "DELIVERY_TIMEOUT_CLAIMED":
+      return {
+        allowedFromStatuses: ["ACCEPTED"],
+        toStatus: "REFUNDED",
+        statsKind: "DELIVERY_TIMEOUT_CLAIMED",
+        eventName: "DeliveryTimeoutClaimed",
+      };
+  }
+}
+
+export type TaskSettlementVerificationServiceResult =
+  | { ok: true; status: "RELEASED" | "REFUNDED"; confirmations: number }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "conflict"; currentStatus: TaskStatusValue }
+  | { ok: false; reason: "chain_error"; code: ErrorCode; message: string };
+
+/**
+ * F-1001/F-1002/T-1001: mirrors `verifyResultSubmission`'s exact structure
+ * (idempotent replay of an already-terminal task, otherwise independently
+ * RPC-verify the settlement event and atomically transition the task
+ * alongside `chain_transactions`/`chain_events` and — the one genuinely
+ * new step this function adds — `agents`' settlement-count columns, all
+ * in one `transitionTaskStatus` transaction via `applySettlementStats`
+ * called from `withinTransaction`).
+ *
+ * No caller-identity cross-check the way `verifyResultSubmission` checks
+ * `agent == sessionAddress` — see `settlement-tx-verifier.ts`'s own header
+ * comment for why: `approveResult`/`claimDeliveryTimeout` already enforce
+ * `task.requester == msg.sender` on-chain, and `finalizeReviewTimeout` is
+ * deliberately callable by anyone, so there is no "expected caller" this
+ * function could validate that the contract hasn't already validated more
+ * authoritatively.
+ *
+ * `DisputeResolved` is NOT handled here — T-1002's own scope, via a
+ * separate `verifyDisputeResolution` sharing this same
+ * `applySettlementStats` call for its own settlement-stats update (design.md:
+ * "DisputeResolved 结算分支同样调用 settlement-stats.ts").
+ */
+export async function verifySettlement(
+  pool: Pool,
+  rpc: ChainRpcClient,
+  taskId: string,
+  txHash: string,
+): Promise<TaskSettlementVerificationServiceResult> {
+  const task = await getTaskById(pool, taskId);
+  if (!task) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
+  const chainConfig = resolveFundingChainConfig();
+
+  if (task.status === "RELEASED" || task.status === "REFUNDED") {
+    const existing = await findExistingSettlementForTask(
+      pool,
+      chainConfig.chainId,
+      taskId,
+      normalizedTxHash,
+    );
+    if (existing) {
+      return { ok: true, status: task.status, confirmations: existing.confirmations };
+    }
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+  if (task.status !== "ACCEPTED" && task.status !== "SUBMITTED") {
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+  if (!task.acceptedAgentId) {
+    // Cannot happen for a real ACCEPTED/SUBMITTED task (acceptedAgentId is
+    // written atomically with the OPEN->ACCEPTED transition), but guards
+    // settlement-stats' own required, non-null input rather than silently
+    // crediting nothing.
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "FUNDING_EVENT_MISMATCH",
+      message: `task ${taskId} has no acceptedAgentId despite status ${task.status}`,
+    };
+  }
+
+  const taskIdOnChain = deriveOnChainTaskId(task.id);
+  const requiredConfirmations = resolveRequiredConfirmations();
+
+  const verification = await verifySettlementTransaction({
+    rpc,
+    txHash: normalizedTxHash,
+    expectedChainId: chainConfig.chainId,
+    trustedContractAddress: chainConfig.addresses.taskEscrow,
+    requiredConfirmations,
+    expectedTaskIdOnChain: taskIdOnChain,
+  });
+  if (!verification.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: verification.code,
+      message: verification.message,
+    };
+  }
+
+  const plan = planForSettlementKind(verification.decoded.kind);
+  if (!plan.allowedFromStatuses.includes(task.status)) {
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+
+  const usage = await checkTransactionNotUsed(pool, chainConfig.chainId, normalizedTxHash, taskId);
+  if (!usage.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: usage.code ?? "TRANSACTION_ALREADY_USED",
+      message: usage.message ?? "transaction already bound to another task",
+    };
+  }
+
+  // Same reorg-safety re-fetch verifyResultSubmission/verifyAcceptance/
+  // verifyFunding perform and for the same reason.
+  let receipt: Awaited<ReturnType<ChainRpcClient["getTransactionReceipt"]>>;
+  try {
+    receipt = await rpc.getTransactionReceipt(normalizedTxHash);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: error instanceof Error ? error.message : "unexpected RPC client error",
+    };
+  }
+  if (!receipt || receipt.blockHash.toLowerCase() !== verification.blockHash.toLowerCase()) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt snapshot changed between verification and event recording (possible reorg)",
+    };
+  }
+
+  let logIndex: number | undefined;
+  let payload: Record<string, string>;
+  switch (verification.decoded.kind) {
+    case "RESULT_APPROVED": {
+      const matching = decodeResultApprovedEventsFromLogs(
+        receipt.logs,
+        chainConfig.addresses.taskEscrow,
+      ).find((candidate) => candidate.event.taskId.toLowerCase() === taskIdOnChain.toLowerCase());
+      logIndex = matching?.logIndex;
+      payload = matching
+        ? {
+            taskId: matching.event.taskId,
+            agent: matching.event.agent,
+            budget: matching.event.budget.toString(),
+            stake: matching.event.stake.toString(),
+          }
+        : {};
+      break;
+    }
+    case "DELIVERY_TIMEOUT_CLAIMED": {
+      const matching = decodeDeliveryTimeoutClaimedEventsFromLogs(
+        receipt.logs,
+        chainConfig.addresses.taskEscrow,
+      ).find((candidate) => candidate.event.taskId.toLowerCase() === taskIdOnChain.toLowerCase());
+      logIndex = matching?.logIndex;
+      payload = matching
+        ? {
+            taskId: matching.event.taskId,
+            requester: matching.event.requester,
+            budget: matching.event.budget.toString(),
+            stake: matching.event.stake.toString(),
+          }
+        : {};
+      break;
+    }
+    case "REVIEW_TIMEOUT_FINALIZED": {
+      const matching = decodeReviewTimeoutFinalizedEventsFromLogs(
+        receipt.logs,
+        chainConfig.addresses.taskEscrow,
+      ).find((candidate) => candidate.event.taskId.toLowerCase() === taskIdOnChain.toLowerCase());
+      logIndex = matching?.logIndex;
+      payload = matching
+        ? {
+            taskId: matching.event.taskId,
+            agent: matching.event.agent,
+            budget: matching.event.budget.toString(),
+            stake: matching.event.stake.toString(),
+          }
+        : {};
+      break;
+    }
+  }
+  if (logIndex === undefined) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt logs were not available when recording the settlement event",
+    };
+  }
+
+  const acceptedAgentId = task.acceptedAgentId;
+  let transition;
+  try {
+    transition = await transitionTaskStatus(pool, {
+      taskId,
+      allowedFromStatuses: plan.allowedFromStatuses,
+      toStatus: plan.toStatus,
+      actor: "system:settlement-verification",
+      reason: `${plan.eventName} transaction verified`,
+      withinTransaction: async (client) => {
+        const inserted = await insertChainTransaction(client, {
+          txHash: normalizedTxHash,
+          chainId: chainConfig.chainId,
+          taskId,
+          purpose: "SETTLEMENT",
+          status: "confirmed",
+          confirmations: verification.confirmations,
+        });
+        if (!inserted) {
+          const occupantTaskId = await findChainTransactionOwner(
+            client,
+            chainConfig.chainId,
+            normalizedTxHash,
+          );
+          if (occupantTaskId !== taskId) {
+            throw new TransactionAlreadyUsedByAnotherTaskError(occupantTaskId ?? "unknown");
+          }
+        }
+        await insertChainEvent(client, {
+          chainId: chainConfig.chainId,
+          blockHash: verification.blockHash.toLowerCase(),
+          transactionHash: normalizedTxHash,
+          logIndex,
+          eventName: plan.eventName,
+          taskId,
+          payload,
+        });
+        await applySettlementStats(client, acceptedAgentId, plan.statsKind);
+      },
+    });
+  } catch (error) {
+    if (error instanceof TransactionAlreadyUsedByAnotherTaskError) {
+      return {
+        ok: false,
+        reason: "chain_error",
+        code: "TRANSACTION_ALREADY_USED",
+        message: `tx ${normalizedTxHash} on chain ${chainConfig.chainId} is already bound to task ${error.occupantTaskId}`,
+      };
+    }
+    throw error;
+  }
+
+  if (transition.outcome === "not_found") {
+    return { ok: false, reason: "not_found" };
+  }
+  if (transition.outcome === "conflict") {
+    if (transition.currentStatus === "RELEASED" || transition.currentStatus === "REFUNDED") {
+      const existing = await findExistingSettlementForTask(
+        pool,
+        chainConfig.chainId,
+        taskId,
+        normalizedTxHash,
+      );
+      if (existing) {
+        return {
+          ok: true,
+          status: transition.currentStatus,
+          confirmations: existing.confirmations,
+        };
+      }
+    }
+    return { ok: false, reason: "conflict", currentStatus: transition.currentStatus };
+  }
+
+  return { ok: true, status: plan.toStatus, confirmations: verification.confirmations };
+}
+
+/**
+ * T-1002's idempotent-replay lookup for `openDispute` — mirrors
+ * `findExistingSettlementForTask` exactly, scoped to
+ * `purpose: "DISPUTE_OPEN"`.
+ */
+async function findExistingDisputeOpenForTask(
+  pool: Pool,
+  chainId: number,
+  taskId: string,
+  txHash: string,
+): Promise<{ confirmations: number } | null> {
+  const existing = await getChainTransactionByHash(pool, chainId, txHash, "DISPUTE_OPEN");
+  if (existing && existing.taskId === taskId) {
+    return { confirmations: existing.confirmations };
+  }
+  return null;
+}
+
+export type TaskDisputeOpenVerificationServiceResult =
+  | { ok: true; status: "DISPUTED"; confirmations: number }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "conflict"; currentStatus: TaskStatusValue }
+  | { ok: false; reason: "chain_error"; code: ErrorCode; message: string };
+
+/**
+ * F-1003/T-1002: verifies a real, confirmed `openDispute` transaction and
+ * atomically transitions `SUBMITTED`→`DISPUTED`. Requires an `OPEN`
+ * dispute row (`disputes/repository.ts`'s `getOpenDisputeForTask`) to
+ * already exist for this task — `POST /tasks/:taskId/disputes`
+ * (disputes/routes.ts) is the prerequisite off-chain step design.md's
+ * F-1003 describes; without a recorded dispute, an arbitrator would have
+ * no reason/evidence to review even if the on-chain event is real, so
+ * this function refuses to transition the task at all in that case rather
+ * than accepting a DISPUTED task with nothing behind it.
+ */
+export async function verifyDisputeOpen(
+  pool: Pool,
+  rpc: ChainRpcClient,
+  taskId: string,
+  txHash: string,
+): Promise<TaskDisputeOpenVerificationServiceResult> {
+  const task = await getTaskById(pool, taskId);
+  if (!task) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
+  const chainConfig = resolveFundingChainConfig();
+
+  if (task.status === "DISPUTED") {
+    const existing = await findExistingDisputeOpenForTask(
+      pool,
+      chainConfig.chainId,
+      taskId,
+      normalizedTxHash,
+    );
+    if (existing) {
+      return { ok: true, status: "DISPUTED", confirmations: existing.confirmations };
+    }
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+  if (task.status !== "SUBMITTED") {
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+
+  const openDispute = await getOpenDisputeForTask(pool, taskId);
+  if (!openDispute) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "FUNDING_EVENT_MISMATCH",
+      message: "no open dispute record found for this task — call POST .../disputes first",
+    };
+  }
+
+  const taskIdOnChain = deriveOnChainTaskId(task.id);
+  const requiredConfirmations = resolveRequiredConfirmations();
+
+  const verification = await verifyDisputeOpenTransaction({
+    rpc,
+    txHash: normalizedTxHash,
+    expectedChainId: chainConfig.chainId,
+    trustedContractAddress: chainConfig.addresses.taskEscrow,
+    requiredConfirmations,
+    expectedTaskIdOnChain: taskIdOnChain,
+    expectedEvidenceHash: openDispute.evidenceHash,
+  });
+  if (!verification.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: verification.code,
+      message: verification.message,
+    };
+  }
+
+  const usage = await checkTransactionNotUsed(pool, chainConfig.chainId, normalizedTxHash, taskId);
+  if (!usage.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: usage.code ?? "TRANSACTION_ALREADY_USED",
+      message: usage.message ?? "transaction already bound to another task",
+    };
+  }
+
+  let receipt: Awaited<ReturnType<ChainRpcClient["getTransactionReceipt"]>>;
+  try {
+    receipt = await rpc.getTransactionReceipt(normalizedTxHash);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: error instanceof Error ? error.message : "unexpected RPC client error",
+    };
+  }
+  if (!receipt || receipt.blockHash.toLowerCase() !== verification.blockHash.toLowerCase()) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt snapshot changed between verification and event recording (possible reorg)",
+    };
+  }
+  const matchingEvent = decodeDisputeOpenedEventsFromLogs(
+    receipt.logs,
+    chainConfig.addresses.taskEscrow,
+  ).find((candidate) => candidate.event.taskId.toLowerCase() === taskIdOnChain.toLowerCase());
+  if (!matchingEvent) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt logs were not available when recording the DisputeOpened event",
+    };
+  }
+
+  let transition;
+  try {
+    transition = await transitionTaskStatus(pool, {
+      taskId,
+      allowedFromStatuses: ["SUBMITTED"],
+      toStatus: "DISPUTED",
+      actor: "system:dispute-open-verification",
+      reason: "DisputeOpened transaction verified",
+      withinTransaction: async (client) => {
+        const inserted = await insertChainTransaction(client, {
+          txHash: normalizedTxHash,
+          chainId: chainConfig.chainId,
+          taskId,
+          purpose: "DISPUTE_OPEN",
+          status: "confirmed",
+          confirmations: verification.confirmations,
+        });
+        if (!inserted) {
+          const occupantTaskId = await findChainTransactionOwner(
+            client,
+            chainConfig.chainId,
+            normalizedTxHash,
+          );
+          if (occupantTaskId !== taskId) {
+            throw new TransactionAlreadyUsedByAnotherTaskError(occupantTaskId ?? "unknown");
+          }
+        }
+        await insertChainEvent(client, {
+          chainId: chainConfig.chainId,
+          blockHash: verification.blockHash.toLowerCase(),
+          transactionHash: normalizedTxHash,
+          logIndex: matchingEvent.logIndex,
+          eventName: "DisputeOpened",
+          taskId,
+          payload: {
+            taskId: matchingEvent.event.taskId,
+            requester: matchingEvent.event.requester,
+            disputeEvidenceHash: matchingEvent.event.disputeEvidenceHash,
+          },
+        });
+      },
+    });
+  } catch (error) {
+    if (error instanceof TransactionAlreadyUsedByAnotherTaskError) {
+      return {
+        ok: false,
+        reason: "chain_error",
+        code: "TRANSACTION_ALREADY_USED",
+        message: `tx ${normalizedTxHash} on chain ${chainConfig.chainId} is already bound to task ${error.occupantTaskId}`,
+      };
+    }
+    throw error;
+  }
+
+  if (transition.outcome === "not_found") {
+    return { ok: false, reason: "not_found" };
+  }
+  if (transition.outcome === "conflict") {
+    if (transition.currentStatus === "DISPUTED") {
+      const existing = await findExistingDisputeOpenForTask(
+        pool,
+        chainConfig.chainId,
+        taskId,
+        normalizedTxHash,
+      );
+      if (existing) {
+        return { ok: true, status: "DISPUTED", confirmations: existing.confirmations };
+      }
+    }
+    return { ok: false, reason: "conflict", currentStatus: transition.currentStatus };
+  }
+
+  return { ok: true, status: "DISPUTED", confirmations: verification.confirmations };
+}
+
+/**
+ * T-1002's idempotent-replay lookup for `resolveDispute` — mirrors
+ * `findExistingSettlementForTask`, scoped to `purpose: "DISPUTE_RESOLVE"`.
+ */
+async function findExistingDisputeResolveForTask(
+  pool: Pool,
+  chainId: number,
+  taskId: string,
+  txHash: string,
+): Promise<{ confirmations: number } | null> {
+  const existing = await getChainTransactionByHash(pool, chainId, txHash, "DISPUTE_RESOLVE");
+  if (existing && existing.taskId === taskId) {
+    return { confirmations: existing.confirmations };
+  }
+  return null;
+}
+
+export type TaskDisputeResolveVerificationServiceResult =
+  | { ok: true; status: "RELEASED" | "REFUNDED"; confirmations: number }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "conflict"; currentStatus: TaskStatusValue }
+  | { ok: false; reason: "chain_error"; code: ErrorCode; message: string };
+
+/**
+ * F-1004/T-1002: verifies a real, confirmed `resolveDispute` transaction
+ * and atomically transitions `DISPUTED`→`RELEASED`/`REFUNDED` (per the
+ * decoded `supportAgent` flag), updates `settlement-stats.ts`'s counts
+ * (design.md: "DisputeResolved 结算分支同样调用 settlement-stats.ts"),
+ * resolves the `disputes` row, and writes a PRD §15.1 `audit_logs` entry —
+ * all inside the same transaction, so none of these can ever be
+ * observably out of sync with each other.
+ *
+ * `resolvedBy` for both the `disputes` row and the audit log is the
+ * verified transaction's own signer (`verifyDisputeResolveTransaction`'s
+ * `resolvedBy`, read independently via `rpc.getTransaction`) — NOT the
+ * identity of whoever called this HTTP endpoint. `resolveDispute` enforces
+ * `ARBITRATOR_ROLE` on-chain, but the caller of this verification endpoint
+ * is just whichever authenticated session happened to report the txHash;
+ * trusting that identity for the audit trail would let any logged-in user
+ * report a real, already-mined transaction and get themselves recorded as
+ * the arbitrator (Codex review, T-1002 round 1, P1).
+ */
+export async function verifyDisputeResolution(
+  pool: Pool,
+  rpc: ChainRpcClient,
+  taskId: string,
+  txHash: string,
+): Promise<TaskDisputeResolveVerificationServiceResult> {
+  const task = await getTaskById(pool, taskId);
+  if (!task) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
+  const chainConfig = resolveFundingChainConfig();
+
+  if (task.status === "RELEASED" || task.status === "REFUNDED") {
+    const existing = await findExistingDisputeResolveForTask(
+      pool,
+      chainConfig.chainId,
+      taskId,
+      normalizedTxHash,
+    );
+    if (existing) {
+      return { ok: true, status: task.status, confirmations: existing.confirmations };
+    }
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+  if (task.status !== "DISPUTED") {
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+  if (!task.acceptedAgentId) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "FUNDING_EVENT_MISMATCH",
+      message: `task ${taskId} has no acceptedAgentId despite status ${task.status}`,
+    };
+  }
+
+  const taskIdOnChain = deriveOnChainTaskId(task.id);
+  const requiredConfirmations = resolveRequiredConfirmations();
+
+  const verification = await verifyDisputeResolveTransaction({
+    rpc,
+    txHash: normalizedTxHash,
+    expectedChainId: chainConfig.chainId,
+    trustedContractAddress: chainConfig.addresses.taskEscrow,
+    requiredConfirmations,
+    expectedTaskIdOnChain: taskIdOnChain,
+  });
+  if (!verification.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: verification.code,
+      message: verification.message,
+    };
+  }
+
+  const usage = await checkTransactionNotUsed(pool, chainConfig.chainId, normalizedTxHash, taskId);
+  if (!usage.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: usage.code ?? "TRANSACTION_ALREADY_USED",
+      message: usage.message ?? "transaction already bound to another task",
+    };
+  }
+
+  let receipt: Awaited<ReturnType<ChainRpcClient["getTransactionReceipt"]>>;
+  try {
+    receipt = await rpc.getTransactionReceipt(normalizedTxHash);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: error instanceof Error ? error.message : "unexpected RPC client error",
+    };
+  }
+  if (!receipt || receipt.blockHash.toLowerCase() !== verification.blockHash.toLowerCase()) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt snapshot changed between verification and event recording (possible reorg)",
+    };
+  }
+  const matchingEvent = decodeDisputeResolvedEventsFromLogs(
+    receipt.logs,
+    chainConfig.addresses.taskEscrow,
+  ).find((candidate) => candidate.event.taskId.toLowerCase() === taskIdOnChain.toLowerCase());
+  if (!matchingEvent) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt logs were not available when recording the DisputeResolved event",
+    };
+  }
+
+  const supportAgent = matchingEvent.event.supportAgent;
+  const toStatus: "RELEASED" | "REFUNDED" = supportAgent ? "RELEASED" : "REFUNDED";
+  const statsKind: SettlementEventKind = supportAgent
+    ? "DISPUTE_RESOLVED_SUPPORT_AGENT"
+    : "DISPUTE_RESOLVED_SUPPORT_REQUESTER";
+  const resolution: "SUPPORT_AGENT" | "SUPPORT_REQUESTER" = supportAgent
+    ? "SUPPORT_AGENT"
+    : "SUPPORT_REQUESTER";
+  const acceptedAgentId = task.acceptedAgentId;
+  const resolvedByAddress = verification.resolvedBy.toLowerCase();
+
+  let transition;
+  try {
+    transition = await transitionTaskStatus(pool, {
+      taskId,
+      allowedFromStatuses: ["DISPUTED"],
+      toStatus,
+      actor: "system:dispute-resolve-verification",
+      reason: "DisputeResolved transaction verified",
+      withinTransaction: async (client) => {
+        const inserted = await insertChainTransaction(client, {
+          txHash: normalizedTxHash,
+          chainId: chainConfig.chainId,
+          taskId,
+          purpose: "DISPUTE_RESOLVE",
+          status: "confirmed",
+          confirmations: verification.confirmations,
+        });
+        if (!inserted) {
+          const occupantTaskId = await findChainTransactionOwner(
+            client,
+            chainConfig.chainId,
+            normalizedTxHash,
+          );
+          if (occupantTaskId !== taskId) {
+            throw new TransactionAlreadyUsedByAnotherTaskError(occupantTaskId ?? "unknown");
+          }
+        }
+        await insertChainEvent(client, {
+          chainId: chainConfig.chainId,
+          blockHash: verification.blockHash.toLowerCase(),
+          transactionHash: normalizedTxHash,
+          logIndex: matchingEvent.logIndex,
+          eventName: "DisputeResolved",
+          taskId,
+          payload: {
+            taskId: matchingEvent.event.taskId,
+            supportAgent: String(matchingEvent.event.supportAgent),
+          },
+        });
+        await applySettlementStats(client, acceptedAgentId, statsKind);
+        // `disputes.resolved_by` FK-references `users(address)`; the
+        // arbitrator's on-chain address may never have signed into this
+        // backend before, so it must be upserted here (not merely looked
+        // up) before resolveDisputeRow's UPDATE can reference it.
+        await client.query(
+          `INSERT INTO users (address) VALUES ($1) ON CONFLICT (address) DO NOTHING`,
+          [resolvedByAddress],
+        );
+        const disputeResolved = await resolveDisputeRow(
+          client,
+          taskId,
+          resolution,
+          resolvedByAddress,
+        );
+        if (!disputeResolved) {
+          throw new DisputeRowNotOpenError(taskId);
+        }
+        await insertAuditLog(client, {
+          actorAddress: resolvedByAddress,
+          action: "DISPUTE_RESOLVED",
+          taskId,
+          reason: `resolveDispute(supportAgent=${supportAgent})`,
+          txHash: normalizedTxHash,
+        });
+      },
+    });
+  } catch (error) {
+    if (error instanceof TransactionAlreadyUsedByAnotherTaskError) {
+      return {
+        ok: false,
+        reason: "chain_error",
+        code: "TRANSACTION_ALREADY_USED",
+        message: `tx ${normalizedTxHash} on chain ${chainConfig.chainId} is already bound to task ${error.occupantTaskId}`,
+      };
+    }
+    if (error instanceof DisputeRowNotOpenError) {
+      return {
+        ok: false,
+        reason: "chain_error",
+        code: "FUNDING_EVENT_MISMATCH",
+        message: error.message,
+      };
+    }
+    throw error;
+  }
+
+  if (transition.outcome === "not_found") {
+    return { ok: false, reason: "not_found" };
+  }
+  if (transition.outcome === "conflict") {
+    if (transition.currentStatus === "RELEASED" || transition.currentStatus === "REFUNDED") {
+      const existing = await findExistingDisputeResolveForTask(
+        pool,
+        chainConfig.chainId,
+        taskId,
+        normalizedTxHash,
+      );
+      if (existing) {
+        return {
+          ok: true,
+          status: transition.currentStatus,
+          confirmations: existing.confirmations,
+        };
+      }
+    }
+    return { ok: false, reason: "conflict", currentStatus: transition.currentStatus };
+  }
+
+  return { ok: true, status: toStatus, confirmations: verification.confirmations };
 }

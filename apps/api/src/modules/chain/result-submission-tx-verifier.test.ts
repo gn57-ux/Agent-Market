@@ -132,6 +132,9 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     async readAuthorizedSigner() {
       throw new Error("readAuthorizedSigner: not used by result-submission-tx-verifier");
     },
+    async readHasRole() {
+      throw new Error("readHasRole: not used by result-submission-tx-verifier");
+    },
   };
 }
 

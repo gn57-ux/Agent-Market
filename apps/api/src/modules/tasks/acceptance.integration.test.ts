@@ -48,7 +48,7 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, " +
+  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, " +
   "tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 const TASK_ESCROW_ADDRESS = "0x1234567890123456789012345678901234567890";
@@ -160,6 +160,9 @@ function buildFakeRpc(options: FakeRpcOptions = {}): ChainRpcClient {
     // (permit.service.ts), exercised separately.
     async readAuthorizedSigner() {
       throw new Error("readAuthorizedSigner: not used by verifyAcceptance");
+    },
+    async readHasRole() {
+      throw new Error("readHasRole: not used by verifyAcceptance");
     },
   };
 }
@@ -296,6 +299,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: agentOwner.address as `0x${string}`,
           nonce: 1n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
 
@@ -376,6 +380,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: agentOwner.address as `0x${string}`,
           nonce: 2n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
 
@@ -434,6 +439,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: sharedWallet.address as `0x${string}`,
           nonce: 22n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
 
@@ -479,6 +485,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: agentOwner.address as `0x${string}`,
           nonce: 1n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
 
@@ -536,6 +543,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: agentOwner.address as `0x${string}`,
           nonce: 1n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
 
@@ -574,6 +582,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: agentOwner.address as `0x${string}`,
           nonce: 1n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
     const first = await verifyAcceptance(pool, rpc, agentOwner.address, taskId, firstTxHash);
@@ -619,6 +628,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: agentOwner.address as `0x${string}`,
           nonce: 1n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
     const accepted = await verifyAcceptance(
@@ -732,6 +742,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: noAgentAccount.address as `0x${string}`,
           nonce: 1n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
 
@@ -774,6 +785,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: agentOwner.address as `0x${string}`,
           nonce: 999n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
 
@@ -825,6 +837,7 @@ runIfOptedIn("verifyAcceptance (integration, T-801/T-806)", () => {
           agent: agentOwner.address as `0x${string}`,
           nonce: 1n,
         }),
+        from: "0x3333333333333333333333333333333333333c",
       },
     });
 
