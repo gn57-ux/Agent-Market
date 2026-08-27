@@ -1,8 +1,25 @@
 import type { ChainRpcClient } from "./rpc.client.js";
 import {
+  decodeDeliveryTimeoutClaimedLog,
+  type DecodedDeliveryTimeoutClaimedEvent,
+} from "./delivery-timeout-claimed-event.js";
+import { decodeDisputeOpenedLog, type DecodedDisputeOpenedEvent } from "./dispute-opened-event.js";
+import {
+  decodeDisputeResolvedLog,
+  type DecodedDisputeResolvedEvent,
+} from "./dispute-resolved-event.js";
+import {
+  decodeResultApprovedLog,
+  type DecodedResultApprovedEvent,
+} from "./result-approved-event.js";
+import {
   decodeResultSubmittedLog,
   type DecodedResultSubmittedEvent,
 } from "./result-submitted-event.js";
+import {
+  decodeReviewTimeoutFinalizedLog,
+  type DecodedReviewTimeoutFinalizedEvent,
+} from "./review-timeout-finalized-event.js";
 import { decodeTaskAcceptedLog, type DecodedTaskAcceptedEvent } from "./task-accepted-event.js";
 import {
   decodeTaskFundedLog,
@@ -117,6 +134,146 @@ export function decodeResultSubmittedEventsFromLogs(
       continue;
     }
     const decoded = decodeResultSubmittedLog(log);
+    if (decoded) {
+      results.push({ event: decoded, logIndex: log.logIndex });
+    }
+  }
+  return results;
+}
+
+export interface ResultApprovedEventLogDecodeResult {
+  event: DecodedResultApprovedEvent;
+  logIndex: number;
+}
+
+/**
+ * Decodes every `ResultApproved` log emitted by `trustedContractAddress`
+ * in a set of receipt logs — T-1001's mirror of
+ * `decodeResultSubmittedEventsFromLogs` above.
+ */
+export function decodeResultApprovedEventsFromLogs(
+  logs: readonly RawEventLog[],
+  trustedContractAddress: string,
+): ResultApprovedEventLogDecodeResult[] {
+  const normalizedTrusted = trustedContractAddress.toLowerCase();
+  const results: ResultApprovedEventLogDecodeResult[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== normalizedTrusted) {
+      continue;
+    }
+    const decoded = decodeResultApprovedLog(log);
+    if (decoded) {
+      results.push({ event: decoded, logIndex: log.logIndex });
+    }
+  }
+  return results;
+}
+
+export interface DeliveryTimeoutClaimedEventLogDecodeResult {
+  event: DecodedDeliveryTimeoutClaimedEvent;
+  logIndex: number;
+}
+
+/**
+ * Decodes every `DeliveryTimeoutClaimed` log emitted by
+ * `trustedContractAddress` in a set of receipt logs — T-1001's mirror of
+ * `decodeResultSubmittedEventsFromLogs` above.
+ */
+export function decodeDeliveryTimeoutClaimedEventsFromLogs(
+  logs: readonly RawEventLog[],
+  trustedContractAddress: string,
+): DeliveryTimeoutClaimedEventLogDecodeResult[] {
+  const normalizedTrusted = trustedContractAddress.toLowerCase();
+  const results: DeliveryTimeoutClaimedEventLogDecodeResult[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== normalizedTrusted) {
+      continue;
+    }
+    const decoded = decodeDeliveryTimeoutClaimedLog(log);
+    if (decoded) {
+      results.push({ event: decoded, logIndex: log.logIndex });
+    }
+  }
+  return results;
+}
+
+export interface ReviewTimeoutFinalizedEventLogDecodeResult {
+  event: DecodedReviewTimeoutFinalizedEvent;
+  logIndex: number;
+}
+
+/**
+ * Decodes every `ReviewTimeoutFinalized` log emitted by
+ * `trustedContractAddress` in a set of receipt logs — T-1001's mirror of
+ * `decodeResultSubmittedEventsFromLogs` above.
+ */
+export function decodeReviewTimeoutFinalizedEventsFromLogs(
+  logs: readonly RawEventLog[],
+  trustedContractAddress: string,
+): ReviewTimeoutFinalizedEventLogDecodeResult[] {
+  const normalizedTrusted = trustedContractAddress.toLowerCase();
+  const results: ReviewTimeoutFinalizedEventLogDecodeResult[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== normalizedTrusted) {
+      continue;
+    }
+    const decoded = decodeReviewTimeoutFinalizedLog(log);
+    if (decoded) {
+      results.push({ event: decoded, logIndex: log.logIndex });
+    }
+  }
+  return results;
+}
+
+export interface DisputeOpenedEventLogDecodeResult {
+  event: DecodedDisputeOpenedEvent;
+  logIndex: number;
+}
+
+/**
+ * Decodes every `DisputeOpened` log emitted by `trustedContractAddress` in
+ * a set of receipt logs — T-1002's mirror of
+ * `decodeResultSubmittedEventsFromLogs` above.
+ */
+export function decodeDisputeOpenedEventsFromLogs(
+  logs: readonly RawEventLog[],
+  trustedContractAddress: string,
+): DisputeOpenedEventLogDecodeResult[] {
+  const normalizedTrusted = trustedContractAddress.toLowerCase();
+  const results: DisputeOpenedEventLogDecodeResult[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== normalizedTrusted) {
+      continue;
+    }
+    const decoded = decodeDisputeOpenedLog(log);
+    if (decoded) {
+      results.push({ event: decoded, logIndex: log.logIndex });
+    }
+  }
+  return results;
+}
+
+export interface DisputeResolvedEventLogDecodeResult {
+  event: DecodedDisputeResolvedEvent;
+  logIndex: number;
+}
+
+/**
+ * Decodes every `DisputeResolved` log emitted by `trustedContractAddress`
+ * in a set of receipt logs — T-1002's mirror of
+ * `decodeResultSubmittedEventsFromLogs` above.
+ */
+export function decodeDisputeResolvedEventsFromLogs(
+  logs: readonly RawEventLog[],
+  trustedContractAddress: string,
+): DisputeResolvedEventLogDecodeResult[] {
+  const normalizedTrusted = trustedContractAddress.toLowerCase();
+  const results: DisputeResolvedEventLogDecodeResult[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== normalizedTrusted) {
+      continue;
+    }
+    const decoded = decodeDisputeResolvedLog(log);
     if (decoded) {
       results.push({ event: decoded, logIndex: log.logIndex });
     }

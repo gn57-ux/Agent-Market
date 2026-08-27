@@ -36,6 +36,15 @@ export interface TaskRow {
    * module. Both `null` until a task is accepted. */
   acceptedAgentAddress: string | null;
   acceptedAt: Date | null;
+  /** T-1001: `tasks.accepted_agent_id` (0006_add_dispatch_matching_fields.sql)
+   * — was already written atomically with `acceptedAgentAddress` at
+   * accept time, but never read back by this module until now. Settlement
+   * stats (`settlement-stats.ts`) must credit the specific `Agent` record
+   * that accepted this task, not just its wallet address — a single
+   * wallet can own more than one `Agent` (`AcceptanceSection.tsx`'s T-807
+   * fix documents this exact case), so `acceptedAgentAddress` alone cannot
+   * disambiguate which one to credit. */
+  acceptedAgentId: string | null;
   /** T-904: `tasks.submitted_at`/`review_deadline` (0009_create_deliverables.sql,
    * Feature 9) — written verbatim from the on-chain `ResultSubmitted`
    * event's own fields by T-905's event-sync handler (not yet
@@ -62,6 +71,7 @@ interface TaskQueryRow {
   created_at: Date;
   updated_at: Date;
   accepted_agent_address: string | null;
+  accepted_agent_id: string | null;
   accepted_at: Date | null;
   submitted_at: Date | null;
   review_deadline: Date | null;
@@ -84,6 +94,7 @@ function toTaskRow(row: TaskQueryRow, skillTags: string[]): TaskRow {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     acceptedAgentAddress: row.accepted_agent_address,
+    acceptedAgentId: row.accepted_agent_id,
     acceptedAt: row.accepted_at,
     submittedAt: row.submitted_at,
     reviewDeadline: row.review_deadline,
@@ -92,7 +103,7 @@ function toTaskRow(row: TaskQueryRow, skillTags: string[]): TaskRow {
 
 const TASK_COLUMNS = `id, requester_address, category, title, description, budget, token,
                       delivery_deadline, status, funding_tx_hash, idempotency_key,
-                      created_at, updated_at, accepted_agent_address, accepted_at,
+                      created_at, updated_at, accepted_agent_address, accepted_agent_id, accepted_at,
                       submitted_at, review_deadline`;
 
 export interface InsertTaskDraftInput {
@@ -501,11 +512,21 @@ export interface InsertChainTransactionInput {
   taskId: string;
   /** `chain_transactions.purpose` is a free TEXT column (0005_create_tasks.sql:
    * "purpose(FUNDING|ACCEPTANCE|...)" — the full set is deliberately not a
-   * closed DB-level enum), so adding `"ACCEPTANCE"` (T-801) and
-   * `"RESULT_SUBMISSION"` (T-905) here needed no migration — only widening
-   * this call-site type to the three purposes this codebase actually
-   * issues today. */
-  purpose: "FUNDING" | "ACCEPTANCE" | "RESULT_SUBMISSION";
+   * closed DB-level enum), so adding `"ACCEPTANCE"` (T-801),
+   * `"RESULT_SUBMISSION"` (T-905), `"SETTLEMENT"` (T-1001 — covers all
+   * three of `ResultApproved`/`DeliveryTimeoutClaimed`/
+   * `ReviewTimeoutFinalized`, distinguished by `chain_events.event_name`
+   * instead of a separate purpose per event), and `"DISPUTE_OPEN"`/
+   * `"DISPUTE_RESOLVE"` (T-1002) here needed no migration — only widening
+   * this call-site type to the purposes this codebase actually issues
+   * today. */
+  purpose:
+    | "FUNDING"
+    | "ACCEPTANCE"
+    | "RESULT_SUBMISSION"
+    | "SETTLEMENT"
+    | "DISPUTE_OPEN"
+    | "DISPUTE_RESOLVE";
   status: "confirmed";
   confirmations: number;
 }
