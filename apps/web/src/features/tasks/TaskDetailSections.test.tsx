@@ -10,6 +10,7 @@ import * as agentsApi from "../agents/api.js";
 import type { Agent } from "../agents/api.js";
 import * as deliverablesApi from "../deliverables/api.js";
 import { ApiError as DeliverablesApiError } from "../deliverables/api.js";
+import * as disputesApi from "../disputes/api.js";
 
 const SESSION_ADDRESS = "0x9999999999999999999999999999999999999999" as const;
 
@@ -112,14 +113,10 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
 // loudly if a status this suite doesn't know about starts rendering
 // something. OPEN has its own dedicated tests below (CandidateSection vs.
 // AcceptanceSection, T-707/T-802); ACCEPTED/SUBMITTED have their own
-// dedicated SubmissionSection tests below (T-908) — they used to render
-// nothing here, but this Task adds a real section for both.
-const STATUSES_RENDERING_NOTHING: TaskStatus[] = [
-  { kind: "DISPUTED", agent: `0x${"2".repeat(40)}` },
-  { kind: "RELEASED" },
-  { kind: "REFUNDED" },
-  { kind: "CANCELLED" },
-];
+// dedicated SubmissionSection tests below (T-908); RELEASED/REFUNDED have
+// their own dedicated SettlementSection tests below (T-1004); DISPUTED has
+// its own dedicated DisputeSection tests below (T-1005).
+const STATUSES_RENDERING_NOTHING: TaskStatus[] = [{ kind: "CANCELLED" }];
 
 beforeEach(() => {
   mockSession = { status: "signed_out", address: undefined };
@@ -346,11 +343,124 @@ describe("TaskDetailSections", () => {
     expect(screen.queryByRole("button", { name: "提交成果" })).toBeNull();
   });
 
+  // T-1004 (AC-1009): RELEASED/REFUNDED now render SettlementSection's
+  // final-outcome message instead of rendering nothing.
+  it("renders SettlementSection's outcome message for status RELEASED", async () => {
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture({ status: "RELEASED" }));
+    const { findByText } = render(
+      <MemoryRouter>
+        <TaskDetailSections status={{ kind: "RELEASED" }} taskId="task-1" />
+      </MemoryRouter>,
+    );
+    expect(await findByText("结算")).toBeTruthy();
+    expect(await findByText("任务已结算：预算与质押已支付给 Agent。")).toBeTruthy();
+  });
+
+  it("renders SettlementSection's outcome message for status REFUNDED", async () => {
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture({ status: "REFUNDED" }));
+    const { findByText } = render(
+      <MemoryRouter>
+        <TaskDetailSections status={{ kind: "REFUNDED" }} taskId="task-1" />
+      </MemoryRouter>,
+    );
+    expect(await findByText("任务已结算：预算与质押已退还给需求方。")).toBeTruthy();
+  });
+
+  // Codex review (T-1005 round 1, P1): `resolveDispute` moves the task
+  // straight from DISPUTED to RELEASED — `DisputeSection` must stay
+  // mounted here too, or the arbitration outcome (who was supported)
+  // becomes permanently unreadable the instant settlement completes.
+  it("renders DisputeSection's outcome alongside SettlementSection's for status RELEASED when the task was settled via a dispute", async () => {
+    const requesterAddress = "0x1234567890123456789012345678901234567890";
+    mockSession = { status: "signed_in", address: requesterAddress };
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(
+      taskFixture({ status: "RELEASED", requesterAddress }),
+    );
+    vi.spyOn(disputesApi, "getDispute").mockResolvedValue({
+      disputeId: "dispute-1",
+      status: "RESOLVED",
+      reason: "交付成果不符合要求",
+      resolution: "SUPPORT_AGENT",
+      resolvedAt: "2026-01-03T00:00:00.000Z",
+    });
+    const { findByText } = render(
+      <MemoryRouter>
+        <TaskDetailSections status={{ kind: "RELEASED" }} taskId="task-1" />
+      </MemoryRouter>,
+    );
+    expect(await findByText("任务已结算：预算与质押已支付给 Agent。")).toBeTruthy();
+    expect(await findByText(/支持 Agent，预算和质押已放款给 Agent/)).toBeTruthy();
+  });
+
+  // T-1005 (AC-1009's dispute half): SUBMITTED now also renders
+  // DisputeSection alongside SubmissionSection/SettlementSection — the
+  // requester's own "发起争议" trigger.
+  it("renders DisputeSection's trigger for status SUBMITTED when signed in as the requester", async () => {
+    const requesterAddress = "0x1234567890123456789012345678901234567890";
+    mockSession = { status: "signed_in", address: requesterAddress };
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(
+      taskFixture({
+        status: "SUBMITTED",
+        requesterAddress,
+        acceptedAgentAddress: `0x${"2".repeat(40)}`,
+        acceptedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    vi.spyOn(deliverablesApi, "getLatestDeliverable").mockRejectedValue(
+      new DeliverablesApiError(404, "该任务尚无成果提交记录。"),
+    );
+    vi.spyOn(disputesApi, "getDispute").mockRejectedValue(
+      new disputesApi.ApiError(404, "该任务尚无争议记录。"),
+    );
+    const { findByRole } = render(
+      <MemoryRouter>
+        <TaskDetailSections
+          status={{
+            kind: "SUBMITTED",
+            agent: `0x${"2".repeat(40)}`,
+            submittedAt: "2026-01-01T00:00:00.000Z",
+            reviewDeadline: "2026-01-08T00:00:00.000Z",
+          }}
+          taskId="task-1"
+        />
+      </MemoryRouter>,
+    );
+    expect(await findByRole("button", { name: "发起争议" })).toBeTruthy();
+  });
+
+  // T-1005: DISPUTED now renders DisputeSection instead of nothing.
+  it("renders DisputeSection for status DISPUTED — requester's read-only view", async () => {
+    const requesterAddress = "0x1234567890123456789012345678901234567890";
+    mockSession = { status: "signed_in", address: requesterAddress };
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(
+      taskFixture({ status: "DISPUTED", requesterAddress }),
+    );
+    vi.spyOn(disputesApi, "getDispute").mockResolvedValue({
+      disputeId: "dispute-1",
+      status: "OPEN",
+      reason: "交付成果不符合要求",
+      resolution: null,
+      resolvedAt: null,
+    });
+    const { findByText } = render(
+      <MemoryRouter>
+        <TaskDetailSections
+          status={{ kind: "DISPUTED", agent: `0x${"2".repeat(40)}` }}
+          taskId="task-1"
+        />
+      </MemoryRouter>,
+    );
+    expect(await findByText("交付成果不符合要求")).toBeTruthy();
+    expect(await findByText("仲裁处理中，请等待裁决结果。")).toBeTruthy();
+  });
+
   // Exhaustiveness itself (a missing case failing to compile) is a
   // TypeScript-level guarantee enforced by `assertExhaustive` in the
   // component's `default` branch — not something expressible as a runtime
-  // assertion here. The `it.each` blocks above already cover every variant
+  // assertion here. The tests above already cover every variant
   // `TaskStatus` currently has (DRAFT/AWAITING_FUNDING render
-  // FundingSection; ACCEPTED/SUBMITTED render SubmissionSection; the rest
-  // render null).
+  // FundingSection; ACCEPTED renders SubmissionSection + SettlementSection;
+  // SUBMITTED renders SubmissionSection + SettlementSection +
+  // DisputeSection; RELEASED/REFUNDED render SettlementSection; DISPUTED
+  // renders DisputeSection; CANCELLED renders null).
 });
