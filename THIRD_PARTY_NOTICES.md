@@ -10,13 +10,14 @@
 
 ## 运行时依赖
 
-| 名称      | 版本    | 许可证 | 用途                          | 来源                               |
-| --------- | ------- | ------ | ----------------------------- | ---------------------------------- |
-| React     | ^18.3.1 | MIT    | 前端 UI 框架（`apps/web`）    | https://github.com/facebook/react  |
-| React DOM | ^18.3.1 | MIT    | React 浏览器渲染              | https://github.com/facebook/react  |
-| viem      | ^2.19.0 | MIT    | 前端钱包/链交互（`apps/web`） | https://github.com/wevm/viem       |
-| Fastify   | ^4.28.1 | MIT    | 后端 HTTP 框架（`apps/api`）  | https://github.com/fastify/fastify |
-| Zod       | ^3.23.8 | MIT    | 后端/前端运行时校验           | https://github.com/colinhacks/zod  |
+| 名称      | 版本     | 许可证 | 用途                                                              | 来源                               |
+| --------- | -------- | ------ | ----------------------------------------------------------------- | ---------------------------------- |
+| React     | ^18.3.1  | MIT    | 前端 UI 框架（`apps/web`）                                        | https://github.com/facebook/react  |
+| React DOM | ^18.3.1  | MIT    | React 浏览器渲染                                                  | https://github.com/facebook/react  |
+| viem      | ^2.19.0  | MIT    | 前端钱包/链交互（`apps/web`）                                     | https://github.com/wevm/viem       |
+| Fastify   | ^4.28.1  | MIT    | 后端 HTTP 框架（`apps/api`）                                      | https://github.com/fastify/fastify |
+| Zod       | ^3.23.8  | MIT    | 后端/前端运行时校验                                               | https://github.com/colinhacks/zod  |
+| three     | ^0.185.1 | MIT    | 首页 Hero 三维动画渲染引擎（Feature 3 `hero-galaxy`，`apps/web`） | https://github.com/mrdoob/three.js |
 
 ## 开发/构建依赖
 
@@ -36,6 +37,7 @@
 | @types/node                      | ^20.14.10 | MIT        | Node.js 类型定义（`apps/api`）                  | https://github.com/DefinitelyTyped/DefinitelyTyped     |
 | @types/react                     | ^18.3.3   | MIT        | React 类型定义（`apps/web`）                    | https://github.com/DefinitelyTyped/DefinitelyTyped     |
 | @types/react-dom                 | ^18.3.0   | MIT        | React DOM 类型定义（`apps/web`）                | https://github.com/DefinitelyTyped/DefinitelyTyped     |
+| @types/three                     | ^0.185.4  | MIT        | three 类型定义（`apps/web`）                    | https://github.com/DefinitelyTyped/DefinitelyTyped     |
 
 ## Go 依赖（`services/dispatch`）
 
@@ -43,4 +45,6 @@
 
 ## UI 组件库 / 图标 / Three.js 资源
 
-尚未引入。Feature 3（首页 Hero）、Feature 6（任务市场/详情等页面）落地时，在此补充实际选用的公开组件库、图标库和 Three.js addon/shader/纹理/模型的具体条目，并确认许可证允许本项目的课程展示与修改分发用途。
+Feature 3（首页 Hero，`apps/web/src/features/hero-galaxy/`）已完整落地（T-301–T-305）：核查确认场景（任务核心、Agent 节点网络、连线、扫描波、质押环、结算粒子）完全基于 `three` 核心包的程序化 `Geometry`/`Material`（`BoxGeometry`/`SphereGeometry`/`RingGeometry`/`LineBasicMaterial` 等内置类型）构建，未引入任何 Three.js addon/examples（如 `OrbitControls`、`GLTFLoader`、`EffectComposer`）、外部 shader、纹理贴图或 3D 模型文件；`StaticFallback.tsx` 静态降级构图同样为纯 CSS/DOM，未引入图标库。除运行时依赖表中已记录的 `three` 与开发/构建依赖表中已记录的 `@types/three` 外，本 Feature 无其他第三方资源需要记录（核查方式：审查 `hero-galaxy` 全部源文件的 import 语句与资源加载调用，确认无 addon/贴图/模型/图标库引用）。
+
+Feature 6（任务市场/详情等页面）落地时，若引入公开组件库、图标库或额外 Three.js 资源，在此补充具体条目，并确认许可证允许本项目的课程展示与修改分发用途。

@@ -14,28 +14,38 @@ type LoadState =
   | { status: "error"; message: string };
 
 /**
- * `GET /tasks`'s response (`toTaskDraftJson`, apps/api's routes.ts) only
- * serializes `tasks` table columns — it does not yet carry the extra fields
- * `@agent-market/domain`'s `TaskStatus` union requires for `ACCEPTED`
- * (`agent`) or `SUBMITTED`/`DISPUTED` (`agent`, plus `submittedAt`/
- * `reviewDeadline` for SUBMITTED). Those fields live in Feature 7/8/9's own
- * tables, not yet joined into this list response. Neither `StatusBadge` nor
- * `TaskCard` actually reads them today — both switch on `status.kind` only
- * — so this placeholder satisfies `TaskStatus`'s type contract without
- * rendering anything fabricated. Flagged explicitly (rather than silently
- * worked around) so a later Feature that DOES need real values here knows
- * `GET /tasks` must be extended first.
+ * `GET /tasks`'s response (`toTaskDraftJson`, apps/api's routes.ts) still
+ * does not carry every extra field `@agent-market/domain`'s `TaskStatus`
+ * union requires for `SUBMITTED` (`submittedAt`/`reviewDeadline`) — those
+ * live in Feature 9's own tables, not yet joined into this list response.
+ * `ACCEPTED`/`DISPUTED`'s `agent` field WAS this placeholder too, until
+ * T-805 extended `GET /tasks` to serialize `acceptedAgentAddress` (see
+ * `toTaskStatus` below, which now takes that field as real input instead of
+ * always substituting this constant for it). Neither `StatusBadge` nor
+ * `TaskCard` reads `submittedAt`/`reviewDeadline` today — both switch on
+ * `status.kind` only — so this placeholder still satisfies `TaskStatus`'s
+ * type contract there without rendering anything fabricated.
  */
 const STATUS_FIELD_NOT_YET_EXPOSED: HexAddress = "0x0000000000000000000000000000000000000000";
 
 /**
- * Exported for reuse by `TaskMarketPage` (T-607): both pages render the same
- * `TaskRecord.status` string through the same `TaskCard`/`StatusBadge`
- * contract, so this adapter must have exactly one implementation — a second,
- * independently-written copy could silently drift (e.g. a status added here
- * but not there) with no compiler check to catch it.
+ * Exported for reuse by `TaskMarketPage` (T-607) and `MyAcceptedTasksPage`
+ * (T-805): every page rendering `TaskRecord.status` through the same
+ * `TaskCard`/`StatusBadge` contract must share this one implementation — a
+ * second, independently-written copy could silently drift (e.g. a status
+ * added here but not there) with no compiler check to catch it.
+ *
+ * `acceptedAgentAddress` is a separate parameter (not folded into the `Pick`
+ * below) so call sites are forced to pass whatever `GET /tasks` actually
+ * returned for it — `record.acceptedAgentAddress ?? STATUS_FIELD_NOT_YET_EXPOSED`
+ * only falls back to the placeholder for a task that is genuinely not yet
+ * accepted (or a caller that hasn't been updated to request the field),
+ * never silently drops a real value.
  */
-export function toTaskStatus(record: Pick<TaskRecord, "status" | "updatedAt">): TaskStatus {
+export function toTaskStatus(
+  record: Pick<TaskRecord, "status" | "updatedAt">,
+  acceptedAgentAddress: HexAddress | null,
+): TaskStatus {
   switch (record.status) {
     case "DRAFT":
       return { kind: "DRAFT" };
@@ -44,16 +54,16 @@ export function toTaskStatus(record: Pick<TaskRecord, "status" | "updatedAt">): 
     case "OPEN":
       return { kind: "OPEN" };
     case "ACCEPTED":
-      return { kind: "ACCEPTED", agent: STATUS_FIELD_NOT_YET_EXPOSED };
+      return { kind: "ACCEPTED", agent: acceptedAgentAddress ?? STATUS_FIELD_NOT_YET_EXPOSED };
     case "SUBMITTED":
       return {
         kind: "SUBMITTED",
-        agent: STATUS_FIELD_NOT_YET_EXPOSED,
+        agent: acceptedAgentAddress ?? STATUS_FIELD_NOT_YET_EXPOSED,
         submittedAt: record.updatedAt,
         reviewDeadline: record.updatedAt,
       };
     case "DISPUTED":
-      return { kind: "DISPUTED", agent: STATUS_FIELD_NOT_YET_EXPOSED };
+      return { kind: "DISPUTED", agent: acceptedAgentAddress ?? STATUS_FIELD_NOT_YET_EXPOSED };
     case "RELEASED":
       return { kind: "RELEASED" };
     case "REFUNDED":
@@ -184,7 +194,16 @@ export function MyPublishedTasksPage() {
                         taskId={task.taskId}
                         title={task.title}
                         budgetDisplay={`${formatAmount(BigInt(task.budget))} YD`}
-                        status={toTaskStatus(task)}
+                        status={toTaskStatus(
+                          task,
+                          // `tasks.accepted_agent_address` is CHECK-constrained to
+                          // `^0x[0-9a-f]{40}$` at the database layer
+                          // (0006_add_dispatch_matching_fields.sql) — this cast
+                          // trusts that constraint rather than re-validating the
+                          // shape client-side, matching SessionProvider.tsx's and
+                          // WalletProvider.tsx's identical trust-the-server casts.
+                          task.acceptedAgentAddress as HexAddress | null,
+                        )}
                       />
                     </Link>
                   ))}

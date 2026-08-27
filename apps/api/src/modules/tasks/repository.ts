@@ -30,6 +30,30 @@ export interface TaskRow {
   skillTags: string[];
   createdAt: Date;
   updatedAt: Date;
+  /** T-805: `tasks.accepted_agent_address`/`accepted_at` (0006_add_dispatch_
+   * matching_fields.sql) — written atomically with the OPEN→ACCEPTED
+   * transition (T-801/service.ts) but not previously read back by this
+   * module. Both `null` until a task is accepted. */
+  acceptedAgentAddress: string | null;
+  acceptedAt: Date | null;
+  /** T-1001: `tasks.accepted_agent_id` (0006_add_dispatch_matching_fields.sql)
+   * — was already written atomically with `acceptedAgentAddress` at
+   * accept time, but never read back by this module until now. Settlement
+   * stats (`settlement-stats.ts`) must credit the specific `Agent` record
+   * that accepted this task, not just its wallet address — a single
+   * wallet can own more than one `Agent` (`AcceptanceSection.tsx`'s T-807
+   * fix documents this exact case), so `acceptedAgentAddress` alone cannot
+   * disambiguate which one to credit. */
+  acceptedAgentId: string | null;
+  /** T-904: `tasks.submitted_at`/`review_deadline` (0009_create_deliverables.sql,
+   * Feature 9) — written verbatim from the on-chain `ResultSubmitted`
+   * event's own fields by T-905's event-sync handler (not yet
+   * implemented as of T-904; both stay `null` until then). Read back here
+   * so `GET /tasks/:taskId/deliverables/latest` (deliverables/routes.ts)
+   * can include them without a second query — this module still owns the
+   * one column list every `tasks` read goes through. */
+  submittedAt: Date | null;
+  reviewDeadline: Date | null;
 }
 
 interface TaskQueryRow {
@@ -46,6 +70,11 @@ interface TaskQueryRow {
   idempotency_key: string | null;
   created_at: Date;
   updated_at: Date;
+  accepted_agent_address: string | null;
+  accepted_agent_id: string | null;
+  accepted_at: Date | null;
+  submitted_at: Date | null;
+  review_deadline: Date | null;
 }
 
 function toTaskRow(row: TaskQueryRow, skillTags: string[]): TaskRow {
@@ -64,12 +93,18 @@ function toTaskRow(row: TaskQueryRow, skillTags: string[]): TaskRow {
     skillTags,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    acceptedAgentAddress: row.accepted_agent_address,
+    acceptedAgentId: row.accepted_agent_id,
+    acceptedAt: row.accepted_at,
+    submittedAt: row.submitted_at,
+    reviewDeadline: row.review_deadline,
   };
 }
 
 const TASK_COLUMNS = `id, requester_address, category, title, description, budget, token,
                       delivery_deadline, status, funding_tx_hash, idempotency_key,
-                      created_at, updated_at`;
+                      created_at, updated_at, accepted_agent_address, accepted_agent_id, accepted_at,
+                      submitted_at, review_deadline`;
 
 export interface InsertTaskDraftInput {
   requesterAddress: string;
@@ -475,7 +510,23 @@ export interface InsertChainTransactionInput {
   txHash: string;
   chainId: number;
   taskId: string;
-  purpose: "FUNDING";
+  /** `chain_transactions.purpose` is a free TEXT column (0005_create_tasks.sql:
+   * "purpose(FUNDING|ACCEPTANCE|...)" — the full set is deliberately not a
+   * closed DB-level enum), so adding `"ACCEPTANCE"` (T-801),
+   * `"RESULT_SUBMISSION"` (T-905), `"SETTLEMENT"` (T-1001 — covers all
+   * three of `ResultApproved`/`DeliveryTimeoutClaimed`/
+   * `ReviewTimeoutFinalized`, distinguished by `chain_events.event_name`
+   * instead of a separate purpose per event), and `"DISPUTE_OPEN"`/
+   * `"DISPUTE_RESOLVE"` (T-1002) here needed no migration — only widening
+   * this call-site type to the purposes this codebase actually issues
+   * today. */
+  purpose:
+    | "FUNDING"
+    | "ACCEPTANCE"
+    | "RESULT_SUBMISSION"
+    | "SETTLEMENT"
+    | "DISPUTE_OPEN"
+    | "DISPUTE_RESOLVE";
   status: "confirmed";
   confirmations: number;
 }
@@ -556,6 +607,15 @@ export interface InsertChainEventInput {
  * log identity (e.g. a retried request that reaches this point again due
  * to a network blip after the first COMMIT) silently no-ops instead of
  * violating the table's UNIQUE constraint or creating a duplicate row.
+ *
+ * Every row this function ever writes is, by construction, ALREADY final
+ * (T-905 human N4 follow-up, round-cap already exhausted): every call site
+ * (`verifyFunding`/`verifyAcceptance`/`verifyResultSubmission`) only
+ * reaches this insert after its own confirmations check already passed —
+ * there is no "unconfirmed chain_events row" for any event type, which is
+ * why reorg-rollback for `ResultSubmitted` operates on a separate,
+ * dedicated `pending_result_submissions` table (repository.ts, this same
+ * file) instead of on this one.
  */
 export async function insertChainEvent(
   client: Queryable,
@@ -600,6 +660,12 @@ const PUBLIC_MARKET_STATUSES: readonly TaskStatusValue[] = [
 
 export interface ListTasksFilter {
   requester?: string;
+  /** T-805: filters `tasks.accepted_agent_address` — same public-filter
+   * status as `category`/`skillTag` (see `listTasksQuerySchema`'s doc
+   * comment, schema.ts): no `restrictToPublicStatuses`-style authorization
+   * gate needed, an accepted agent's address is already visible on every
+   * published task. */
+  acceptedBy?: string;
   status?: TaskStatusValue;
   category?: string;
   skillTag?: string;
@@ -676,6 +742,7 @@ export async function listTasks(
     filter.category ?? null,
     filter.skillTag ?? null,
     filter.restrictToPublicStatuses ? PUBLIC_MARKET_STATUSES : null,
+    filter.acceptedBy ?? null,
   ];
   const filterWhere = `
     WHERE ($1::text IS NULL OR t.requester_address = $1)
@@ -688,13 +755,14 @@ export async function listTasks(
         )
       )
       AND ($5::text[] IS NULL OR t.status = ANY($5))
+      AND ($6::text IS NULL OR t.accepted_agent_address = $6)
   `;
 
   const [itemsResult, countResult] = await Promise.all([
     pool.query<TaskListQueryRow>(
       `SELECT t.id, t.requester_address, t.category, t.title, t.description, t.budget, t.token,
               t.delivery_deadline, t.status, t.funding_tx_hash, t.idempotency_key,
-              t.created_at, t.updated_at,
+              t.created_at, t.updated_at, t.accepted_agent_address, t.accepted_at,
               COALESCE(
                 array_agg(s.skill_tag) FILTER (WHERE s.skill_tag IS NOT NULL),
                 '{}'
@@ -704,7 +772,7 @@ export async function listTasks(
        ${filterWhere}
        GROUP BY t.id
        ORDER BY t.created_at DESC, t.id DESC
-       LIMIT $6 OFFSET $7`,
+       LIMIT $7 OFFSET $8`,
       [...filterParams, filter.pageSize, offset],
     ),
     pool.query<{ total: string }>(
@@ -776,14 +844,244 @@ export interface ChainTransactionRow {
  * response's `confirmations` figure is recovered without re-querying the
  * chain a second time.
  */
+// ---------------------------------------------------------------------
+// T-705: candidate-snapshot assembly support for POST /tasks/:taskId/match.
+// ---------------------------------------------------------------------
+
+/** The `tasks.status` values that count as "this Agent currently occupies a
+ * capacity slot" — F-711's concurrent-capacity scope, owned by `tasks`
+ * (the table that actually knows what each status means), not duplicated
+ * into `modules/dispatch` (T-705 capsule: "这是 tasks 表自己的领域知识... dispatch
+ * 模块只调用它，不复制状态集合"). Matches
+ * dispatch-matching-migration.integration.test.ts's own hardcoded
+ * `IN ('ACCEPTED','SUBMITTED','DISPUTED')` list (T-700), which this
+ * function is the real implementation of. */
+const OCCUPYING_STATUSES: readonly TaskStatusValue[] = ["ACCEPTED", "SUBMITTED", "DISPUTED"];
+
+/**
+ * T-705: counts, per Agent, how many `tasks` rows are currently occupying
+ * one of that Agent's capacity slots (`accepted_agent_id = ANY(agentIds)
+ * AND status IN (...)`) — `assembleCandidateSnapshots` (dispatch/repository.ts)
+ * is this function's only caller, feeding the result into each candidate
+ * snapshot's `activeTaskCount`.
+ *
+ * `agentIds` empty → returns an empty Map without querying at all: `= ANY('{}')`
+ * is a valid but wasted round-trip for a case the caller (an empty candidate
+ * pool) already knows produces no rows.
+ */
+export async function countActiveTasksByAgentIds(
+  client: Queryable,
+  agentIds: string[],
+): Promise<Map<string, number>> {
+  if (agentIds.length === 0) {
+    return new Map();
+  }
+  const { rows } = await client.query<{ accepted_agent_id: string; count: string }>(
+    `SELECT accepted_agent_id, COUNT(*) AS count
+     FROM tasks
+     WHERE accepted_agent_id = ANY($1) AND status = ANY($2)
+     GROUP BY accepted_agent_id`,
+    [agentIds, OCCUPYING_STATUSES],
+  );
+  return new Map(rows.map((row) => [row.accepted_agent_id, Number(row.count)]));
+}
+
+export interface AcceptedTaskForPolling {
+  id: string;
+  acceptedAgentAddress: string;
+}
+
+/**
+ * T-905's background poller (result-submission-poller.ts) needs exactly
+ * these two fields for every currently-`ACCEPTED` task: `id` (to derive
+ * the on-chain task id and to call `verifyResultSubmission`) and
+ * `acceptedAgentAddress` (the poller has no authenticated "session" — it
+ * passes this already-known value as `verifyResultSubmission`'s
+ * `sessionAddress` parameter, which the contract's own `task.agent ==
+ * msg.sender` enforcement guarantees will match whatever a real
+ * `ResultSubmitted` event's `agent` field decodes to). `acceptedAgentAddress`
+ * is non-null by construction: `status = 'ACCEPTED'` is only ever reached
+ * via `verifyAcceptance`'s transition, which always sets it in the same
+ * UPDATE (design.md's "四者原子一致").
+ */
+export async function listAcceptedTasksForPolling(
+  pool: Queryable,
+): Promise<AcceptedTaskForPolling[]> {
+  const { rows } = await pool.query<{ id: string; accepted_agent_address: string }>(
+    `SELECT id, accepted_agent_address FROM tasks WHERE status = 'ACCEPTED'`,
+  );
+  return rows.map((row) => ({ id: row.id, acceptedAgentAddress: row.accepted_agent_address }));
+}
+
+export interface PendingResultSubmissionRow {
+  id: string;
+  taskId: string;
+  chainId: number;
+  transactionHash: string;
+  logIndex: number;
+  blockHash: string;
+  blockNumber: bigint;
+  agentAddress: string;
+}
+
+export interface InsertPendingResultSubmissionInput {
+  taskId: string;
+  chainId: number;
+  transactionHash: string;
+  logIndex: number;
+  blockHash: string;
+  blockNumber: bigint;
+  agentAddress: string;
+}
+
+/**
+ * Human N4 follow-up (T-905, human review round B — pure human finding, no
+ * 3rd Codex call, round cap already exhausted): round-A's reorg-rollback
+ * design operated on `chain_events`, but `verifyResultSubmission` only ever
+ * writes a `chain_events`/`RESULT_SUBMISSION` row AFTER its own internal
+ * `confirmations >= resolveRequiredConfirmations()` check already passed —
+ * so every such row is, by construction, already final, and a "roll back an
+ * unconfirmed chain_events projection" check can never have anything to do
+ * (dead code; see this repository's own git history / the evidence packet
+ * for the concrete proof this was actually never reachable).
+ *
+ * This table is the fix: a genuinely separate, dedicated place to hold a
+ * *discovered-but-not-yet-final* `ResultSubmitted` log — `tasks.status`
+ * never moves off `ACCEPTED` because of a row here. Only once a pending row
+ * reaches `resolveRequiredConfirmations()` does the poller call the
+ * already-reviewed `verifyResultSubmission` path to actually promote it,
+ * exactly like today's HTTP-triggered or forward-scan-triggered call — this
+ * table adds a waiting room in front of that path, it does not change what
+ * "confirmed" means or how a task is ever promoted.
+ *
+ * `ON CONFLICT (chain_id, transaction_hash, log_index) DO NOTHING` makes
+ * the forward-scan's insert naturally idempotent — the same log rediscovered
+ * on a later tick (this poller always re-scans the full range, per N4 round
+ * 2) is simply a no-op here, not a duplicate pending row.
+ *
+ * Only carries what the promotion pass actually reads: identity
+ * (`taskId`/`chainId`/`transactionHash`/`logIndex`), what a reorg check
+ * needs (`blockHash`/`blockNumber`), and what a poller-discovered
+ * `verifyResultSubmission` call needs in place of a real session
+ * (`agentAddress`). Round B originally also stored the decoded
+ * `resultHash`/`submittedAt`/`reviewDeadline` here, but nothing in the
+ * promotion path ever read them — `verifyResultSubmission` always
+ * independently re-fetches the receipt and re-decodes the event itself
+ * before trusting any of those fields (this table is a lead to
+ * investigate, never itself the source of truth for on-chain data) — so
+ * they were dropped as unused rather than kept "for later" (CLAUDE.md
+ * 原则 4: no speculative fields).
+ *
+ * Returns whether a row was actually inserted (`true`) vs. a no-op
+ * conflict (`false`) — human N4 follow-up (round B, P2): the caller needs
+ * this to count only genuinely NEW pending rows, not every rediscovery of
+ * an already-pending log on a later tick.
+ */
+export async function insertPendingResultSubmission(
+  pool: Queryable,
+  input: InsertPendingResultSubmissionInput,
+): Promise<boolean> {
+  const result = await pool.query(
+    `INSERT INTO pending_result_submissions
+       (task_id, chain_id, transaction_hash, log_index, block_hash, block_number, agent_address)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (chain_id, transaction_hash, log_index) DO NOTHING`,
+    [
+      input.taskId,
+      input.chainId,
+      input.transactionHash,
+      input.logIndex,
+      input.blockHash,
+      input.blockNumber.toString(),
+      input.agentAddress,
+    ],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Every currently-pending row for a chain — the promotion pass (poller)
+ * evaluates each one every tick: not yet at `resolveRequiredConfirmations()`
+ * → reorg-checked via `event-sync.ts`'s `checkProjectionForReorg` (the one
+ * reorg rule this whole codebase uses); at or past it → promoted via
+ * `verifyResultSubmission`. No `tasks.status` filter needed here (unlike
+ * the old, dead `chain_events`-based query) — a pending row's very
+ * existence already means the task hasn't been promoted yet; once
+ * `verifyResultSubmission` succeeds, the caller deletes this row (see
+ * `deletePendingResultSubmission`), so a promoted task simply has no row
+ * left to reconsider.
+ */
+export async function listPendingResultSubmissions(
+  pool: Queryable,
+  chainId: number,
+): Promise<PendingResultSubmissionRow[]> {
+  const { rows } = await pool.query<{
+    id: string;
+    task_id: string;
+    chain_id: number;
+    transaction_hash: string;
+    log_index: number;
+    block_hash: string;
+    block_number: string;
+    agent_address: string;
+  }>(
+    `SELECT id, task_id, chain_id, transaction_hash, log_index, block_hash, block_number, agent_address
+     FROM pending_result_submissions
+     WHERE chain_id = $1`,
+    [chainId],
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    taskId: row.task_id,
+    chainId: row.chain_id,
+    transactionHash: row.transaction_hash,
+    logIndex: row.log_index,
+    blockHash: row.block_hash,
+    blockNumber: BigInt(row.block_number),
+    agentAddress: row.agent_address,
+  }));
+}
+
+/**
+ * Removes a pending row after it is no longer "pending" for either reason:
+ * successfully promoted (the task is now `SUBMITTED` via
+ * `verifyResultSubmission`, so this row's job is done), or reorged away
+ * (the log it was discovered from is no longer canonical — nothing to
+ * promote; a future tick's forward scan will naturally insert a fresh
+ * pending row for whatever canonical log, if any, replaces it). Deleting a
+ * single row by its own `id` is a single-statement, non-transactional
+ * operation — unlike the old design, there is no `tasks` status change to
+ * keep atomic with this deletion, since a pending row's existence never
+ * implied any change to `tasks` in the first place.
+ */
+export async function deletePendingResultSubmission(pool: Queryable, id: string): Promise<void> {
+  await pool.query(`DELETE FROM pending_result_submissions WHERE id = $1`, [id]);
+}
+
+/**
+ * `purpose` is optional and, when passed, narrows the lookup to rows
+ * recorded for that purpose (Codex review, T-801 round 1, P2): without it,
+ * a task's own `FUNDING` transaction hash would satisfy a caller's
+ * `(chainId, txHash, taskId)` replay check meant for a DIFFERENT purpose
+ * (e.g. `verifyAcceptance`'s idempotent-replay lookup), since both rows
+ * share the same `taskId` — `chain_transactions.purpose` is the only column
+ * that actually distinguishes them. The two `FUNDING` call sites
+ * (`verifyFunding`) don't need this: they already gate on
+ * `task.fundingTxHash === normalizedTxHash` first, so they can only ever
+ * reach a `FUNDING` row.
+ */
 export async function getChainTransactionByHash(
   pool: Queryable,
   chainId: number,
   txHash: string,
+  purpose?: string,
 ): Promise<ChainTransactionRow | null> {
   const { rows } = await pool.query<{ task_id: string; confirmations: number; status: string }>(
-    `SELECT task_id, confirmations, status FROM chain_transactions WHERE chain_id = $1 AND tx_hash = $2`,
-    [chainId, txHash.toLowerCase()],
+    purpose
+      ? `SELECT task_id, confirmations, status FROM chain_transactions
+         WHERE chain_id = $1 AND tx_hash = $2 AND purpose = $3`
+      : `SELECT task_id, confirmations, status FROM chain_transactions WHERE chain_id = $1 AND tx_hash = $2`,
+    purpose ? [chainId, txHash.toLowerCase(), purpose] : [chainId, txHash.toLowerCase()],
   );
   const row = rows[0];
   if (!row) {

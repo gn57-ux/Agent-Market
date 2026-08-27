@@ -11,7 +11,17 @@
 
 const DEFAULT_BASE_URL = "http://localhost:3001";
 
-function apiBaseUrl(): string {
+/**
+ * Exported (not just used internally by `apiFetch`) for the rare case a
+ * caller needs a plain URL rather than a `fetch` call — e.g. Feature 9's
+ * `SubmissionSection` linking directly to
+ * `GET /tasks/:taskId/deliverables/latest/file` as a real `<a href>`
+ * (browser-native download/redirect, not something `apiFetch`'s
+ * JSON-response handling is built for). The session cookie
+ * (`sameSite: "lax"`, auth/routes.ts) is still sent on that top-level
+ * navigation without any extra wiring here.
+ */
+export function apiBaseUrl(): string {
   return import.meta.env.VITE_API_BASE_URL ?? DEFAULT_BASE_URL;
 }
 
@@ -61,7 +71,14 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     // callers. The caller's own `init.headers` still wins over this
     // default (spread last), so an explicit override is unaffected.
     headers: {
-      ...(init?.body != null ? { "Content-Type": "application/json" } : {}),
+      // `FormData` bodies (Feature 9's multipart deliverable upload) must
+      // NOT get this default — the browser sets its own
+      // `multipart/form-data; boundary=...` Content-Type when the body is
+      // a `FormData` instance, and a `fetch` call that already specifies a
+      // conflicting Content-Type breaks that boundary-setting entirely.
+      ...(init?.body != null && !(init.body instanceof FormData)
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...init?.headers,
     },
   });

@@ -176,6 +176,16 @@ const REQUESTER_ADDRESS_SCHEMA = z
  */
 export const listTasksQuerySchema = z.object({
   requester: REQUESTER_ADDRESS_SCHEMA.optional(),
+  // T-805: "我的接单" list — filters `tasks.accepted_agent_address` (T-801
+  // already writes this column atomically with the OPEN→ACCEPTED
+  // transition). Reuses REQUESTER_ADDRESS_SCHEMA rather than defining a
+  // second identical address-format regex (this file's own single-source-
+  // of-validation-rule convention, see the file-header comment). Unlike
+  // `requester`, this needs no additional "is it really you" authorization
+  // check in service.ts — an accepted agent's address is already public on
+  // every published task (`GET /tasks/:taskId`), so filtering by it is no
+  // more sensitive than filtering by `category`/`skillTag`.
+  acceptedBy: REQUESTER_ADDRESS_SCHEMA.optional(),
   status: z
     .enum([
       "DRAFT",
