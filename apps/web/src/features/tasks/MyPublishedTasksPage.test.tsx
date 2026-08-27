@@ -276,4 +276,27 @@ describe("MyPublishedTasksPage", () => {
     expect(prevButton.disabled).toBe(false);
     expect(screen.getByText("第 2 页 / 共 5 条")).toBeTruthy();
   });
+
+  // T-1006 (AC-1009: "列表状态与详情页一致"): DISPUTED/RELEASED/REFUNDED
+  // already flow through the same `toTaskStatus`/`TaskCard`/`StatusBadge`
+  // pipeline every other status does — this is the automated evidence that
+  // the list actually renders them correctly, not just an assumption.
+  it("renders the correct status label for DISPUTED, RELEASED, and REFUNDED tasks (list/detail consistency, AC-1009)", async () => {
+    vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+      items: [
+        taskFixture({ taskId: "task-disputed", title: "Disputed task", status: "DISPUTED" }),
+        taskFixture({ taskId: "task-released", title: "Released task", status: "RELEASED" }),
+        taskFixture({ taskId: "task-refunded", title: "Refunded task", status: "REFUNDED" }),
+      ],
+      total: 3,
+      page: 1,
+      pageSize: 20,
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("争议中")).toBeTruthy();
+    expect(screen.getByText("已放款")).toBeTruthy();
+    expect(screen.getByText("已退款")).toBeTruthy();
+  });
 });

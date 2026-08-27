@@ -202,6 +202,30 @@ describe("MyAcceptedTasksPage", () => {
     expect(link?.getAttribute("href")).toBe("/tasks/task-1");
   });
 
+  // T-1006 (AC-1009: "列表状态与详情页一致"): DISPUTED/RELEASED/REFUNDED
+  // already flow through the same `toTaskStatus`/`TaskCard`/`StatusBadge`
+  // pipeline (shared with `MyPublishedTasksPage` via the exported
+  // `toTaskStatus`) every other status does — this is the automated
+  // evidence that the accepted-tasks list actually renders them correctly.
+  it("renders the correct status label for DISPUTED, RELEASED, and REFUNDED tasks (list/detail consistency, AC-1009)", async () => {
+    vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
+      items: [
+        taskFixture({ taskId: "task-disputed", title: "Disputed task", status: "DISPUTED" }),
+        taskFixture({ taskId: "task-released", title: "Released task", status: "RELEASED" }),
+        taskFixture({ taskId: "task-refunded", title: "Refunded task", status: "REFUNDED" }),
+      ],
+      total: 3,
+      page: 1,
+      pageSize: 20,
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("争议中")).toBeTruthy();
+    expect(screen.getByText("已放款")).toBeTruthy();
+    expect(screen.getByText("已退款")).toBeTruthy();
+  });
+
   it("paginates past the backend's default 20-item page", async () => {
     const listTasksSpy = vi.spyOn(tasksApi, "listTasks").mockResolvedValue({
       items: [taskFixture({ taskId: "task-1" })],
