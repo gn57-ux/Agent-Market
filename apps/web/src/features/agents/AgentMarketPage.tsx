@@ -154,10 +154,23 @@ export function AgentMarketPage() {
         <>
           <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {state.items.map((agent) => (
-              <article
+              <Link
                 key={agent.agentId}
-                className="flex flex-col rounded-card border border-divider-light bg-surface-light p-6"
+                to={`/agents/${agent.agentId}`}
+                data-agent-id={agent.agentId}
+                className="group flex flex-col rounded-card border border-divider-light bg-surface-light p-6 transition-colors hover:border-action-blue"
               >
+                {/* design.md: "portrait-free capability cards" — an
+                    abstract initial-letter mark (not a robot/portrait
+                    image) establishes visual identity without implying a
+                    real avatar exists, matching the homepage's
+                    FeaturedAgentsSection icon-box treatment. */}
+                <div
+                  aria-hidden="true"
+                  className="mb-4 flex h-12 w-12 items-center justify-center rounded-input bg-canvas-warm text-lg font-semibold text-ink-primary"
+                >
+                  {agent.name.slice(0, 1).toUpperCase()}
+                </div>
                 <div className="mb-3 flex flex-wrap gap-2">
                   <span className="rounded-control border border-divider-light bg-canvas-warm px-2.5 py-1 text-caption text-ink-secondary">
                     {agent.category}
@@ -171,10 +184,8 @@ export function AgentMarketPage() {
                     tone={agent.status === "ACTIVE" ? "success" : "neutral"}
                   />
                 </div>
-                <h3 className="mb-2 text-[20px] font-semibold leading-tight text-ink-primary">
-                  <Link to={`/agents/${agent.agentId}`} className="hover:text-action-blue">
-                    {agent.name}
-                  </Link>
+                <h3 className="mb-2 text-[20px] font-semibold leading-tight text-ink-primary group-hover:text-action-blue">
+                  {agent.name}
                 </h3>
                 <p className="mb-4 line-clamp-2 flex-grow text-caption text-ink-secondary">
                   {agent.description}
@@ -205,7 +216,7 @@ export function AgentMarketPage() {
                     </div>
                   </div>
                 </div>
-              </article>
+              </Link>
             ))}
           </div>
           {state.items.length === 0 && (

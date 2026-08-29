@@ -28,6 +28,7 @@ function placeholderAddress(digit: string): HexAddress {
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: placeholderAddress("2"),
     ydToken: placeholderAddress("1"),
@@ -69,6 +70,7 @@ function mockWalletContext(generationBox: { current: number }): WalletContextVal
     signMessage: vi.fn(),
     getWalletClient: vi.fn(),
     getPublicClient: vi.fn(),
+    refreshBalance: vi.fn(),
   };
 }
 

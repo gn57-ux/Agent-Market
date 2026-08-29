@@ -277,4 +277,55 @@ runIfOptedIn("POST /auth/nonce, /auth/verify (integration, AC-402)", () => {
     }
     expect(String(devResponse.headers["set-cookie"])).not.toContain("Secure");
   });
+
+  it("GET /auth/session returns the address for a still-valid session cookie (Task E: whoami restore)", async () => {
+    const { nonce, issuedAt, expiresAt } = await requestNonce();
+    const message = buildSignInMessage({
+      domain: "localhost",
+      address: account.address,
+      nonce,
+      issuedAt: new Date(issuedAt),
+      expiresAt: new Date(expiresAt),
+    });
+    const signature = await account.signMessage({ message });
+    const verify = await app.inject({
+      method: "POST",
+      url: "/auth/verify",
+      payload: { address: account.address, signature, nonce },
+    });
+    const cookie = String(verify.headers["set-cookie"]);
+
+    const whoami = await app.inject({ method: "GET", url: "/auth/session", headers: { cookie } });
+
+    expect(whoami.statusCode).toBe(200);
+    expect(whoami.json().address).toBe(account.address.toLowerCase());
+  });
+
+  it("GET /auth/session returns 401 with no cookie at all", async () => {
+    const response = await app.inject({ method: "GET", url: "/auth/session" });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("GET /auth/session returns 401 after the session has been logged out (revoked cookie is not silently trusted)", async () => {
+    const { nonce, issuedAt, expiresAt } = await requestNonce();
+    const message = buildSignInMessage({
+      domain: "localhost",
+      address: account.address,
+      nonce,
+      issuedAt: new Date(issuedAt),
+      expiresAt: new Date(expiresAt),
+    });
+    const signature = await account.signMessage({ message });
+    const verify = await app.inject({
+      method: "POST",
+      url: "/auth/verify",
+      payload: { address: account.address, signature, nonce },
+    });
+    const cookie = String(verify.headers["set-cookie"]);
+
+    await app.inject({ method: "POST", url: "/auth/logout", headers: { cookie } });
+    const whoami = await app.inject({ method: "GET", url: "/auth/session", headers: { cookie } });
+
+    expect(whoami.statusCode).toBe(401);
+  });
 });

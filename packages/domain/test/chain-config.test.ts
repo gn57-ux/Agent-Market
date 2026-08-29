@@ -42,6 +42,16 @@ describe("resolveChainConfig", () => {
     expect(config.name).toBe("Chain 999999");
   });
 
+  // Task B: the faucet claim UI gates itself on `isTestnet` — a fail-safe
+  // default matters here (an unrecognized chain could be a real, undeployed
+  // mainnet this table hasn't been updated for, not just "unknown but
+  // surely fine").
+  it("marks both known chains as testnets, and an unrecognized chainId as NOT a testnet", () => {
+    expect(resolveChainConfig(LOCAL_ENV).isTestnet).toBe(true);
+    expect(resolveChainConfig(TESTNET_ENV).isTestnet).toBe(true);
+    expect(resolveChainConfig({ ...LOCAL_ENV, CHAIN_ID: "999999" }).isTestnet).toBe(false);
+  });
+
   it("rejects missing CHAIN_ID", () => {
     expect(() => resolveChainConfig({})).toThrow(/CHAIN_ID is required/);
   });

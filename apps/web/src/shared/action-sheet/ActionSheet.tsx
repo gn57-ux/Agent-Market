@@ -18,6 +18,15 @@ const BOTTOM_SHEET_STYLE: CSSProperties = {
   borderRadius: "12px 12px 0 0",
 };
 
+/** design.md's `cardLight` ("warm-white surface, subtle one-pixel divider,
+ * no decorative shadow") applied to the native `<dialog>` element itself —
+ * docs/stitch_agent_market_landing_page 2/settlement_operation_modals_set's
+ * "确认验收"/"发起争议" reference cards. Content padding/spacing stays the
+ * business component's own concern (`SettlementSection`/`DisputeOpenForm`);
+ * this only owns the modal shell every operation confirmation shares. */
+const DIALOG_CLASSES =
+  "rounded-card border border-divider-light bg-canvas-light p-0 shadow-lg backdrop:bg-ink-primary/40 backdrop:backdrop-blur-sm";
+
 export interface ActionSheetProps {
   open: boolean;
   onClose: () => void;
@@ -75,7 +84,10 @@ export function ActionSheet({ open, onClose, content, titleForA11y }: ActionShee
       // binding onClose to both would invoke it twice for one keypress.
       onClose={onClose}
       data-action-sheet-variant={isDesktop ? "dialog" : "bottom-sheet"}
-      style={isDesktop ? undefined : BOTTOM_SHEET_STYLE}
+      className={DIALOG_CLASSES}
+      style={
+        isDesktop ? undefined : { ...BOTTOM_SHEET_STYLE, maxHeight: "85vh", overflowY: "auto" }
+      }
     >
       {content}
     </dialog>

@@ -112,10 +112,10 @@ func skillTagsOverlap(candidateTags, taskTags []string) bool {
 	}
 	required := make(map[string]struct{}, len(taskTags))
 	for _, tag := range taskTags {
-		required[tag] = struct{}{}
+		required[strings.ToLower(tag)] = struct{}{}
 	}
 	for _, tag := range candidateTags {
-		if _, ok := required[tag]; ok {
+		if _, ok := required[strings.ToLower(tag)]; ok {
 			return true
 		}
 	}

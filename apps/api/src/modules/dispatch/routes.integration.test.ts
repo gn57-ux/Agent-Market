@@ -133,7 +133,10 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     return match[1];
   }
 
-  async function insertOpenTask(requesterAddress: string): Promise<string> {
+  async function insertOpenTask(
+    requesterAddress: string,
+    skillTags: string[] = [],
+  ): Promise<string> {
     await pool.query(`INSERT INTO users (address) VALUES ($1) ON CONFLICT DO NOTHING`, [
       requesterAddress,
     ]);
@@ -146,10 +149,16 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     );
     const id = rows[0]?.id;
     if (!id) throw new Error("insertOpenTask: no id returned");
+    for (const skillTag of skillTags) {
+      await pool.query(`INSERT INTO task_skills (task_id, skill_tag) VALUES ($1, $2)`, [
+        id,
+        skillTag,
+      ]);
+    }
     return id;
   }
 
-  async function insertActiveAgent(): Promise<string> {
+  async function insertActiveAgent(skillTags: string[] = []): Promise<string> {
     const ownerAddress = "0x9983fefc63f0cd0e873a0000c6d07ef7b77e90d8";
     await pool.query(`INSERT INTO users (address) VALUES ($1) ON CONFLICT DO NOTHING`, [
       ownerAddress,
@@ -161,6 +170,12 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     );
     const id = rows[0]?.id;
     if (!id) throw new Error("insertActiveAgent: no id returned");
+    for (const skillTag of skillTags) {
+      await pool.query(`INSERT INTO agent_skills (agent_id, skill_tag) VALUES ($1, $2)`, [
+        id,
+        skillTag,
+      ]);
+    }
     return id;
   }
 
@@ -236,6 +251,43 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     expect(candidateRows).toHaveLength(1);
     expect(candidateRows[0]?.agent_id).toBe(agentId);
     expect(candidateRows[0]?.rank).toBe(1);
+  });
+
+  it("assembles the task's real skillTags and the ACTIVE agent's real skillTags into the match request (P1 regression: real Python-tagged task + real Python-skilled agent)", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase(), ["python"]);
+    const agentId = await insertActiveAgent(["python"]);
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({ taskId, algorithmVersion: "v0.1", recommendations: [] });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/match`,
+      cookies: { session_token: token },
+    });
+    expect(response.statusCode).toBe(200);
+
+    expect(callMatchMock).toHaveBeenCalledTimes(1);
+    const [sentRequest] = callMatchMock.mock.calls[0] as [
+      {
+        category: string;
+        skillTags: string[];
+        candidates: { agentId: string; skillTags: string[] }[];
+      },
+    ];
+    // The task's own real skillTags (from a real task_skills row, not empty).
+    expect(sentRequest.skillTags).toEqual(["python"]);
+    // The real ACTIVE agent is assembled as a candidate at all (category
+    // matched — assembleCandidateSnapshots' own filter), carrying its real
+    // agent_skills, not an empty array. Actual accept/reject on skill match
+    // is the Go dispatch service's job (out of this apps/api layer's
+    // scope — its own doc comment: "只负责收集数据、发一次 HTTP 调用"), but this
+    // proves apps/api hands it the real data needed to decide, which is
+    // exactly the P1 report: the task's tags were never reaching this
+    // point in a usable form.
+    expect(sentRequest.candidates).toHaveLength(1);
+    expect(sentRequest.candidates[0]?.agentId).toBe(agentId);
+    expect(sentRequest.candidates[0]?.skillTags).toEqual(["python"]);
   });
 
   // T-803 (Feature 8, confirmed scope decision #1): a successful `/match`

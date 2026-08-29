@@ -30,6 +30,7 @@ vi.mock("../session/SessionProvider.js", () => ({
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -128,6 +129,7 @@ describe("SettlementSection — ACCEPTED", () => {
   });
 
   it("submits claimDeliveryTimeout and shows the success message once confirmed", async () => {
+    const onSettled = vi.fn();
     mockSession = { status: "signed_in", address: REQUESTER_ADDRESS };
     mockWalletAddress = REQUESTER_ADDRESS;
     vi.spyOn(tasksApi, "getTask").mockResolvedValue(
@@ -141,7 +143,7 @@ describe("SettlementSection — ACCEPTED", () => {
       confirmations: 1,
     });
 
-    render(<SettlementSection taskId="task-1" />);
+    render(<SettlementSection taskId="task-1" onSettled={onSettled} />);
     const button = await screen.findByRole("button", { name: "取回预算和质押" });
     fireEvent.click(button);
 
@@ -149,6 +151,7 @@ describe("SettlementSection — ACCEPTED", () => {
     expect(writeContract).toHaveBeenCalledWith(
       expect.objectContaining({ functionName: "claimDeliveryTimeout" }),
     );
+    expect(onSettled).toHaveBeenCalledTimes(1);
   });
 
   // Codex review (T-1004 round 1, P1): a `failed`/`rpcRecoveryPending`

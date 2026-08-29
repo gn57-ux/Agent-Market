@@ -16,6 +16,17 @@ export interface RecommendationsResult {
   recommendations: RecommendationCandidate[];
 }
 
+export interface MatchResult {
+  taskId: string;
+  algorithmVersion: string;
+  recommendationCount: number;
+}
+
+/** Starts the existing requester-authorized V0 matching round. */
+export function requestMatch(taskId: string): Promise<MatchResult> {
+  return apiFetch<MatchResult>(`/tasks/${taskId}/match`, { method: "POST" });
+}
+
 /**
  * Public endpoint — no session required (same as `getTask`'s own
  * public-read reasoning), matching apps/api's `GET /tasks/:taskId/recommendations`

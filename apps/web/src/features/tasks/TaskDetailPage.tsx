@@ -25,6 +25,7 @@ const PAGE_WRAP_CLASSES = "mx-auto max-w-content px-gutter-mobile py-16 md:px-gu
 export function TaskDetailPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
     if (!taskId) return;
@@ -48,7 +49,7 @@ export function TaskDetailPage() {
     return () => {
       ignore = true;
     };
-  }, [taskId]);
+  }, [taskId, refreshVersion]);
 
   if (state.status === "loading") {
     return (
@@ -110,7 +111,11 @@ export function TaskDetailPage() {
         </dl>
       </div>
 
-      <TaskDetailSections status={status} taskId={task.taskId} />
+      <TaskDetailSections
+        status={status}
+        taskId={task.taskId}
+        onTaskChanged={() => setRefreshVersion((version) => version + 1)}
+      />
     </section>
   );
 }

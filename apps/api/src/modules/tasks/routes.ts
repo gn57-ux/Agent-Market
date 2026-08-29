@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest, FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { verifySession } from "../auth/session.service.js";
 import { createChainRpcClient } from "../chain/rpc.client.js";
+import { formatZodError } from "../../shared/zod-error.js";
 import type {
   FundingIntentResult,
   FundingVerificationServiceResult,
@@ -424,7 +425,7 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
   app.get("/tasks", async (request, reply) => {
     const parsed = listTasksQuerySchema.safeParse(request.query);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
     const viewerAddress = await readOptionalSessionAddress(request, pool);
@@ -440,7 +441,7 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
   app.get("/tasks/:taskId", async (request, reply) => {
     const parsed = taskIdParamSchema.safeParse(request.params);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
     const viewerAddress = await readOptionalSessionAddress(request, pool);
@@ -454,7 +455,7 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
   app.get("/tasks/:taskId/history", async (request, reply) => {
     const parsed = taskIdParamSchema.safeParse(request.params);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
     const viewerAddress = await readOptionalSessionAddress(request, pool);
@@ -470,7 +471,7 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
   app.post("/tasks/drafts", { preHandler: app.requireSession }, async (request, reply) => {
     const parsed = createDraftSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
     const sessionAddress = requireSessionAddress(request, reply);
@@ -481,17 +482,17 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     const idempotencyKey = readIdempotencyKey(request);
     const task = await createDraft(pool, sessionAddress, parsed.data, idempotencyKey);
 
-    return reply.status(201).send({ taskId: task.id, status: task.status });
+    return reply.status(201).send(toTaskDraftJson(task));
   });
 
   app.patch("/tasks/:taskId/draft", { preHandler: app.requireSession }, async (request, reply) => {
     const paramsParsed = taskIdParamSchema.safeParse(request.params);
     if (!paramsParsed.success) {
-      return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
     }
     const bodyParsed = updateDraftSchema.safeParse(request.body);
     if (!bodyParsed.success) {
-      return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
     }
     const sessionAddress = requireSessionAddress(request, reply);
     if (!sessionAddress) {
@@ -516,7 +517,7 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = taskIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {
@@ -537,11 +538,11 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = taskIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const bodyParsed = fundingVerificationSchema.safeParse(request.body);
       if (!bodyParsed.success) {
-        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {
@@ -581,11 +582,11 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = taskIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const bodyParsed = fundingVerificationSchema.safeParse(request.body);
       if (!bodyParsed.success) {
-        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {
@@ -627,11 +628,11 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = taskIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const bodyParsed = fundingVerificationSchema.safeParse(request.body);
       if (!bodyParsed.success) {
-        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {
@@ -673,11 +674,11 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = taskIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const bodyParsed = fundingVerificationSchema.safeParse(request.body);
       if (!bodyParsed.success) {
-        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {
@@ -711,11 +712,11 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = taskIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const bodyParsed = fundingVerificationSchema.safeParse(request.body);
       if (!bodyParsed.success) {
-        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {
@@ -751,11 +752,11 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = taskIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const bodyParsed = fundingVerificationSchema.safeParse(request.body);
       if (!bodyParsed.success) {
-        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {

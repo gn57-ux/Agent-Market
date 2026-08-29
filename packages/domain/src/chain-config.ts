@@ -15,6 +15,24 @@ export interface ChainAddresses {
 export interface ChainMetadata {
   name: string;
   explorerUrlTemplate?: string; // e.g. "https://sepolia.etherscan.io/tx/{txHash}"
+  /**
+   * Task B ("本地测试币流程"): the faucet claim UI must only ever offer
+   * itself on a local Hardhat instance or an allowed public test network —
+   * never on a future mainnet deployment. Two designs were considered:
+   * (a) each frontend call site re-deriving "is this a test network" from
+   * `chainId` (e.g. `chainId === 31337 || chainId === 11155111`), or
+   * (b) a single explicit flag here, alongside the rest of this project's
+   * one existing table of "which chains this project knows about."
+   * (a) duplicates knowledge this file already owns — a chainId literal
+   * comparison scattered across every faucet-adjacent component, liable to
+   * drift the moment a network is added/removed here without a matching
+   * update everywhere else (CLAUDE.md 原则 6: 设计知识只能有一个归属). (b) keeps
+   * that judgment where the rest of a network's identity already lives, so
+   * adding a future real deployment (e.g. mainnet) with this left `false`
+   * is a one-line change here, not a scan for every place a chainId
+   * literal was compared.
+   */
+  isTestnet: boolean;
 }
 
 export interface ChainConfig extends ChainMetadata {
@@ -25,10 +43,11 @@ export interface ChainConfig extends ChainMetadata {
 /** Known networks this project targets. Addresses are NOT part of this
  * table — they vary per deployment and are resolved separately. */
 export const KNOWN_CHAINS: Record<number, ChainMetadata> = {
-  31337: { name: "Local Hardhat" },
+  31337: { name: "Local Hardhat", isTestnet: true },
   11155111: {
     name: "Sepolia",
     explorerUrlTemplate: "https://sepolia.etherscan.io/tx/{txHash}",
+    isTestnet: true,
   },
 };
 
@@ -72,7 +91,15 @@ export function resolveChainConfig(env: EnvSource): ChainConfig {
     throw new Error(`chain-config: CHAIN_ID must be a positive safe integer, got: ${chainIdRaw}`);
   }
 
-  const metadata: ChainMetadata = KNOWN_CHAINS[chainId] ?? { name: `Chain ${chainId}` };
+  // An unrecognized chainId (not in KNOWN_CHAINS) defaults to
+  // `isTestnet: false` — a fail-safe default, not an oversight: an unknown
+  // network could just as easily be a real mainnet deployment this table
+  // hasn't been updated for yet, and offering a faucet claim there would be
+  // actively wrong, not merely unhelpful.
+  const metadata: ChainMetadata = KNOWN_CHAINS[chainId] ?? {
+    name: `Chain ${chainId}`,
+    isTestnet: false,
+  };
 
   return {
     chainId,

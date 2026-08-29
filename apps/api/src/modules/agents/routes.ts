@@ -15,6 +15,7 @@ import {
   listAgentsQuerySchema,
   updateAgentSchema,
 } from "./schema.js";
+import { formatZodError } from "../../shared/zod-error.js";
 
 /** Shared response shape for both the list and detail endpoints (F-502).
  * `referencePrice` comes back from `pg` as a string (NUMERIC columns aren't
@@ -94,7 +95,7 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
   app.post("/agents", { preHandler: app.requireSession }, async (request, reply) => {
     const parsed = createAgentSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
     const sessionAddress = requireSessionAddress(request, reply);
@@ -115,7 +116,7 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
   app.get("/agents", async (request, reply) => {
     const parsed = listAgentsQuerySchema.safeParse(request.query);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
     const { items, total } = await listAgentsForMarket(pool, parsed.data);
@@ -130,7 +131,7 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
   app.get("/agents/:agentId", async (request, reply) => {
     const parsed = agentIdParamSchema.safeParse(request.params);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
     const agent = await getAgentDetail(pool, parsed.data.agentId);
@@ -143,11 +144,11 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
   app.patch("/agents/:agentId", { preHandler: app.requireSession }, async (request, reply) => {
     const paramsParsed = agentIdParamSchema.safeParse(request.params);
     if (!paramsParsed.success) {
-      return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
     }
     const bodyParsed = updateAgentSchema.safeParse(request.body);
     if (!bodyParsed.success) {
-      return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
     }
     const sessionAddress = requireSessionAddress(request, reply);
     if (!sessionAddress) {
@@ -172,7 +173,7 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = agentIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {
@@ -198,7 +199,7 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
     async (request, reply) => {
       const paramsParsed = agentIdParamSchema.safeParse(request.params);
       if (!paramsParsed.success) {
-        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
       }
       const sessionAddress = requireSessionAddress(request, reply);
       if (!sessionAddress) {

@@ -10,13 +10,20 @@
   "scripts": {
     "lint": "eslint .",
     "lint:verify-rules": "node scripts/verify-eslint-rules.mjs",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "env:start": "node scripts/local-env/start.mjs",
+    "env:stop": "node scripts/local-env/stop.mjs",
+    "env:status": "node scripts/local-env/status.mjs",
+    "env:test": "node --test scripts/local-env/*.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9",
     "eslint": "^9",
     "globals": "^15",
     "prettier": "^3",
-    "typescript-eslint": "^8"
+    "typescript-eslint": "^8",
+    "pg": "^8.12.0",
+    "viem": "^2.19.0",
+    "zod": "^3.23.8"
   }
 }

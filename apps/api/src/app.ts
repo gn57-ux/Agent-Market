@@ -51,13 +51,23 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return { status: "ok" };
   });
 
-  registerAuthRoutes(app, pool);
+  // Wrapped in its own app.register(...): GET /auth/session (Task E's whoami
+  // restore) uses `app.requireSession` as a preHandler alongside /auth/nonce,
+  // /auth/verify, and /auth/logout (which don't need it), and that decorator
+  // is only guaranteed to exist once registerSessionMiddleware's own
+  // registration above has finished — see session.middleware.ts's doc
+  // comment. Calling registerAuthRoutes directly (un-deferred) would leave
+  // `preHandler: app.requireSession` evaluating to `preHandler: undefined`
+  // at the point this function runs synchronously, silently registering an
+  // unprotected route.
+  void app.register(async (instance) => {
+    registerAuthRoutes(instance, pool);
+  });
 
-  // Wrapped in its own app.register(...) (not called directly like
-  // registerAuthRoutes above): POST /agents uses `app.requireSession` as a
-  // preHandler, and that decorator is only guaranteed to exist once
-  // registerSessionMiddleware's own registration above has finished — see
-  // session.middleware.ts's doc comment.
+  // Same reasoning as the auth registration above: POST /agents uses
+  // `app.requireSession` as a preHandler, and that decorator is only
+  // guaranteed to exist once registerSessionMiddleware's own registration
+  // above has finished — see session.middleware.ts's doc comment.
   void app.register(async (instance) => {
     registerAgentsRoutes(instance, pool);
   });

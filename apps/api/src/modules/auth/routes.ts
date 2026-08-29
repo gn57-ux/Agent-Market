@@ -7,6 +7,7 @@ import { getActiveNonce, issueNonce } from "./nonce.store.js";
 import { nonceRequestSchema, verifyRequestSchema } from "./schema.js";
 import { buildSignInMessage, verifySignInSignature } from "./signInMessage.js";
 import { revokeSession } from "./session.service.js";
+import { formatZodError } from "../../shared/zod-error.js";
 
 const SESSION_COOKIE_NAME = "session_token";
 
@@ -63,7 +64,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
   app.post("/auth/nonce", async (request, reply) => {
     const parsed = nonceRequestSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
     const issued = await issueNonce(pool, parsed.data.address);
@@ -77,7 +78,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
   app.post("/auth/verify", async (request, reply) => {
     const parsed = verifyRequestSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: { message: parsed.error.message } });
+      return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
     const { address, signature, nonce } = parsed.data;
 
@@ -137,6 +138,19 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
       expires: session.expiresAt,
     });
     return reply.send({ sessionToken: session.token, address: session.address });
+  });
+
+  // Task E manual verification: a page refresh wiped the frontend's
+  // in-memory "signed in" state even though the httpOnly session cookie was
+  // still valid server-side, forcing a re-signature for no real reason.
+  // Reuses `app.requireSession` (the same preHandler every protected route
+  // in Feature 5-10 already attaches) instead of duplicating "is this cookie
+  // valid" here — a 401 with the existing message is already exactly right
+  // for "no session (or it's expired/revoked)", so there is nothing left for
+  // this handler to do beyond echoing back the address requireSession
+  // already resolved.
+  app.get("/auth/session", { preHandler: app.requireSession }, async (request, reply) => {
+    return reply.send({ address: request.address });
   });
 
   app.post("/auth/logout", async (request, reply) => {

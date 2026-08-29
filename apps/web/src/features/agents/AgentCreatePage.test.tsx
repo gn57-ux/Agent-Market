@@ -16,6 +16,7 @@ const ADDRESS = "0x1234567890123456789012345678901234567890" as const;
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,

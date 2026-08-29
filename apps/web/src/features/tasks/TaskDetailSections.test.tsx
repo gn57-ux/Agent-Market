@@ -35,6 +35,7 @@ vi.mock("../session/SessionProvider.js", () => ({
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -165,6 +166,9 @@ describe("TaskDetailSections", () => {
 
   it("renders CandidateSection for status OPEN when signed in but not a recommended candidate (regression)", async () => {
     mockSession = { status: "signed_in", address: SESSION_ADDRESS };
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(
+      taskFixture({ requesterAddress: "0x1111111111111111111111111111111111111111" }),
+    );
     vi.spyOn(recommendationsApi, "getRecommendations").mockResolvedValue({
       recommendations: [
         { agentId: "agent-1", rank: 1, slotType: "TOP_SCORE", score: 0.9, reasons: [] },

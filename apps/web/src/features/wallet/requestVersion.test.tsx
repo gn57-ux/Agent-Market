@@ -13,6 +13,7 @@ const YD_FAUCET_ADDRESS = "0x3333333333333333333333333333333333333333" as const;
 const TARGET_CHAIN: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: TASK_ESCROW_ADDRESS,
     ydToken: YD_TOKEN_ADDRESS,

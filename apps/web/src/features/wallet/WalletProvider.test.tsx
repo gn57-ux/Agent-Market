@@ -4,10 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WalletConnectionStatus, WalletProvider } from "./WalletProvider.js";
 
 const ADDRESS = "0x1234567890123456789012345678901234567890" as const;
+const OTHER_ADDRESS = "0x9999999999999999999999999999999999999999" as const;
 const YD_TOKEN_ADDRESS = "0x1111111111111111111111111111111111111111" as const;
 const TARGET_CHAIN: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: "0x2222222222222222222222222222222222222222",
     ydToken: YD_TOKEN_ADDRESS,
@@ -21,10 +23,39 @@ function uint256Result(value: bigint): `0x${string}` {
 
 type ProviderEvent = "accountsChanged" | "chainChanged";
 
-function installWallet(chainId: number) {
+function installWallet(
+  chainId: number,
+  {
+    alreadyAuthorized = false,
+    deferEthAccounts = false,
+    connectAddress = ADDRESS,
+  }: {
+    alreadyAuthorized?: boolean;
+    deferEthAccounts?: boolean;
+    connectAddress?: `0x${string}`;
+  } = {},
+) {
   const listeners = new Map<ProviderEvent, Set<(payload: unknown) => void>>();
+  // Lets a test hold the silent mount-time `eth_accounts` check open
+  // indefinitely (via the returned `resolveEthAccounts`) to exercise a race
+  // against a manual connect()/disconnect() that completes first — real
+  // wallets don't resolve this instantly, it's an IPC round trip.
+  let resolveEthAccounts: ((accounts: string[]) => void) | undefined;
+  const deferredEthAccounts = deferEthAccounts
+    ? new Promise<string[]>((resolve) => {
+        resolveEthAccounts = resolve;
+      })
+    : undefined;
   const request = vi.fn(async ({ method, params }: { method: string; params?: unknown }) => {
-    if (method === "eth_requestAccounts") return [ADDRESS];
+    if (method === "eth_requestAccounts") return [connectAddress];
+    // MetaMask's silent, no-popup counterpart to eth_requestAccounts: real
+    // wallets return whatever accounts the site is already authorized for,
+    // or [] if the user has never approved this site (or approval was
+    // revoked). `alreadyAuthorized` lets a test simulate either case.
+    if (method === "eth_accounts") {
+      if (deferredEthAccounts) return deferredEthAccounts;
+      return alreadyAuthorized ? [ADDRESS] : [];
+    }
     if (method === "eth_chainId") return `0x${chainId.toString(16)}`;
     if (method === "eth_call") {
       const call = Array.isArray(params) ? params[0] : undefined;
@@ -50,17 +81,21 @@ function installWallet(chainId: number) {
     for (const listener of listeners.get(event) ?? []) listener(payload);
   };
   window.ethereum = { request, on, removeListener };
-  return { request, emit };
+  return {
+    request,
+    emit,
+    resolveEthAccounts: (accounts: `0x${string}`[]) => resolveEthAccounts?.(accounts),
+  };
 }
 
 afterEach(() => {
   delete window.ethereum;
 });
 
-function renderWallet() {
+function renderWallet(variant: "light" | "dark" = "light") {
   return render(
     <WalletProvider chainConfig={TARGET_CHAIN}>
-      <WalletConnectionStatus />
+      <WalletConnectionStatus variant={variant} />
     </WalletProvider>,
   );
 }
@@ -82,6 +117,63 @@ describe("WalletProvider", () => {
           rpcRequest.method === "eth_call" && JSON.stringify(rpcRequest).includes(YD_TOKEN_ADDRESS),
       ),
     ).toBe(true);
+  });
+
+  it("uses dark-canvas text tokens in the dark variant (Task E review: homepage hero color coordination)", async () => {
+    installWallet(TARGET_CHAIN.chainId);
+    renderWallet("dark");
+
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    await screen.findByRole("button", { name: "0x1234…7890" });
+
+    const networkLabel = await screen.findByText("当前网络：Local Hardhat");
+    expect(networkLabel.className).toContain("text-ink-muted-on-dark");
+    expect(networkLabel.className).not.toContain("text-ink-secondary");
+  });
+
+  it("silently restores the wallet connection on mount when MetaMask already authorized this site (Task E review: 刷新之后无需重新连接钱包)", async () => {
+    const { request } = installWallet(TARGET_CHAIN.chainId, { alreadyAuthorized: true });
+    renderWallet();
+
+    expect(await screen.findByRole("button", { name: "0x1234…7890" })).toBeTruthy();
+    expect(screen.getByText("当前网络：Local Hardhat")).toBeTruthy();
+    expect(await screen.findByText("YD 余额：123.45 YD")).toBeTruthy();
+    // Restored silently — never prompts via eth_requestAccounts.
+    expect(request).not.toHaveBeenCalledWith({ method: "eth_requestAccounts" }, undefined);
+  });
+
+  it("does not let a stale silent auto-reconnect overwrite a newer manual connect() (N4 review round 2 P1: identity-version race)", async () => {
+    // The silent eth_accounts check is held open (never resolves during
+    // this test's manual-connect window) — its eventual result, once
+    // released below, would restore the WRONG (stale) account if applied
+    // unconditionally.
+    const { resolveEthAccounts } = installWallet(TARGET_CHAIN.chainId, {
+      deferEthAccounts: true,
+      connectAddress: OTHER_ADDRESS,
+    });
+    renderWallet();
+
+    // A real, newer identity is established via the user's own action
+    // (not the pending silent restore) before the stale request resolves.
+    fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
+    expect(await screen.findByRole("button", { name: "0x9999…9999" })).toBeTruthy();
+
+    // The stale silent-reconnect request now finally resolves, with a
+    // DIFFERENT (older) address than the one just connected — this must
+    // be discarded, not applied on top of the newer, real connection.
+    resolveEthAccounts([ADDRESS]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByRole("button", { name: "0x9999…9999" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "0x1234…7890" })).toBeNull();
+  });
+
+  it("stays disconnected on mount when MetaMask has not authorized this site", async () => {
+    installWallet(TARGET_CHAIN.chainId, { alreadyAuthorized: false });
+    renderWallet();
+
+    await screen.findByRole("button", { name: "连接钱包" });
+    expect(screen.queryByText(/当前网络：/)).toBeNull();
   });
 
   it("shows an actionable Chinese message when MetaMask is not installed", async () => {

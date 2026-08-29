@@ -104,6 +104,14 @@ func TestFilter_SkillTags_PositiveWhenOneOverlaps(t *testing.T) {
 	mustEligible(t, task, c)
 }
 
+func TestFilter_SkillTags_PositiveWhenCaseDiffers(t *testing.T) {
+	task := baseTask()
+	task.SkillTags = []string{"python"}
+	c := baseCandidate()
+	c.SkillTags = []string{"Python"}
+	mustEligible(t, task, c)
+}
+
 func TestFilter_SkillTags_NegativeWhenNoOverlap(t *testing.T) {
 	task := baseTask()
 	task.SkillTags = []string{"python", "nlp"}

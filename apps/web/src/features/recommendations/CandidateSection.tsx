@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { StatusChip } from "../../shared/components/StatusChip.js";
-import { ApiError, getRecommendations, type RecommendationCandidate } from "./api.js";
+import { useSession } from "../session/SessionProvider.js";
+import { getTask } from "../tasks/api.js";
+import { ApiError, getRecommendations, requestMatch, type RecommendationCandidate } from "./api.js";
 
 export interface CandidateSectionProps {
   taskId: string;
@@ -58,12 +60,23 @@ function toneFor(slotType: RecommendationCandidate["slotType"]): "info" | "neutr
  * and `GET /tasks/:taskId/recommendations` returns.
  */
 export function CandidateSection({ taskId }: CandidateSectionProps) {
+  const session = useSession();
   const [state, setState] = useState<LoadState>({ status: "loading" });
 
   useEffect(() => {
     let ignore = false;
     setState({ status: "loading" });
-    getRecommendations(taskId)
+    const prepareRecommendations = async () => {
+      if (session.status === "signed_in" && session.address) {
+        const task = await getTask(taskId);
+        if (task.requesterAddress === session.address) {
+          await requestMatch(taskId);
+        }
+      }
+      return getRecommendations(taskId);
+    };
+
+    prepareRecommendations()
       .then((result) => {
         if (!ignore) setState({ status: "ready", candidates: result.recommendations });
       })
@@ -77,7 +90,7 @@ export function CandidateSection({ taskId }: CandidateSectionProps) {
     return () => {
       ignore = true;
     };
-  }, [taskId]);
+  }, [taskId, session.status, session.address]);
 
   if (state.status === "loading") {
     return (
@@ -106,32 +119,48 @@ export function CandidateSection({ taskId }: CandidateSectionProps) {
         // placeholder Agent entry.
         <p className="text-body text-ink-secondary">暂无合适 Agent</p>
       ) : (
-        <ul className="space-y-4">
+        <ul className="grid gap-4 lg:grid-cols-3">
           {candidates.map((candidate) => (
             <li
               key={candidate.agentId}
-              className={`rounded-control border p-4 ${
+              className={`flex min-w-0 flex-col rounded-[24px] border bg-white p-5 shadow-[0_12px_32px_rgba(17,24,39,0.05)] transition-transform duration-200 hover:-translate-y-0.5 ${
                 candidate.slotType === "EXPLORATION"
                   ? "border-dashed border-divider-light"
                   : "border-divider-light"
               }`}
             >
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-ink-primary text-caption font-semibold text-white">
+                    #{candidate.rank}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="truncate text-body font-semibold text-ink-primary">候选 Agent</p>
+                    <p className="truncate text-caption text-ink-secondary">
+                      {shortAgentId(candidate.agentId)}
+                    </p>
+                  </div>
+                </div>
+                <span className="shrink-0 rounded-full bg-surface-subtle px-3 py-1 text-caption font-medium text-ink-primary">
+                  评分 {candidate.score.toFixed(2)}
+                </span>
+              </div>
+              <div className="mt-4">
                 <StatusChip
                   label={slotLabel(candidate.slotType)}
                   tone={toneFor(candidate.slotType)}
                 />
-                <span className="text-caption text-ink-secondary">
-                  #{candidate.rank} · {shortAgentId(candidate.agentId)}
-                </span>
-                <span className="text-caption text-ink-secondary">
-                  评分 {candidate.score.toFixed(2)}
-                </span>
               </div>
               {candidate.reasons.length > 0 ? (
-                <ul className="mt-2 list-inside list-disc text-caption text-ink-secondary">
+                <ul className="mt-4 space-y-2 border-t border-divider-light pt-4 text-caption text-ink-secondary">
                   {candidate.reasons.map((reason) => (
-                    <li key={reason}>{reason}</li>
+                    <li key={reason} className="flex gap-2">
+                      <span
+                        aria-hidden="true"
+                        className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-action-blue"
+                      />
+                      <span>{reason}</span>
+                    </li>
                   ))}
                 </ul>
               ) : null}

@@ -103,7 +103,8 @@ describe("AgentMarketPage", () => {
 
     await screen.findByText("Copy Polisher");
     expect(listAgentsMock).toHaveBeenCalledWith(expect.objectContaining({ status: "ACTIVE" }));
-    const card = screen.getByRole("article");
+    const card = document.querySelector('[data-agent-id="agent-1"]') as HTMLElement | null;
+    if (!card) throw new Error("expected the agent card to be present");
     expect(within(card).getByText("启用中")).toBeTruthy();
   });
 
@@ -129,7 +130,8 @@ describe("AgentMarketPage", () => {
         expect.objectContaining({ status: "INACTIVE" }),
       ),
     );
-    const card = screen.getByRole("article");
+    const card = document.querySelector('[data-agent-id="agent-1"]') as HTMLElement | null;
+    if (!card) throw new Error("expected the agent card to be present");
     expect(within(card).getByText("已停用")).toBeTruthy();
   });
 

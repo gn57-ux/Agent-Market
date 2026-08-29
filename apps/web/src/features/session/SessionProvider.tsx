@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -11,6 +12,7 @@ import type { HexAddress } from "@agent-market/domain";
 import { useWallet } from "../wallet/WalletProvider.js";
 import { apiFetch, ApiError } from "../../shared/api/client.js";
 import { buildSignInMessage } from "./signInMessage.js";
+import { toUserFacingError } from "../../shared/errors/toUserFacingError.js";
 
 export type SessionStatus = "signed_out" | "signing_in" | "signed_in" | "error";
 
@@ -41,8 +43,7 @@ interface NonceResponse {
 
 function loginErrorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message;
-  if (error instanceof Error) return error.message;
-  return "登录失败，请重试。";
+  return toUserFacingError(error, "登录失败，请重试。");
 }
 
 /**
@@ -52,13 +53,15 @@ function loginErrorMessage(error: unknown): string {
  * endpoints plus `useWallet().signMessage`. `app.requireSession` itself
  * (the backend interface Feature 5-10 build against) is untouched.
  *
- * Deliberately has no "check whether a session cookie from a previous page
- * load is still valid" step (there is no `GET /auth/session` "whoami"
- * endpoint, and adding one is out of Feature 5's scope) — on a fresh page
- * load `status` always starts at `signed_out`, even if the httpOnly cookie
- * from an earlier visit is technically still valid server-side. A user who
- * reloads mid-session sees the sign-in button again and must re-sign; this
- * is a deliberate stage-one simplification, not an oversight.
+ * On mount, checks whether the httpOnly cookie from an earlier visit is
+ * still valid server-side via `GET /auth/session` (Task E manual
+ * verification: a page refresh was forcing a re-signature even though the
+ * cookie was still good) — reuses the exact same `app.requireSession`
+ * preHandler every protected route already relies on, so this adds no new
+ * "is a session valid" logic, only a read of what that check already
+ * decides. A 401 (no cookie, or expired/revoked) is treated as ordinary
+ * `signed_out`, not an error — a first-time visitor with no cookie yet is
+ * not a failure.
  */
 export function SessionProvider({ children }: { children: ReactNode }) {
   const wallet = useWallet();
@@ -66,7 +69,45 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [signedInAddress, setSignedInAddress] = useState<HexAddress | undefined>(undefined);
   const [errorMessage, setErrorMessage] = useState<string | undefined>(undefined);
 
+  // N4 review (P2): the mount-time restore below is a single one-shot
+  // fetch with no natural way to "cancel" it against a *newer* session
+  // action the user took while it was still in flight (unmounting is not
+  // the only way it can go stale — login()/logout() completing first are
+  // real races too, not just a hypothetical). Bumped synchronously at the
+  // START of both login() and logout() (before their own async work even
+  // begins) so the restore below can detect "something newer already
+  // happened" and skip applying its now-stale result, rather than
+  // clobbering a fresh login's address or resurrecting a session the user
+  // just revoked via logout().
+  const sessionActionVersionRef = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const versionAtMount = sessionActionVersionRef.current;
+    void apiFetch<{ address: HexAddress }>("/auth/session")
+      .then((result) => {
+        if (cancelled || sessionActionVersionRef.current !== versionAtMount) return;
+        setSignedInAddress(result.address.toLowerCase() as HexAddress);
+        setStatus("signed_in");
+      })
+      .catch(() => {
+        // 401 (no session, expired, or revoked) is the ordinary
+        // "nothing to restore" case, not an error to surface — status
+        // simply stays at its initial `signed_out`.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Runs once on mount only — must NOT depend on `wallet`/`status`, or
+    // this would refire on every wallet identity change instead of only
+    // checking the pre-existing cookie once at load.
+  }, []);
+
   const login = useCallback(async () => {
+    // Supersede the mount-time restore above (see its own doc comment) —
+    // an explicit login attempt is always more authoritative than a
+    // background restore still in flight, whether this succeeds or not.
+    sessionActionVersionRef.current += 1;
     if (!wallet.address) {
       setStatus("error");
       setErrorMessage("请先连接 MetaMask 钱包，再登录。");
@@ -110,6 +151,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [wallet]);
 
   const logout = useCallback(async () => {
+    // Supersede the mount-time restore above, same reasoning as login().
+    sessionActionVersionRef.current += 1;
     // Codex review (T-505 round 2, P2): clearing local state in a `finally`
     // regardless of outcome would report "signed out" even when
     // `/auth/logout` itself failed (network error, server 5xx) — the
@@ -129,21 +172,55 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // The wallet switching to a different account after login invalidates
-  // this session's client-visible "signed in" status (AC-505's ownership
-  // checks compare against the SESSION's address, not whatever the wallet
-  // currently shows) — the old session cookie is untouched server-side,
-  // but continuing to show "signed in" next to a now-different connected
-  // address would be misleading, and any subsequent mutating call for the
-  // new address needs its own login. Does not call /auth/logout: the old
+  // Tracks whether THIS tab's wallet has ever actually reported a connected
+  // address (auto-reconnected, connected via the button, or switched to a
+  // new account) — never reset back to false. Distinguishes two situations
+  // that both look like "wallet.address is undefined" but need opposite
+  // treatment below: a wallet that genuinely DISCONNECTED after having been
+  // connected here (this flips true first, so a later undefined is a real
+  // transition) vs. one that has simply never connected in this tab at all
+  // (this stays false, e.g. no MetaMask installed, or the user hasn't
+  // clicked "连接钱包" yet this visit) — the latter is not a "disconnect",
+  // it is just "no information yet", and must not override a session the
+  // `GET /auth/session` restore above legitimately found still valid
+  // server-side (that restore has no dependency on this tab's wallet ever
+  // having connected at all).
+  const hasWalletEverConnectedRef = useRef(false);
+
+  // The wallet switching to a different account (or genuinely
+  // disconnecting) after login invalidates this session's client-visible
+  // "signed in" status (AC-505's ownership checks compare against the
+  // SESSION's address, not whatever the wallet currently shows) — the old
+  // session cookie is untouched server-side, but continuing to show
+  // "signed in" next to a now-different (or now-absent) connected address
+  // would be misleading, and any subsequent mutating call for the new
+  // address needs its own login. Does not call /auth/logout: the old
   // session is simply no longer what this UI is acting as.
   useEffect(() => {
-    // Compare lowercased on both sides: `signedInAddress` is always
-    // lowercase (see login() above) but `wallet.address` is whatever
-    // casing the wallet itself reports (typically EIP-55 checksummed) — a
-    // naive strict comparison would treat "still the same account" as a
-    // switch on every render, immediately signing the user back out.
-    if (status === "signed_in" && wallet.address?.toLowerCase() !== signedInAddress) {
+    if (status !== "signed_in") return;
+
+    if (wallet.address !== undefined) {
+      hasWalletEverConnectedRef.current = true;
+      // Compare lowercased on both sides: `signedInAddress` is always
+      // lowercase (see login() above) but `wallet.address` is whatever
+      // casing the wallet itself reports (typically EIP-55 checksummed) —
+      // a naive strict comparison would treat "still the same account" as
+      // a switch on every render, immediately signing the user back out.
+      if (wallet.address.toLowerCase() !== signedInAddress) {
+        setSignedInAddress(undefined);
+        setStatus("signed_out");
+      }
+      return;
+    }
+
+    // wallet.address is undefined here. N4 review (P2): earlier this branch
+    // treated ANY undefined as a real disconnect, which broke exactly the
+    // case this session-restore feature exists for — a still-valid cookie
+    // restoring `signed_in` before (or even without) this tab's wallet ever
+    // reconnecting is not a contradiction to resolve, it's the intended
+    // behavior; only clear if THIS tab's wallet had genuinely been
+    // connected and matching before now.
+    if (hasWalletEverConnectedRef.current) {
       setSignedInAddress(undefined);
       setStatus("signed_out");
     }

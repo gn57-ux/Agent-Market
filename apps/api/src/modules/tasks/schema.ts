@@ -4,10 +4,14 @@ import { z } from "zod";
 // both createDraftSchema and updateDraftSchema below (CLAUDE.md 原则: 设计知识
 // 只能有一个归属), matching agents/schema.ts's structure — the two schemas
 // differ only in optional wrapping, never in the underlying rule.
-const CATEGORY_SCHEMA = z.string().trim().min(1, "分类不能为空").max(100);
-const SKILL_TAG_SCHEMA = z.string().trim().min(1).max(50);
-const TITLE_SCHEMA = z.string().trim().min(1, "标题不能为空").max(200);
-const DESCRIPTION_SCHEMA = z.string().trim().min(1, "描述不能为空").max(5000);
+const CATEGORY_SCHEMA = z.string().trim().min(1, "分类不能为空").max(100, "分类过长");
+const SKILL_TAG_SCHEMA = z.string().trim().min(1, "技能标签不能为空").max(50, "技能标签过长");
+const TITLE_SCHEMA = z.string().trim().min(1, "标题不能为空").max(200, "标题过长（最多 200 字）");
+const DESCRIPTION_SCHEMA = z
+  .string()
+  .trim()
+  .min(1, "描述不能为空")
+  .max(5000, "描述过长（最多 5000 字）");
 
 // `tasks.budget` is a PostgreSQL NUMERIC column (0005_create_tasks.sql),
 // bound as a plain string for the same precision reason as agents'
@@ -103,7 +107,7 @@ const DELIVERY_DEADLINE_SCHEMA = z
  */
 export const createDraftSchema = z.object({
   category: CATEGORY_SCHEMA,
-  skillTags: z.array(SKILL_TAG_SCHEMA).max(20).default([]),
+  skillTags: z.array(SKILL_TAG_SCHEMA).max(20, "技能标签最多 20 个").default([]),
   title: TITLE_SCHEMA,
   description: DESCRIPTION_SCHEMA,
   budget: BUDGET_SCHEMA,
@@ -123,7 +127,7 @@ export type CreateDraftInput = z.infer<typeof createDraftSchema>;
  */
 export const updateDraftSchema = z.object({
   category: CATEGORY_SCHEMA.optional(),
-  skillTags: z.array(SKILL_TAG_SCHEMA).max(20).optional(),
+  skillTags: z.array(SKILL_TAG_SCHEMA).max(20, "技能标签最多 20 个").optional(),
   title: TITLE_SCHEMA.optional(),
   description: DESCRIPTION_SCHEMA.optional(),
   budget: BUDGET_SCHEMA.optional(),

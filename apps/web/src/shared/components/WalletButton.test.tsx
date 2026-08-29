@@ -19,4 +19,15 @@ describe("WalletButton", () => {
     fireEvent.click(button);
     expect(onDisconnect).toHaveBeenCalledOnce();
   });
+
+  it("uses dark-canvas tokens for the connected chip in the dark variant (Task E review: homepage hero color coordination)", () => {
+    const address = "0x1234567890123456789012345678901234567890" as const;
+    render(
+      <WalletButton address={address} onConnect={vi.fn()} onDisconnect={vi.fn()} variant="dark" />,
+    );
+    const button = screen.getByText("0x1234…7890");
+    expect(button.className).toContain("bg-surface-dark-raised");
+    expect(button.className).toContain("text-ink-on-dark");
+    expect(button.className).not.toContain("bg-canvas-light");
+  });
 });

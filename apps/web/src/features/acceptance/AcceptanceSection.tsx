@@ -12,6 +12,8 @@ import { AcceptConfirmContent } from "./AcceptConfirmContent.js";
 
 export interface AcceptanceSectionProps {
   taskId: string;
+  /** Notifies the task-detail owner to reload its authoritative status. */
+  onAccepted?: () => void;
 }
 
 /** One recommended Agent the signed-in wallet owns for this task — see
@@ -106,7 +108,7 @@ async function resolveCandidateAgentIds(
  * only owns opening/closing the sheet and computing `stake`, not the
  * transaction flow inside it.
  */
-export function AcceptanceSection({ taskId }: AcceptanceSectionProps) {
+export function AcceptanceSection({ taskId, onAccepted }: AcceptanceSectionProps) {
   const session = useSession();
   const wallet = useWallet();
   const [state, setState] = useState<LoadState>({ status: "loading" });
@@ -325,7 +327,10 @@ export function AcceptanceSection({ taskId }: AcceptanceSectionProps) {
               taskId={taskId}
               agentId={selectedAgentId}
               stake={stake}
-              onAccepted={() => setSheetOpen(false)}
+              onAccepted={() => {
+                setSheetOpen(false);
+                onAccepted?.();
+              }}
             />
           }
           titleForA11y="质押接单"

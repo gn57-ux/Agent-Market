@@ -218,6 +218,16 @@ export function DisputeOpenForm({ taskId, onOpened, existingDispute }: DisputeOp
             争议信息已保存，证据内容不可修改，请核对后提交上链。
           </p>
 
+          {/* design.md's dispute reference (docs/stitch_agent_market_landing_page 2's
+              settlement_operation_modals_set "发起争议" card) — real
+              consequence copy for opening a dispute, not a fabricated
+              warning: `resolveDispute` (contracts/src/TaskEscrow.sol) is
+              exactly the "平台治理节点介入" this describes, and disputes are
+              the only settlement path with no automatic timeout release. */}
+          <p className="rounded-input border border-warning/30 bg-warning/5 p-3 text-caption text-warning">
+            发起争议将引入平台仲裁介入；争议解决前，正常的验收超时自动放款将暂停。
+          </p>
+
           <div className="flex items-center justify-between text-caption">
             <span className="font-medium text-ink-primary">提交争议上链（openDispute）</span>
             <TransactionStatusView status={openFlow.status} />

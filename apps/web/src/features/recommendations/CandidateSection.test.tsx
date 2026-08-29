@@ -2,7 +2,17 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CandidateSection } from "./CandidateSection.js";
 import * as recommendationsApi from "./api.js";
+import * as tasksApi from "../tasks/api.js";
 import type { RecommendationCandidate } from "./api.js";
+
+const REQUESTER = "0x1111111111111111111111111111111111111111";
+let mockSession: { status: "signed_in" | "signed_out"; address?: string } = {
+  status: "signed_out",
+};
+
+vi.mock("../session/SessionProvider.js", () => ({
+  useSession: () => mockSession,
+}));
 
 function candidateFixture(
   overrides: Partial<RecommendationCandidate> = {},
@@ -19,6 +29,7 @@ function candidateFixture(
 
 afterEach(() => {
   vi.restoreAllMocks();
+  mockSession = { status: "signed_out" };
 });
 
 describe("CandidateSection", () => {
@@ -28,6 +39,28 @@ describe("CandidateSection", () => {
       .mockResolvedValue({ recommendations: [] });
     render(<CandidateSection taskId="task-1" />);
     await waitFor(() => expect(spy).toHaveBeenCalledWith("task-1"));
+  });
+
+  it("starts matching before reading recommendations when the signed-in viewer owns the task", async () => {
+    mockSession = { status: "signed_in", address: REQUESTER };
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue({
+      taskId: "task-1",
+      requesterAddress: REQUESTER,
+    } as Awaited<ReturnType<typeof tasksApi.getTask>>);
+    const match = vi.spyOn(recommendationsApi, "requestMatch").mockResolvedValue({
+      taskId: "task-1",
+      algorithmVersion: "v0.1",
+      recommendationCount: 1,
+    });
+    const get = vi
+      .spyOn(recommendationsApi, "getRecommendations")
+      .mockResolvedValue({ recommendations: [candidateFixture()] });
+
+    render(<CandidateSection taskId="task-1" />);
+
+    expect(await screen.findByText("高分候选")).toBeTruthy();
+    expect(match).toHaveBeenCalledWith("task-1");
+    expect(match.mock.invocationCallOrder[0]).toBeLessThan(get.mock.invocationCallOrder[0] ?? 0);
   });
 
   it("shows the empty state (AC-706) instead of a placeholder Agent when there are no candidates", async () => {

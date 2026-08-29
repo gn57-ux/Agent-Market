@@ -4,12 +4,14 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskCreatePage } from "./TaskCreatePage.js";
 import * as tasksApi from "./api.js";
+import * as recommendationsApi from "../recommendations/api.js";
 import { ApiError, type FundingIntent, type TaskRecord } from "./api.js";
 
 const ADDRESS = "0x1234567890123456789012345678901234567890" as const;
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -19,6 +21,25 @@ const CHAIN_CONFIG: ChainConfig = {
 
 const writeContract = vi.fn();
 const waitForTransactionReceipt = vi.fn();
+// Mutable so a single test (the faucet-claim-refreshes-balance regression
+// below) can start it insufficient and flip it after a simulated claim;
+// every other test just gets the always-sufficient default.
+let mockYdBalance = 10n ** 30n;
+const FAUCET_CLAIM_AMOUNT = 100n * 10n ** 18n;
+// TaskCreatePage's own step-3/4 informational reads (stake rate, review
+// window) — never awaited by these tests, so an unresolved promise is fine
+// for those. Task B's balance precheck (FundingStep) DOES need its
+// `balanceOf` read to resolve, or the "开始锁定预算" button never becomes
+// enabled. `FaucetClaimButton`'s own reads (claimAmount/cooldownPeriod/
+// lastClaimedAt) are routed here too, since it shares the same
+// `useWallet().getPublicClient()` mock boundary.
+const readContract = vi.fn().mockImplementation(({ functionName }: { functionName: string }) => {
+  if (functionName === "balanceOf") return Promise.resolve(mockYdBalance);
+  if (functionName === "claimAmount") return Promise.resolve(FAUCET_CLAIM_AMOUNT);
+  if (functionName === "cooldownPeriod") return Promise.resolve(0n);
+  if (functionName === "lastClaimedAt") return Promise.resolve(0n);
+  return new Promise(() => undefined);
+});
 
 // Mocked at the `useWallet()` boundary rather than driving a real injected
 // provider (window.ethereum) through viem's real transport: the capsule
@@ -46,7 +67,8 @@ vi.mock("../wallet/WalletProvider.js", () => ({
     getIdentityGeneration: () => 1,
     signMessage: vi.fn(),
     getWalletClient: () => ({ writeContract }),
-    getPublicClient: () => ({ waitForTransactionReceipt }),
+    getPublicClient: () => ({ waitForTransactionReceipt, readContract }),
+    refreshBalance: vi.fn(),
   }),
 }));
 
@@ -111,14 +133,30 @@ function renderPageResuming(taskId: string) {
   );
 }
 
+// Walks the real 4-step wizard exactly as a visitor would (fill step 1 ->
+// "下一步" -> skip the optional step 2 -> fill step 3 -> "下一步" -> check
+// the step-4 confirmation box) rather than reaching into hidden-step DOM,
+// since each step's fields genuinely don't exist in the DOM until its own
+// step is active (TaskCreatePage.tsx's wizard renders one step at a time).
 function fillForm() {
-  fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
   fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
+  fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
   fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
+  fireEvent.click(screen.getByRole("button", { name: "下一步：匹配要求" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "下一步：预算与期限" }));
+
   fireEvent.change(screen.getByLabelText("预算（YD，十进制）"), { target: { value: "12.5" } });
-  fireEvent.change(screen.getByLabelText("截止时间"), {
+  fireEvent.change(screen.getByLabelText("交付截止时间"), {
     target: { value: "2033-01-01T00:00" },
   });
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认并托管" }));
+
+  fireEvent.click(
+    screen.getByText(
+      "我确认以上任务信息无误，并理解发布任务需要进行两笔链上交易（授权代币、锁定预算）。",
+    ),
+  );
 }
 
 async function createDraftAndReachFundingStep() {
@@ -140,6 +178,20 @@ async function createDraftAndReachFundingStep() {
 beforeEach(() => {
   writeContract.mockReset();
   waitForTransactionReceipt.mockReset();
+  mockYdBalance = 10n ** 30n;
+  // `vi.restoreAllMocks()` in `afterEach` below also restores plain
+  // `vi.fn()` mocks (not just `vi.spyOn` ones) to a no-arg, no-return-value
+  // implementation — re-arm this one every test, or the second test onward
+  // sees `readContract()` return `undefined` instead of a pending Promise
+  // (or, for `balanceOf`, `undefined` instead of a resolved balance).
+  readContract.mockReset();
+  readContract.mockImplementation(({ functionName }: { functionName: string }) => {
+    if (functionName === "balanceOf") return Promise.resolve(mockYdBalance);
+    if (functionName === "claimAmount") return Promise.resolve(FAUCET_CLAIM_AMOUNT);
+    if (functionName === "cooldownPeriod") return Promise.resolve(0n);
+    if (functionName === "lastClaimedAt") return Promise.resolve(0n);
+    return new Promise(() => undefined);
+  });
 });
 
 afterEach(() => {
@@ -196,12 +248,35 @@ describe("TaskCreatePage", () => {
       status: "OPEN",
       confirmations: 1,
     });
+    const requestMatchSpy = vi.spyOn(recommendationsApi, "requestMatch").mockResolvedValue({
+      taskId: "task-1",
+      algorithmVersion: "v0.1",
+      recommendationCount: 1,
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /开始锁定预算/ }));
 
     await waitFor(() => expect(writeContract).toHaveBeenCalledTimes(2));
     expect(writeContract.mock.calls[0]?.[0]).toMatchObject({ functionName: "approve" });
     expect(writeContract.mock.calls[1]?.[0]).toMatchObject({ functionName: "createTask" });
+    expect(await screen.findByText("预算已锁定，任务已开放招募。")).toBeTruthy();
+    expect(requestMatchSpy).toHaveBeenCalledWith("task-1");
+  });
+
+  it("keeps successful funding confirmed when best-effort matching is temporarily unavailable", async () => {
+    await createDraftAndReachFundingStep();
+    writeContract
+      .mockResolvedValueOnce(`0x${"1".repeat(64)}`)
+      .mockResolvedValueOnce(`0x${"2".repeat(64)}`);
+    waitForTransactionReceipt.mockResolvedValue({ status: "success" });
+    vi.spyOn(tasksApi, "submitFundingVerification").mockResolvedValue({
+      status: "OPEN",
+      confirmations: 1,
+    });
+    vi.spyOn(recommendationsApi, "requestMatch").mockRejectedValue(new Error("dispatch down"));
+
+    fireEvent.click(screen.getByRole("button", { name: /开始锁定预算/ }));
+
     expect(await screen.findByText("预算已锁定，任务已开放招募。")).toBeTruthy();
   });
 
@@ -334,5 +409,122 @@ describe("TaskCreatePage", () => {
     const statuses = screen.getAllByText("网络暂时不可用，可点击重试");
     expect(statuses.length).toBeGreaterThan(0);
     expect(screen.queryByText(/失败：/)).toBeNull();
+  });
+
+  // Task C (N4 finding): step 3 previously only checked "非空", so a "0"
+  // budget or a past deadline could advance past this gate and only fail
+  // once the backend rejected it.
+  it("blocks advancing past step 3 when the budget is 0, and shows an inline warning", () => {
+    renderPage();
+    fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
+    fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
+    fireEvent.click(screen.getByRole("button", { name: "下一步：匹配要求" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步：预算与期限" }));
+
+    fireEvent.change(screen.getByLabelText("预算（YD，十进制）"), { target: { value: "0" } });
+    fireEvent.change(screen.getByLabelText("交付截止时间"), {
+      target: { value: "2033-01-01T00:00" },
+    });
+
+    expect(screen.getByText("预算必须大于 0。")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "下一步：确认并托管" }).hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
+  it("blocks advancing past step 3 when the deadline is in the past, and shows an inline warning", () => {
+    renderPage();
+    fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
+    fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
+    fireEvent.click(screen.getByRole("button", { name: "下一步：匹配要求" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步：预算与期限" }));
+
+    fireEvent.change(screen.getByLabelText("预算（YD，十进制）"), { target: { value: "12.5" } });
+    fireEvent.change(screen.getByLabelText("交付截止时间"), {
+      target: { value: "2000-01-01T00:00" },
+    });
+
+    expect(screen.getByText("交付截止时间必须晚于当前时间。")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "下一步：确认并托管" }).hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
+  it("sets a `min` attribute on the deadline input so the native date picker cannot even offer a past time", () => {
+    renderPage();
+    fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
+    fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
+    fireEvent.click(screen.getByRole("button", { name: "下一步：匹配要求" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步：预算与期限" }));
+
+    const deadlineInput = screen.getByLabelText("交付截止时间") as HTMLInputElement;
+    expect(deadlineInput.min).not.toBe("");
+    // Must be "now, formatted the same way" — not a stale hardcoded value —
+    // parseable back into a Date within a generous tolerance of the actual
+    // current time.
+    expect(Math.abs(new Date(deadlineInput.min).getTime() - Date.now())).toBeLessThan(120_000);
+  });
+
+  it("does not render a page-level SignInButton — session status is shown exactly once, by RootLayout's Header, not duplicated per-page (Task D)", () => {
+    renderPage();
+    // TaskCreatePage used to render its own <SignInButton /> in the page
+    // header in addition to the one RootLayout already supplies via
+    // Header's walletControls slot — a real, on-screen duplicate. This page
+    // renders in isolation from RootLayout in this test file, so if
+    // SignInButton's "已登录：<address>"/"登出" markup shows up here at all,
+    // it can only be from a page-level copy that shouldn't exist anymore.
+    expect(screen.queryByText(/已登录：/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "登出" })).toBeNull();
+  });
+
+  it("blocks 开始锁定预算 when the wallet's YD balance is below the task budget, and shows a faucet claim entry (Task B)", async () => {
+    mockYdBalance = 5n * 10n ** 17n; // 0.5 YD — below INTENT.budget's 1 YD
+    vi.spyOn(tasksApi, "createDraft").mockResolvedValue({ taskId: "task-1", status: "DRAFT" });
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture());
+    vi.spyOn(tasksApi, "createFundingIntent").mockResolvedValue(INTENT);
+
+    renderPage();
+    fillForm();
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await screen.findByRole("button", { name: "发起资金锁定" });
+    fireEvent.click(screen.getByRole("button", { name: "发起资金锁定" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认锁定预算？" }));
+
+    await screen.findByText("YD 余额不足，无法锁定预算。");
+    expect(screen.queryByRole("button", { name: /开始锁定预算/ })).toBeNull();
+    expect(await screen.findByRole("button", { name: /领取测试 YD/ })).toBeTruthy();
+  });
+
+  it("re-reads the funding-step balance after a successful faucet claim, without a page refresh (N4 review P2 regression)", async () => {
+    mockYdBalance = 5n * 10n ** 17n; // 0.5 YD — below INTENT.budget's 1 YD
+    vi.spyOn(tasksApi, "createDraft").mockResolvedValue({ taskId: "task-1", status: "DRAFT" });
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture());
+    vi.spyOn(tasksApi, "createFundingIntent").mockResolvedValue(INTENT);
+
+    renderPage();
+    fillForm();
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await screen.findByRole("button", { name: "发起资金锁定" });
+    fireEvent.click(screen.getByRole("button", { name: "发起资金锁定" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认锁定预算？" }));
+
+    await screen.findByText("YD 余额不足，无法锁定预算。");
+
+    // Simulate a successful faucet claim: writeContract/waitForTransactionReceipt
+    // resolve, and the wallet's real balance is now above the budget.
+    writeContract.mockResolvedValue(`0x${"b".repeat(64)}`);
+    waitForTransactionReceipt.mockResolvedValue({ status: "success" });
+    mockYdBalance = 2n * 10n ** 18n; // 2 YD — now above the 1 YD budget
+
+    fireEvent.click(await screen.findByRole("button", { name: /领取测试 YD/ }));
+
+    // Without this fix, FundingStep's own `balanceState` effect never
+    // re-ran after the claim and the page stayed stuck showing "余额不足"
+    // until a full refresh — this must now resolve on its own.
+    await screen.findByRole("button", { name: /开始锁定预算/ });
+    expect(screen.queryByText("YD 余额不足，无法锁定预算。")).toBeNull();
   });
 });

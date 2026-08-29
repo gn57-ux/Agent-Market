@@ -8,6 +8,7 @@ import { ApiError } from "./api.js";
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,

@@ -134,6 +134,22 @@ runIfOptedIn(
       expect(skillTagsResult.rows.map((r) => r.skill_tag)).toEqual(["copywriting", "seo"]);
     });
 
+    it("returns skillTags on the create response body itself, and on a subsequent GET /tasks/:taskId (P1 regression: task detail showed 无标签 after real creation)", async () => {
+      const token = await login(requester);
+      const createResponse = await createDraft(token);
+      expect(createResponse.statusCode).toBe(201);
+      const createBody = createResponse.json();
+      expect(createBody.skillTags).toEqual(["copywriting", "seo"]);
+
+      const getResponse = await app.inject({
+        method: "GET",
+        url: `/tasks/${createBody.taskId}`,
+        cookies: { session_token: token },
+      });
+      expect(getResponse.statusCode).toBe(200);
+      expect(getResponse.json().skillTags).toEqual(["copywriting", "seo"]);
+    });
+
     it("round-trips a large minimal-unit integer budget byte-identical through create + PATCH", async () => {
       // `budget` is a minimal-unit (wei-equivalent) unsigned integer string
       // — never a human decimal (schema.ts's BUDGET_SCHEMA comment: T-604

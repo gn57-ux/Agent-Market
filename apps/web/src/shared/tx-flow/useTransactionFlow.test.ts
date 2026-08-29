@@ -80,7 +80,7 @@ describe("useTransactionFlow", () => {
     expect(runResult).toEqual({
       outcome: "rpcRecoveryPending",
       txHash: TX_HASH,
-      lastError: "network error",
+      lastError: "网络暂时不可用，请检查本地链连接后重试。",
     });
     expect(result.current.status.kind).toBe("rpcRecoveryPending");
   });
@@ -100,7 +100,7 @@ describe("useTransactionFlow", () => {
     expect(runResult).toEqual({
       outcome: "rpcRecoveryPending",
       txHash: TX_HASH,
-      lastError: "RPC timeout",
+      lastError: "网络暂时不可用，请检查本地链连接后重试。",
     });
     expect(result.current.status.kind).toBe("rpcRecoveryPending");
   });
@@ -317,7 +317,13 @@ describe("useTransactionFlow", () => {
 
     expect(confirm).not.toHaveBeenCalled();
     expect(verify).not.toHaveBeenCalled();
-    expect(runResult).toEqual({ outcome: "failed", reason: "user rejected signature" });
-    expect(result.current.status).toEqual({ kind: "failed", reason: "user rejected signature" });
+    expect(runResult).toEqual({
+      outcome: "failed",
+      reason: "你已取消钱包操作，可以重新尝试。",
+    });
+    expect(result.current.status).toEqual({
+      kind: "failed",
+      reason: "你已取消钱包操作，可以重新尝试。",
+    });
   });
 });

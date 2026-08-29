@@ -13,6 +13,7 @@ import { TASK_ESCROW_RESOLVE_DISPUTE_ABI } from "./abi.js";
 
 export interface DisputeSectionProps {
   taskId: string;
+  onTaskChanged?: () => void;
 }
 
 const SECTION_CLASSES = "mt-8 rounded-card border border-divider-light bg-surface-light p-6 md:p-8";
@@ -104,7 +105,7 @@ function fetchDisputeAllowing404(taskId: string): Promise<DisputeRecord | null> 
  *   agent sees the same arbitration-view shape as any other non-requester,
  *   matching design.md's literal two-way split.
  */
-export function DisputeSection({ taskId }: DisputeSectionProps) {
+export function DisputeSection({ taskId, onTaskChanged }: DisputeSectionProps) {
   const session = useSession();
   const wallet = useWallet();
   const [state, setState] = useState<LoadState>({ status: "loading" });
@@ -222,7 +223,10 @@ export function DisputeSection({ taskId }: DisputeSectionProps) {
 
   async function runResolve(flow: ReturnType<typeof useTransactionFlow>) {
     const result = await flow.start();
-    if (result.outcome === "confirmed") reload();
+    if (result.outcome === "confirmed") {
+      reload();
+      onTaskChanged?.();
+    }
   }
 
   async function runResolveRetry(flow: ReturnType<typeof useTransactionFlow>) {
@@ -230,7 +234,10 @@ export function DisputeSection({ taskId }: DisputeSectionProps) {
       flow.status.kind === "rpcRecoveryPending" &&
       revertedHashesRef.current.has(flow.status.txHash);
     const result = isKnownRevertedHash ? await flow.start() : await flow.retry();
-    if (result.outcome === "confirmed") reload();
+    if (result.outcome === "confirmed") {
+      reload();
+      onTaskChanged?.();
+    }
   }
 
   function isKnownRevertedPending(flow: ReturnType<typeof useTransactionFlow>): boolean {
@@ -307,6 +314,7 @@ export function DisputeSection({ taskId }: DisputeSectionProps) {
               onOpened={() => {
                 setSheetOpen(false);
                 reload();
+                onTaskChanged?.();
               }}
             />
           }

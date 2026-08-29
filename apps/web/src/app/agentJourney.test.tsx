@@ -36,6 +36,7 @@ const ADDRESS = "0x1234567890123456789012345678901234567890" as const;
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -233,10 +234,21 @@ function renderApp() {
 }
 
 async function connectAndSignIn() {
-  fireEvent.click(screen.getByRole("button", { name: "连接钱包" }));
-  await screen.findByTitle(ADDRESS);
-  fireEvent.click(screen.getByRole("button", { name: "登录（签名验证钱包身份）" }));
-  await screen.findByText(/已登录/);
+  // Header.tsx renders `walletControls` twice by design (an always-visible
+  // mobile row alongside the desktop-inline row it CSS-hides below `md`;
+  // see Header.tsx's own doc comment) — every wallet/session control this
+  // helper interacts with therefore has two real DOM instances under jsdom
+  // (which doesn't evaluate the `md:hidden`/`hidden md:flex` media-query
+  // classes deciding which one a real browser would actually show).
+  // Clicking/asserting on the first of each pair is enough: both instances
+  // read the same WalletProvider/SessionProvider context and fire the same
+  // handlers, so acting through either one drives the same real state.
+  const [connectButton] = screen.getAllByRole("button", { name: "连接钱包" });
+  fireEvent.click(connectButton as HTMLElement);
+  await screen.findAllByTitle(ADDRESS);
+  const [signInButton] = screen.getAllByRole("button", { name: "登录（签名验证钱包身份）" });
+  fireEvent.click(signInButton as HTMLElement);
+  await screen.findAllByText(/已登录/);
 }
 
 async function createAgentViaForm(fields: {
@@ -314,8 +326,12 @@ describe("Agent registration journey (AC-501 automated substitute — see file h
     expect(store.size).toBe(3);
     expect(new Set([...store.values()].map((a) => a.category)).size).toBe(3);
 
-    // Each is independently reachable via its own detail page.
-    fireEvent.click(screen.getByRole("link", { name: "Data Cleaner" }));
+    // Each is independently reachable via its own detail page. The whole
+    // card is one Link (AgentMarketPage.tsx restyle: click anywhere on the
+    // card, not just the name), so its accessible name is the full card
+    // content — matched here as a substring, not the exact old
+    // name-only-link text.
+    fireEvent.click(screen.getByRole("link", { name: /Data Cleaner/ }));
     await screen.findByRole("heading", { level: 1, name: "Data Cleaner" });
     expect(screen.getByText("etl")).toBeTruthy();
   });
@@ -364,7 +380,8 @@ describe("Agent registration journey (AC-501 automated substitute — see file h
     // path — reaching the detail page from here and reactivating is the
     // only supported way back to ACTIVE.
     fireEvent.click(screen.getByRole("button", { name: "已停用" }));
-    fireEvent.click(await screen.findByRole("link", { name: "Renamed Agent" }));
+    // Whole-card Link (see the earlier registration test's identical note).
+    fireEvent.click(await screen.findByRole("link", { name: /Renamed Agent/ }));
     await screen.findByRole("heading", { level: 1, name: "Renamed Agent" });
     expect(screen.getByText("已停用")).toBeTruthy();
 
@@ -400,7 +417,8 @@ describe("Agent registration journey (AC-501 automated substitute — see file h
     await connectAndSignIn();
 
     goToAgentMarket();
-    fireEvent.click(await screen.findByRole("link", { name: "Someone Else's Agent" }));
+    // Whole-card Link (see the earlier registration test's identical note).
+    fireEvent.click(await screen.findByRole("link", { name: /Someone Else's Agent/ }));
 
     await screen.findByRole("heading", { level: 1, name: "Someone Else's Agent" });
     expect(screen.queryByRole("link", { name: "编辑" })).toBeNull();

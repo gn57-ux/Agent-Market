@@ -11,6 +11,7 @@ import { TASK_ESCROW_SETTLEMENT_ABI } from "./abi.js";
 
 export interface SettlementSectionProps {
   taskId: string;
+  onSettled?: () => void;
 }
 
 type LoadState =
@@ -119,7 +120,7 @@ function flowBlocksOtherSettlementAction(
  * in the first place — the status itself is the routing decision, made
  * once in `TaskDetailSections.tsx`).
  */
-export function SettlementSection({ taskId }: SettlementSectionProps) {
+export function SettlementSection({ taskId, onSettled }: SettlementSectionProps) {
   const session = useSession();
   const wallet = useWallet();
   const [state, setState] = useState<LoadState>({ status: "loading" });
@@ -251,6 +252,7 @@ export function SettlementSection({ taskId }: SettlementSectionProps) {
     const result = await flow.start();
     if (result.outcome === "confirmed") {
       reload();
+      onSettled?.();
     }
   }
 
@@ -266,6 +268,7 @@ export function SettlementSection({ taskId }: SettlementSectionProps) {
     const result = isKnownRevertedHash ? await flow.start() : await flow.retry();
     if (result.outcome === "confirmed") {
       reload();
+      onSettled?.();
     }
   }
 

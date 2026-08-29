@@ -94,6 +94,15 @@ export function AgentDetailPage() {
     <section className={pageWrapClasses}>
       {/* Hero: capability statement */}
       <div className="mb-8 rounded-card border border-divider-light bg-surface-light p-8">
+        {/* design.md: "portrait-free capability cards" — same abstract
+            initial-letter mark AgentMarketPage's list cards use, not a
+            portrait/robot image. */}
+        <div
+          aria-hidden="true"
+          className="mb-4 flex h-14 w-14 items-center justify-center rounded-input bg-canvas-warm text-xl font-semibold text-ink-primary"
+        >
+          {agent.name.slice(0, 1).toUpperCase()}
+        </div>
         <div className="mb-4 flex flex-wrap gap-2">
           <StatusChip
             label={agent.status === "ACTIVE" ? "启用中" : "已停用"}

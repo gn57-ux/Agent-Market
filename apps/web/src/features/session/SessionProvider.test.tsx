@@ -15,6 +15,7 @@ const OTHER_ADDRESS = "0x9999999999999999999999999999999999999999" as const;
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -56,9 +57,33 @@ function renderHarness() {
  * MetaMask switching accounts mid-scenario. Also wires `on`/`removeListener`
  * (mirroring requestVersion.test.tsx's `installWalletWithEvents`) so a test
  * can fire a simulated `accountsChanged` event. */
-function mockWalletProvider(currentAddress: { value: `0x${string}` }) {
+function mockWalletProvider(
+  currentAddress: { value: `0x${string}` },
+  options: { deferEthAccounts?: boolean; preAuthorized?: boolean } = {},
+) {
+  // Real production behavior: `eth_accounts` (WalletProvider's silent
+  // mount-time auto-reconnect check) never resolves instantly — it's an
+  // IPC round trip to the wallet extension. `deferEthAccounts` lets a test
+  // hold that check open indefinitely (via `resolveEthAccounts` below) to
+  // exercise the exact race window between it and SessionProvider's own
+  // `GET /auth/session` restore, instead of the check settling within the
+  // same microtask queue flush a plain unresolved mock would produce.
+  // `preAuthorized` simulates the site already being MetaMask-authorized
+  // (eth_accounts resolves to `currentAddress.value` immediately) — the
+  // default, matching a first-ever visit, is no prior authorization ([]).
+  let resolveEthAccounts: ((accounts: string[]) => void) | undefined;
+  const deferredEthAccounts = options.deferEthAccounts
+    ? new Promise<string[]>((resolve) => {
+        resolveEthAccounts = resolve;
+      })
+    : undefined;
+
   const request = vi.fn(async ({ method }: { method: string }) => {
     if (method === "eth_requestAccounts") return [currentAddress.value];
+    if (method === "eth_accounts") {
+      if (deferredEthAccounts) return deferredEthAccounts;
+      return options.preAuthorized ? [currentAddress.value] : [];
+    }
     if (method === "eth_chainId") return "0x7a69";
     if (method === "personal_sign") return "0xdeadbeef";
     throw new Error(`Unexpected test RPC method: ${method}`);
@@ -76,6 +101,10 @@ function mockWalletProvider(currentAddress: { value: `0x${string}` }) {
   return {
     request,
     emitAccountsChanged: (nextAddress: `0x${string}`) => accountsChangedListener?.([nextAddress]),
+    // MetaMask's real payload for a lock/disconnect/revoked-permission event
+    // is an empty array, not a single falsy address.
+    emitDisconnect: () => accountsChangedListener?.([]),
+    resolveEthAccounts: (accounts: `0x${string}`[]) => resolveEthAccounts?.(accounts),
   };
 }
 
@@ -84,10 +113,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function stubAuthFetch(expectedAddress: string, options: { logoutFails?: boolean } = {}) {
+function stubAuthFetch(
+  expectedAddress: string,
+  options: { logoutFails?: boolean; restoredAddress?: string } = {},
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/auth/session")) {
+        return options.restoredAddress
+          ? new Response(JSON.stringify({ address: options.restoredAddress }), { status: 200 })
+          : new Response(JSON.stringify({ error: { message: "未检测到会话。" } }), { status: 401 });
+      }
       if (url.endsWith("/auth/logout") && options.logoutFails) {
         return new Response(JSON.stringify({ error: { message: "服务器错误" } }), {
           status: 500,
@@ -123,10 +160,134 @@ function stubAuthFetch(expectedAddress: string, options: { logoutFails?: boolean
 }
 
 describe("SessionProvider", () => {
+  it("restores signed_in on mount from a still-valid session cookie via GET /auth/session (Task E review)", async () => {
+    stubAuthFetch(ADDRESS, { restoredAddress: ADDRESS });
+    // No mockWalletProvider() call: simulates the real page-refresh
+    // sequence, where the wallet has not (yet, or ever) auto-reconnected.
+    renderHarness();
+
+    await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_in"));
+    expect(screen.getByTestId("address").textContent).toBe(ADDRESS);
+  });
+
+  it("stays signed_out on mount when there is no valid session cookie (ordinary 401, not an error)", async () => {
+    stubAuthFetch(ADDRESS);
+    renderHarness();
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/auth/session"),
+        expect.anything(),
+      ),
+    );
+    expect(screen.getByTestId("status").textContent).toBe("signed_out");
+    expect(screen.getByTestId("error").textContent).toBe("");
+  });
+
+  it("does not undo a restored session while the wallet's own silent auto-reconnect is still pending (regression: mount-time race)", async () => {
+    stubAuthFetch(ADDRESS, { restoredAddress: ADDRESS });
+    // eth_accounts deliberately never resolves during this test's assertion
+    // window: wallet.address stays undefined throughout, and since this
+    // tab's wallet has never actually reported a connected address yet,
+    // the reconciling effect's `hasWalletEverConnectedRef` guard correctly
+    // treats that as "no information yet", not a disconnect.
+    mockWalletProvider({ value: ADDRESS }, { deferEthAccounts: true });
+    renderHarness();
+
+    await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_in"));
+    // Give any spurious reconciling-effect re-run a chance to fire before
+    // asserting it didn't.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByTestId("status").textContent).toBe("signed_in");
+    expect(screen.getByTestId("address").textContent).toBe(ADDRESS);
+  });
+
+  it("stays signed_in when this tab's wallet never connects at all — a still-valid cookie is not a contradiction to resolve", async () => {
+    stubAuthFetch(ADDRESS, { restoredAddress: ADDRESS });
+    const wallet = mockWalletProvider({ value: ADDRESS }, { deferEthAccounts: true });
+    renderHarness();
+
+    await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_in"));
+
+    // The wallet's own check now settles and finds NO authorized account
+    // (e.g. no MetaMask permission granted in this browser/profile at all)
+    // — this tab's wallet was never connected, so this is not a
+    // "disconnect" to react to; the restored session is still legitimate.
+    wallet.resolveEthAccounts([]);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByTestId("status").textContent).toBe("signed_in");
+    expect(screen.getByTestId("address").textContent).toBe(ADDRESS);
+  });
+
+  it("signs out when a wallet that WAS connected to the restored session's address genuinely disconnects (N4 review P2: real disconnect must still clear a restored session)", async () => {
+    stubAuthFetch(ADDRESS, { restoredAddress: ADDRESS });
+    // eth_accounts resolves immediately, matching the restored session's
+    // address — this tab's wallet has now genuinely connected, so a
+    // SUBSEQUENT disconnect must invalidate the client-visible session.
+    const wallet = mockWalletProvider({ value: ADDRESS }, { preAuthorized: true });
+    renderHarness();
+
+    await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_in"));
+    // Wait for the wallet's own auto-reconnect to actually settle too —
+    // this test is specifically about a wallet that WAS connected, so it
+    // must genuinely reach that state before disconnecting from it.
+    await waitFor(() => expect(screen.getByRole("button", { name: "0x1234…7890" })).toBeTruthy());
+
+    wallet.emitDisconnect();
+
+    await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_out"));
+    expect(screen.getByTestId("address").textContent).toBe("");
+  });
+
+  it("does not resurrect a session the user just logged out of, if the mount-time restore resolves late (N4 review P2: stale-restore-vs-logout race)", async () => {
+    let resolveWhoami: ((response: Response) => void) | undefined;
+    mockWalletProvider({ value: ADDRESS });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/auth/session")) {
+          return new Promise<Response>((resolve) => {
+            resolveWhoami = resolve;
+          });
+        }
+        if (url.endsWith("/auth/logout")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+    renderHarness();
+
+    // The user logs out before the mount-time restore has resolved at all
+    // (it's still pending — resolveWhoami hasn't been called yet).
+    fireEvent.click(screen.getByRole("button", { name: "登出" }));
+    await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("signed_out"));
+
+    // The restore now finally resolves, with a stale "you're signed in"
+    // answer from before the logout — this must NOT override what logout()
+    // already decided.
+    resolveWhoami?.(new Response(JSON.stringify({ address: ADDRESS }), { status: 200 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByTestId("status").textContent).toBe("signed_out");
+    expect(screen.getByTestId("address").textContent).toBe("");
+  });
+
   it("login() without a connected wallet surfaces a clear error and does not call the API", async () => {
     stubAuthFetch(ADDRESS);
     mockWalletProvider({ value: ADDRESS });
     renderHarness();
+    // Let the mount-time GET /auth/session restore check settle (an
+    // unrelated, expected call — this test is about login() itself) before
+    // asserting on calls login() triggers.
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/auth/session"),
+        expect.anything(),
+      ),
+    );
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockClear();
 
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
     await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("error"));

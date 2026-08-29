@@ -8,6 +8,7 @@ import { FundingSection } from "./task-detail-sections/FundingSection.js";
 export interface TaskDetailSectionsProps {
   status: TaskStatus;
   taskId: string;
+  onTaskChanged?: () => void;
 }
 
 /**
@@ -23,7 +24,7 @@ export interface TaskDetailSectionsProps {
  * test can exercise directly — proven by TypeScript rejecting a missing case
  * (or a stray `default:` that would defeat this check), not by a test case.
  */
-export function TaskDetailSections({ status, taskId }: TaskDetailSectionsProps) {
+export function TaskDetailSections({ status, taskId, onTaskChanged }: TaskDetailSectionsProps) {
   switch (status.kind) {
     case "DRAFT":
     case "AWAITING_FUNDING":
@@ -33,7 +34,7 @@ export function TaskDetailSections({ status, taskId }: TaskDetailSectionsProps) 
       // AcceptanceSection decides between the two itself (see its own doc
       // comment) — this stays the one-line-import + one-case change the
       // T-802 capsule's verification note requires.
-      return <AcceptanceSection taskId={taskId} />;
+      return <AcceptanceSection taskId={taskId} onAccepted={onTaskChanged} />;
     case "ACCEPTED":
       // Feature 9's SubmissionSection decides for itself (session address
       // vs. `task.acceptedAgentAddress`, task status) whether to render
@@ -67,8 +68,16 @@ export function TaskDetailSections({ status, taskId }: TaskDetailSectionsProps) 
       // to remount one of them correctly on a taskId change).
       return (
         <>
-          <SubmissionSection key={`submission-${taskId}`} taskId={taskId} />
-          <SettlementSection key={`settlement-${taskId}`} taskId={taskId} />
+          <SubmissionSection
+            key={`submission-${taskId}`}
+            taskId={taskId}
+            onSubmitted={onTaskChanged}
+          />
+          <SettlementSection
+            key={`settlement-${taskId}`}
+            taskId={taskId}
+            onSettled={onTaskChanged}
+          />
         </>
       );
     case "SUBMITTED":
@@ -80,8 +89,12 @@ export function TaskDetailSections({ status, taskId }: TaskDetailSectionsProps) 
       return (
         <>
           <SubmissionSection key={`submission-${taskId}`} taskId={taskId} />
-          <SettlementSection key={`settlement-${taskId}`} taskId={taskId} />
-          <DisputeSection key={`dispute-${taskId}`} taskId={taskId} />
+          <SettlementSection
+            key={`settlement-${taskId}`}
+            taskId={taskId}
+            onSettled={onTaskChanged}
+          />
+          <DisputeSection key={`dispute-${taskId}`} taskId={taskId} onTaskChanged={onTaskChanged} />
         </>
       );
     case "RELEASED":
@@ -104,7 +117,9 @@ export function TaskDetailSections({ status, taskId }: TaskDetailSectionsProps) 
         </>
       );
     case "DISPUTED":
-      return <DisputeSection key={`dispute-${taskId}`} taskId={taskId} />;
+      return (
+        <DisputeSection key={`dispute-${taskId}`} taskId={taskId} onTaskChanged={onTaskChanged} />
+      );
     case "CANCELLED":
       return null;
     default:

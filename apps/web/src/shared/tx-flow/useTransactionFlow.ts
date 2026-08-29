@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import type { TransactionRunResult, TransactionStatus } from "@agent-market/domain";
+import { toUserFacingError } from "../errors/toUserFacingError.js";
 
 export type VerifyOutcome =
   | { outcome: "confirmed" }
@@ -24,7 +25,7 @@ export interface UseTransactionFlowResult {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return toUserFacingError(error, "交易失败，请重试。");
 }
 
 /**

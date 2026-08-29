@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { BaseError, ContractFunctionRevertedError, keccak256, toBytes } from "viem";
 import { formatAmount, isErrorCode } from "@agent-market/domain";
 import { useWallet } from "../wallet/WalletProvider.js";
+import { FaucetClaimButton } from "../wallet/FaucetClaimButton.js";
 import { TransactionStatusView } from "../../shared/components/TransactionStatus.js";
 import { useTransactionFlow, type VerifyOutcome } from "../../shared/tx-flow/useTransactionFlow.js";
 import {
@@ -152,6 +153,7 @@ export function AcceptConfirmContent({
   const [balanceAllowanceState, setBalanceAllowanceState] = useState<BalanceAllowanceState>({
     status: "loading",
   });
+  const [balanceRefreshVersion, setBalanceRefreshVersion] = useState(0);
   // T-807 round 1, P1 fix: true for the entire `handleStartAccept` call,
   // including its pre-`useTransactionFlow` async reads — see that
   // function's own comment for why `approveFlow`/`acceptFlow`'s `idle`
@@ -287,7 +289,7 @@ export function AcceptConfirmContent({
     // real wallet-identity transition happens — this is the one dependency
     // whose entire purpose here is "re-read on wallet switch", so it stays
     // spelled out rather than relying on that correlation implicitly.
-  }, [address, wallet.chainConfig, wallet.identityGeneration]);
+  }, [address, wallet.chainConfig, wallet.identityGeneration, balanceRefreshVersion]);
 
   async function confirmOnChain(txHash: `0x${string}`): Promise<{ confirmations: number }> {
     const publicClient = wallet.getPublicClient();
@@ -601,9 +603,35 @@ export function AcceptConfirmContent({
       (acceptFlow.status.kind === "failed" && !acceptFailedDeterministically));
   const acceptDone = acceptFlow.status.kind === "confirmed";
 
+  // design.md's accept-task operation-states reference
+  // (docs/stitch_agent_market_landing_page 2/agent_accept_task_operation_states_full_set):
+  // "钱包余额不足" shows a real 当前余额/所需质押/缺少 breakdown, and "接单成功"
+  // shows the real stake/Tx Hash — every value below is one already read
+  // from chain (balanceAllowanceState) or already tracked by acceptFlow's
+  // own status, never fabricated for the display.
+  const balanceShortfall =
+    balanceAllowanceState.status === "ready" && balanceInsufficient
+      ? stake - balanceAllowanceState.balance
+      : undefined;
+  const explorerUrl =
+    acceptFlow.status.kind === "confirmed" && wallet.chainConfig.explorerUrlTemplate
+      ? wallet.chainConfig.explorerUrlTemplate.replace("{txHash}", acceptFlow.status.txHash)
+      : undefined;
+
   return (
     <div className="w-full max-w-md p-6">
-      <h2 className="mb-4 text-[18px] font-semibold text-ink-primary">确认质押接单</h2>
+      <h2 className="mb-4 flex items-center gap-2 text-[18px] font-semibold text-ink-primary">
+        {acceptDone ? (
+          <span aria-hidden="true" className="text-success">
+            ✓
+          </span>
+        ) : balanceInsufficient || permitState.status === "unavailable" ? (
+          <span aria-hidden="true" className="text-warning">
+            ⚠
+          </span>
+        ) : null}
+        {acceptDone ? "接单成功" : "确认质押接单"}
+      </h2>
 
       {permitState.status === "loading" && (
         <p className="text-caption text-ink-secondary">正在核对接单授权…</p>
@@ -626,14 +654,54 @@ export function AcceptConfirmContent({
       )}
 
       {permitReady && balanceInsufficient && (
-        <p role="alert" className="text-caption text-warning">
-          YD 余额不足，无法接单。
-        </p>
+        <div className="flex flex-col gap-3">
+          <p role="alert" className="text-caption text-warning">
+            YD 余额不足，无法接单。
+          </p>
+          <dl className="grid grid-cols-3 gap-2 rounded-input bg-canvas-warm p-4 text-caption">
+            <div>
+              <dt className="text-ink-secondary">当前余额</dt>
+              <dd className="text-ink-primary">
+                {balanceAllowanceState.status === "ready"
+                  ? formatAmount(balanceAllowanceState.balance)
+                  : "—"}{" "}
+                YD
+              </dd>
+            </div>
+            <div>
+              <dt className="text-ink-secondary">所需质押</dt>
+              <dd className="text-ink-primary">{formatAmount(stake)} YD</dd>
+            </div>
+            <div>
+              <dt className="text-warning">缺少</dt>
+              <dd className="text-warning">
+                {balanceShortfall !== undefined ? formatAmount(balanceShortfall) : "—"} YD
+              </dd>
+            </div>
+          </dl>
+          <FaucetClaimButton onClaimed={() => setBalanceRefreshVersion((version) => version + 1)} />
+        </div>
       )}
 
       {permitReady && balanceSufficient && (
         <div className="flex flex-col gap-4">
-          <p className="text-caption text-ink-secondary">质押金额：{formatAmount(stake)} YD</p>
+          <dl className="grid grid-cols-2 gap-3 rounded-input bg-canvas-warm p-4 text-caption">
+            <div>
+              <dt className="text-ink-secondary">需质押</dt>
+              <dd className="text-ink-primary">{formatAmount(stake)} YD</dd>
+            </div>
+            <div>
+              <dt className="text-ink-secondary">钱包余额（质押后预览）</dt>
+              <dd className="text-ink-primary">
+                {balanceAllowanceState.status === "ready"
+                  ? `${formatAmount(balanceAllowanceState.balance)} → ${formatAmount(
+                      balanceAllowanceState.balance - stake,
+                    )}`
+                  : "—"}{" "}
+                YD
+              </dd>
+            </div>
+          </dl>
 
           {showApproveStep && (
             <>
@@ -692,7 +760,33 @@ export function AcceptConfirmContent({
           )}
 
           {acceptDone ? (
-            <p className="text-caption text-success">接单成功。</p>
+            <div className="flex flex-col gap-3 rounded-input border border-success/30 bg-success/5 p-4">
+              <p className="text-caption text-success">接单成功。</p>
+              <dl className="grid grid-cols-2 gap-3 text-caption">
+                <div>
+                  <dt className="text-ink-secondary">已锁定质押</dt>
+                  <dd className="text-ink-primary">{formatAmount(stake)} YD</dd>
+                </div>
+                {acceptFlow.status.kind === "confirmed" && (
+                  <div>
+                    <dt className="text-ink-secondary">Tx Hash</dt>
+                    <dd className="break-all font-mono text-ink-primary">
+                      {acceptFlow.status.txHash}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+              {explorerUrl && (
+                <a
+                  href={explorerUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-caption font-medium text-action-blue underline"
+                >
+                  查看链上交易
+                </a>
+              )}
+            </div>
           ) : (
             <button
               type="button"

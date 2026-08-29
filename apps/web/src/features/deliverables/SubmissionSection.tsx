@@ -20,6 +20,8 @@ import {
 
 export interface SubmissionSectionProps {
   taskId: string;
+  /** Notifies the task-detail owner to reload its authoritative status. */
+  onSubmitted?: () => void;
 }
 
 type LoadState =
@@ -69,7 +71,7 @@ function formatTimestamp(value: string | null): string {
  *     latest deliverable's metadata (F-902) — never a duplicate of the
  *     submission form.
  */
-export function SubmissionSection({ taskId }: SubmissionSectionProps) {
+export function SubmissionSection({ taskId, onSubmitted }: SubmissionSectionProps) {
   const session = useSession();
   const wallet = useWallet();
   const [state, setState] = useState<LoadState>({ status: "loading" });
@@ -210,6 +212,7 @@ export function SubmissionSection({ taskId }: SubmissionSectionProps) {
     const result = await submitFlow.start();
     if (result.outcome === "confirmed") {
       reload();
+      onSubmitted?.();
     }
   }
 
@@ -500,6 +503,30 @@ export function SubmissionSection({ taskId }: SubmissionSectionProps) {
                   当前连接的钱包地址与接单 Agent 不匹配，请在 MetaMask 中切换到正确的账户后重试。
                 </p>
               )}
+
+              {/* design.md's Task Workspace reference ("提交前检查清单") — every
+                  row here is a REAL derived condition already computed above
+                  (never a fabricated/decorative checklist item), so it can
+                  never disagree with the actual disabled state of the
+                  "提交成果" button just below it. */}
+              <ul className="flex flex-col gap-1.5 rounded-input bg-canvas-warm p-4 text-caption">
+                <li className="flex items-center gap-2">
+                  <span aria-hidden="true">
+                    {persistState.status === "persisted" ? "✅" : "⬜"}
+                  </span>
+                  <span className="text-ink-primary">已计算成果哈希</span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <span aria-hidden="true">{wallet.isCorrectNetwork ? "✅" : "⬜"}</span>
+                  <span className="text-ink-primary">
+                    已连接正确网络（{wallet.chainConfig.name}）
+                  </span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <span aria-hidden="true">{!walletMismatch ? "✅" : "⬜"}</span>
+                  <span className="text-ink-primary">当前钱包地址与接单 Agent 一致</span>
+                </li>
+              </ul>
 
               <button
                 type="button"

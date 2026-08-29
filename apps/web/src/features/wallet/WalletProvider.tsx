@@ -165,6 +165,18 @@ export interface WalletContextValue {
    * condition as `getWalletClient`.
    */
   getPublicClient: () => PublicClient;
+  /**
+   * Task B ("领取测试 YD 后余额必须自动刷新"): re-triggers the same
+   * connect/switchNetwork/wallet-event "loading" → real read cycle this
+   * file already uses for every other balance refresh, rather than a
+   * faucet-specific consumer growing its own copy of "how to read
+   * `balanceOf` again" — the single existing effect below
+   * (`ydBalance.status === "loading"` trigger) is still the only place that
+   * knows how to perform that read. A no-op when not connected: there is no
+   * balance to refresh, and this must not be able to fabricate a
+   * "connected" state out of thin air.
+   */
+  refreshBalance: () => void;
 }
 
 export interface WalletProviderProps {
@@ -437,6 +449,74 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
     setErrorMessage(undefined);
   }, []);
 
+  // Silent auto-reconnect on mount (Task E manual verification: "刷新之后
+  // 需要重新连接钱包"). `eth_accounts` (unlike `eth_requestAccounts`, which
+  // `connect()` above uses) never prompts the user — it simply returns
+  // whatever accounts this site is already authorized for, which MetaMask
+  // remembers independently of this app's own in-memory `connection` state.
+  // A page refresh was wiping that in-memory state back to "disconnected"
+  // even though the wallet itself still considered the site connected.
+  // Runs independently of SessionProvider's own `GET /auth/session` restore
+  // — that module handles its own race against this one via a "has this
+  // tab's wallet ever actually connected" ref rather than this effect
+  // needing to know anything about sessions.
+  //
+  // N4 review (round 2, P1): `eth_accounts`/`eth_chainId` are two real IPC
+  // round trips — if the user manually connects, disconnects, or the wallet
+  // reports a real `accountsChanged`/`chainChanged` while either is still in
+  // flight, this continuation must not blindly apply its now-stale result on
+  // top of whatever newer identity those already established. Guarded with
+  // `identityGenerationRef` — the same "did the identity move on without me"
+  // mechanism `switchNetwork` above already uses for its own post-await race
+  // — captured BEFORE issuing the first request and re-checked after EACH
+  // await, not just at the end (a change could land in either gap). One
+  // residual, deliberately accepted gap: `handleAccountsChanged` below (its
+  // own doc comment) only reacts once `latestAddressRef.current` is defined
+  // — a real account switch arriving before this effect's very first
+  // `recordIdentityIfChanged` call is dropped by that guard, not observed as
+  // a generation bump here either. This check still prevents anything WRONG
+  // from being displayed in that narrow case (the stale restore is
+  // correctly discarded, same as any other superseded case) — the app is
+  // simply left showing "disconnected" rather than the new account until
+  // the user connects once more, not showing a stale, mismatched identity
+  // as fact.
+  useEffect(() => {
+    const provider = typeof window === "undefined" ? undefined : window.ethereum;
+    if (!provider) return;
+    let cancelled = false;
+    const versionAtStart = identityGenerationRef.current;
+    const supersededSinceStart = () =>
+      cancelled || identityGenerationRef.current !== versionAtStart;
+    void (async () => {
+      try {
+        const accounts = await provider.request({ method: "eth_accounts" });
+        if (supersededSinceStart()) return;
+        if (!Array.isArray(accounts) || typeof accounts[0] !== "string") return;
+        const address = accounts[0] as HexAddress;
+        const chainId = await readActiveChainId(provider);
+        if (supersededSinceStart()) return;
+        const needsNetworkSwitch = chainId !== chainConfig.chainId;
+        recordIdentityIfChanged(address, chainId);
+        setConnection({
+          status: "connected",
+          address,
+          chainId,
+          ydBalance: needsNetworkSwitch ? { status: "unavailable" } : { status: "loading" },
+        });
+      } catch {
+        // Best-effort background restore, not a user-initiated action — no
+        // error UI for a failed auto-reconnect attempt; the user can still
+        // connect manually via the button as before.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Runs once per mount per chainConfig identity — must NOT depend on
+    // `connection`/`connect`, or this would refire on every connection
+    // change instead of only checking once on load.
+  }, [chainConfig]);
+
   const switchNetwork = useCallback(async () => {
     if (connection.status !== "connected") {
       setErrorMessage("请先连接 MetaMask，再切换网络。");
@@ -647,6 +727,18 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
     refreshYdBalance(setConnection, provider, chainConfig, connection.address, connection.chainId);
   }, [connection, chainConfig]);
 
+  // Reuses the single existing "ydBalance === loading" trigger (the effect
+  // just above) instead of duplicating `readYdBalance`'s call here — setting
+  // the same state that connect/switchNetwork/wallet-event handlers already
+  // set is what makes this a one-line no-op when disconnected (the updater
+  // only touches a "connected" state) and keeps "how do we actually read
+  // the balance" single-sourced.
+  const refreshBalance = useCallback(() => {
+    setConnection((current) =>
+      current.status === "connected" ? { ...current, ydBalance: { status: "loading" } } : current,
+    );
+  }, []);
+
   const address = connection.status === "connected" ? connection.address : undefined;
   const chainId = connection.status === "connected" ? connection.chainId : undefined;
   const value = useMemo<WalletContextValue>(
@@ -665,6 +757,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       signMessage,
       getWalletClient,
       getPublicClient,
+      refreshBalance,
     }),
     [
       address,
@@ -679,6 +772,7 @@ function ConnectedWalletProvider({ children, chainConfig }: ConnectedWalletProvi
       signMessage,
       getWalletClient,
       getPublicClient,
+      refreshBalance,
       // `connection` above already changes on every real identity
       // transition (each one has a corresponding `recordIdentityIfChanged`
       // call), so this recomputes whenever the generation could have
@@ -701,10 +795,17 @@ function currentNetworkName(chainId: number): string {
   return KNOWN_CHAINS[chainId]?.name ?? `Chain ${chainId}`;
 }
 
+export interface WalletConnectionStatusProps {
+  /** Same convention as `WalletButton`/`Header` — see `WalletButton`'s doc
+   * comment. Defaults to `light`. */
+  variant?: "light" | "dark";
+}
+
 /** Global wallet UI. The provider owns behavior; this view reuses the shared presentational button. */
-export function WalletConnectionStatus() {
+export function WalletConnectionStatus({ variant = "light" }: WalletConnectionStatusProps = {}) {
   const wallet = useWallet();
   const connected = wallet.connection.status === "connected" ? wallet.connection : undefined;
+  const textClass = variant === "dark" ? "text-ink-muted-on-dark" : "text-ink-secondary";
 
   return (
     <section aria-label="钱包状态" className="flex flex-wrap items-center gap-3 text-caption">
@@ -712,20 +813,19 @@ export function WalletConnectionStatus() {
         address={wallet.address}
         onConnect={() => void wallet.connect()}
         onDisconnect={wallet.disconnect}
+        variant={variant}
       />
       {wallet.connection.status === "connecting" && (
-        <span className="text-ink-secondary">正在连接钱包…</span>
+        <span className={textClass}>正在连接钱包…</span>
       )}
       {connected && (
-        <span className="text-ink-secondary">
-          当前网络：{currentNetworkName(connected.chainId)}
-        </span>
+        <span className={textClass}>当前网络：{currentNetworkName(connected.chainId)}</span>
       )}
       {connected?.ydBalance.status === "ready" && (
-        <span className="text-ink-secondary">YD 余额：{connected.ydBalance.formatted} YD</span>
+        <span className={textClass}>YD 余额：{connected.ydBalance.formatted} YD</span>
       )}
       {connected?.ydBalance.status === "loading" && wallet.isCorrectNetwork && (
-        <span className="text-ink-secondary">正在读取 YD 余额…</span>
+        <span className={textClass}>正在读取 YD 余额…</span>
       )}
       {connected?.ydBalance.status === "error" && (
         <span role="alert" className="text-warning">

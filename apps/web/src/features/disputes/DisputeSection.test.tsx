@@ -28,6 +28,7 @@ vi.mock("../session/SessionProvider.js", () => ({
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -362,6 +363,7 @@ describe("DisputeSection — DISPUTED, arbitration view", () => {
   });
 
   it("requires a second confirm click before firing resolveDispute(true)", async () => {
+    const onTaskChanged = vi.fn();
     mockDisputedArbitration();
     const txHash = `0x${"b".repeat(64)}` as const;
     writeContract.mockResolvedValue(txHash);
@@ -371,7 +373,7 @@ describe("DisputeSection — DISPUTED, arbitration view", () => {
       confirmations: 1,
     });
 
-    render(<DisputeSection taskId="task-1" />);
+    render(<DisputeSection taskId="task-1" onTaskChanged={onTaskChanged} />);
     fireEvent.click(await screen.findByRole("button", { name: "支持 Agent" }));
     expect(writeContract).not.toHaveBeenCalled();
 
@@ -385,6 +387,7 @@ describe("DisputeSection — DISPUTED, arbitration view", () => {
       ),
     );
     expect(await screen.findByText("仲裁已裁决：支持 Agent。")).toBeTruthy();
+    expect(onTaskChanged).toHaveBeenCalledTimes(1);
   });
 
   // Mirrors T-1004's own mutual-exclusion regression suite: resolveDispute

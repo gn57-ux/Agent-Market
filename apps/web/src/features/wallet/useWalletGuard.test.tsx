@@ -9,6 +9,7 @@ const YD_TOKEN_ADDRESS = "0x1111111111111111111111111111111111111111" as const;
 const TARGET_CHAIN: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: "0x2222222222222222222222222222222222222222",
     ydToken: YD_TOKEN_ADDRESS,

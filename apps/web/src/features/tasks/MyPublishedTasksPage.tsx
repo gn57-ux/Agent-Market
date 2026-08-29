@@ -193,6 +193,10 @@ export function MyPublishedTasksPage() {
                       <TaskCard
                         taskId={task.taskId}
                         title={task.title}
+                        description={task.description}
+                        category={task.category}
+                        skillTags={task.skillTags}
+                        deliveryDeadline={task.deliveryDeadline}
                         budgetDisplay={`${formatAmount(BigInt(task.budget))} YD`}
                         status={toTaskStatus(
                           task,

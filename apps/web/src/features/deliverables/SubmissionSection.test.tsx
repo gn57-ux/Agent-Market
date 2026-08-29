@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SubmissionSection } from "./SubmissionSection.js";
 import * as deliverablesApi from "./api.js";
 import { ApiError as DeliverablesApiError } from "./api.js";
+import { apiBaseUrl } from "../../shared/api/client.js";
 import * as tasksApi from "../tasks/api.js";
 import type { TaskRecord } from "../tasks/api.js";
 
@@ -28,6 +29,7 @@ vi.mock("../session/SessionProvider.js", () => ({
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -136,6 +138,7 @@ describe("SubmissionSection", () => {
   });
 
   it("computes the hash via the backend (F-901), previews it verbatim (F-903), then drives submitResult end to end", async () => {
+    const onSubmitted = vi.fn();
     vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture());
     vi.spyOn(deliverablesApi, "getLatestDeliverable").mockRejectedValue(NOT_SUBMITTED_YET);
     const resultHash = `0x${"b".repeat(64)}` as const;
@@ -151,7 +154,7 @@ describe("SubmissionSection", () => {
       .spyOn(deliverablesApi, "submitResultVerification")
       .mockResolvedValue({ status: "SUBMITTED", confirmations: 1 });
 
-    render(<SubmissionSection taskId="task-1" />);
+    render(<SubmissionSection taskId="task-1" onSubmitted={onSubmitted} />);
 
     const file = new File(["hello"], "result.txt", { type: "text/plain" });
     const input = await screen.findByLabelText("上传成果文件");
@@ -177,6 +180,7 @@ describe("SubmissionSection", () => {
       }),
     );
     expect(verifySpy).toHaveBeenCalledWith("task-1", txHash);
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
   });
 
   it("warns and disables submission when the connected wallet doesn't match the accepted Agent's address", async () => {
@@ -426,9 +430,7 @@ describe("SubmissionSection", () => {
     render(<SubmissionSection taskId="task-1" />);
 
     const link = await screen.findByRole("link", { name: "下载成果文件" });
-    expect(link.getAttribute("href")).toBe(
-      "http://localhost:3001/tasks/task-1/deliverables/latest/file",
-    );
+    expect(link.getAttribute("href")).toBe(`${apiBaseUrl()}/tasks/task-1/deliverables/latest/file`);
   });
 
   it("shows the same download link for the accepted Agent once SUBMITTED", async () => {

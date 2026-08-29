@@ -143,3 +143,20 @@ export const TASK_ESCROW_STAKE_RATE_BPS_ABI = [
     outputs: [{ name: "", type: "uint256" }],
   },
 ] as const;
+
+/** `TaskEscrow.reviewWindow` (`uint64 public immutable`) — the real
+ * validation-window duration this deployment was constructed with
+ * (contracts/src/TaskEscrow.sol). `TaskCreatePage`'s step-3 settlement-rules
+ * copy reads this rather than hardcoding "72 小时": the review window is a
+ * per-deployment constructor argument, not a fixed project-wide constant
+ * (`InvalidReviewWindow` guards it can be anywhere in a wide valid range),
+ * so only the contract itself is the source of truth for its own value. */
+export const TASK_ESCROW_REVIEW_WINDOW_ABI = [
+  {
+    type: "function",
+    name: "reviewWindow",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint64" }],
+  },
+] as const;

@@ -29,6 +29,7 @@ vi.mock("../session/SessionProvider.js", () => ({
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -307,13 +308,18 @@ describe("AcceptanceSection", () => {
         ownerAddress: "0x1111111111111111111111111111111111111111",
       }),
     );
-    const getTaskSpy = vi.spyOn(tasksApi, "getTask");
+    const getTaskSpy = vi
+      .spyOn(tasksApi, "getTask")
+      .mockResolvedValue(
+        taskFixture({ requesterAddress: "0x1111111111111111111111111111111111111111" }),
+      );
 
     render(<AcceptanceSection taskId="task-1" />);
 
     expect(await screen.findByText("推荐候选")).toBeTruthy();
-    // Not a candidate → never needs the task record for its own display.
-    expect(getTaskSpy).not.toHaveBeenCalled();
+    // CandidateSection reads ownership only to decide whether it may start
+    // a match; this non-requester must never start one.
+    expect(getTaskSpy).toHaveBeenCalledWith("task-1");
   });
 
   it("falls back to Feature 7's CandidateSection when signed out", async () => {
@@ -342,13 +348,17 @@ describe("AcceptanceSection", () => {
     vi.spyOn(recommendationsApi, "getRecommendations")
       .mockRejectedValueOnce(new Error("network down"))
       .mockResolvedValue({ recommendations: [] });
-    const getTaskSpy = vi.spyOn(tasksApi, "getTask");
+    const getTaskSpy = vi
+      .spyOn(tasksApi, "getTask")
+      .mockResolvedValue(
+        taskFixture({ requesterAddress: "0x1111111111111111111111111111111111111111" }),
+      );
 
     render(<AcceptanceSection taskId="task-1" />);
 
     expect(await screen.findByText("推荐候选")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(getTaskSpy).not.toHaveBeenCalled();
+    expect(getTaskSpy).toHaveBeenCalledWith("task-1");
   });
 
   // Regression for Codex round 2 P2: a `getTask` failure that is NOT an

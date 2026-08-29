@@ -237,19 +237,33 @@ export function MyAcceptedTasksPage() {
                         // alone collides when the same wallet owns two
                         // recommended Agents on one task (see this item
                         // type's own `agentId` field doc comment above).
-                        <Link key={`${item.taskId}-${item.agentId}`} to={`/tasks/${item.taskId}`}>
-                          <article
-                            data-task-id={item.taskId}
-                            data-agent-id={item.agentId}
-                            data-invitation-kind="INVITED"
-                            className="rounded-control border border-divider-light p-4"
-                          >
-                            <h3 className="text-body font-medium text-ink-primary">{item.title}</h3>
-                            <p className="mt-1 text-caption text-ink-secondary">
-                              {formatAmount(BigInt(item.budget))} YD · 第 {item.rank} 名候选（
-                              {item.slotType}）
-                            </p>
-                          </article>
+                        <Link
+                          key={`${item.taskId}-${item.agentId}`}
+                          to={`/tasks/${item.taskId}`}
+                          data-task-id={item.taskId}
+                          data-agent-id={item.agentId}
+                          data-invitation-kind="INVITED"
+                          className="flex flex-col gap-3 rounded-card-compact border border-divider-light bg-canvas-light p-6 transition-colors hover:border-action-blue"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded bg-canvas-warm px-2 py-1 text-caption font-medium text-ink-primary">
+                              {item.category}
+                            </span>
+                            <span className="rounded-control border border-action-blue/30 bg-action-blue/10 px-2.5 py-1 text-caption font-medium text-action-blue">
+                              {item.slotType === "NEWCOMER"
+                                ? "新人探索位"
+                                : `第 ${item.rank} 名候选`}
+                            </span>
+                          </div>
+                          <h3 className="text-lg font-semibold text-ink-primary">{item.title}</h3>
+                          <div className="mt-auto flex items-center justify-between border-t border-divider-light pt-3 text-caption">
+                            <span className="font-medium text-ink-primary">
+                              {formatAmount(BigInt(item.budget))} YD
+                            </span>
+                            <span className="text-ink-secondary">
+                              {new Date(item.deliveryDeadline).toLocaleDateString()} 截止
+                            </span>
+                          </div>
                         </Link>
                       ) : null,
                     )}
@@ -312,6 +326,11 @@ export function MyAcceptedTasksPage() {
                           <TaskCard
                             taskId={item.task.taskId}
                             title={item.task.title}
+                            description={item.task.description}
+                            category={item.task.category}
+                            skillTags={item.task.skillTags}
+                            deliveryDeadline={item.task.deliveryDeadline}
+                            requesterAddress={item.task.requesterAddress}
                             budgetDisplay={`${formatAmount(BigInt(item.task.budget))} YD`}
                             status={toTaskStatus(
                               item.task,

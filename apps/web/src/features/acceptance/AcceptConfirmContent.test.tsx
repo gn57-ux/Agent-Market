@@ -14,6 +14,7 @@ const ADDRESS = "0x1234567890123456789012345678901234567890" as const;
 const CHAIN_CONFIG: ChainConfig = {
   chainId: 31337,
   name: "Local Hardhat",
+  isTestnet: true,
   addresses: {
     taskEscrow: `0x${"2".repeat(40)}` as const,
     ydToken: `0x${"1".repeat(40)}` as const,
@@ -605,6 +606,7 @@ describe("AcceptConfirmContent", () => {
     render(<AcceptConfirmContent taskId="task-1" agentId="agent-1" stake={100n} />);
 
     expect((await screen.findByRole("alert")).textContent).toContain("YD 余额不足");
+    expect(await screen.findByRole("button", { name: /领取测试 YD/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "开始质押接单" })).toBeNull();
     expect(writeContract).not.toHaveBeenCalled();
   });
