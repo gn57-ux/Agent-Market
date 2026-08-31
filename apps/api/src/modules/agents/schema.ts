@@ -29,6 +29,33 @@ const INVOCATION_URL_SCHEMA = z
   .refine((value) => /^https?:\/\//i.test(value), "调用地址必须是 http(s) URL");
 const PRICING_MODEL_SCHEMA = z.string().trim().max(100);
 
+// F-1201/F-1202 (Feature 12): the migration's own CHECK constraints are the
+// authoritative source of "what's legal" (0013_add_agent_task_credentials.sql)
+// — these two schemas mirror those exact constraints so a malformed request
+// gets a readable Chinese 400 instead of a raw Postgres constraint-violation
+// error, matching this module's existing NAME_SCHEMA/CATEGORY_SCHEMA etc.
+// pattern of "one Zod rule per DB constraint, defined once, reused by both
+// create/update schemas."
+//
+// protocolVersion only has one legal value in this stage (the migration's
+// own `CHECK (protocol_version = 'v1')`) — a `z.literal` rejects anything
+// else with a clear message rather than a permissive `z.string()` that
+// would just defer the same rejection to the database layer.
+const PROTOCOL_VERSION_SCHEMA = z.literal("v1", { message: "协议版本目前只支持 v1" });
+// credentialEnabled is a TOGGLE, not the reference string itself (T-1300).
+// The owner never chooses or sees a raw `credentialRef` as API input —
+// `true` asks the server to compute+set the one deterministic reference
+// this Agent's own id produces (credential.ts's `computeCredentialRef`),
+// `false` clears it back to unconfigured. This replaced an earlier
+// free-text `credentialRef` field after a real Codex finding (T-1300 round
+// 1, P1): a self-chosen reference string let an attacker who knows a
+// victim Agent's public id pre-claim `env://AGENT_<victim's id>` before the
+// operator ever provisioned it — see 0013_add_agent_task_credentials.sql's
+// migration comment for the full writeup. The actual resolved value
+// (`agent.credentialRef` in every read response) is still a real, never-
+// echoed-secret reference string — only the WRITE side changed.
+const CREDENTIAL_ENABLED_SCHEMA = z.boolean();
+
 // `reference_price` is a PostgreSQL NUMERIC column (arbitrary precision) and
 // `node-postgres` already reads it back out as a string rather than a JS
 // `number` (routes.ts's toAgentSummaryJson doc comment). Accepting it as a
@@ -93,6 +120,14 @@ export const createAgentSchema = z.object({
   payoutAddress: ETH_ADDRESS_SCHEMA,
   pricingModel: PRICING_MODEL_SCHEMA.optional(),
   referencePrice: REFERENCE_PRICE_SCHEMA.optional(),
+  // Omitted entirely uses the migration's own DEFAULT ('v1'); the only
+  // reason a caller would supply it explicitly is to be self-documenting.
+  protocolVersion: PROTOCOL_VERSION_SCHEMA.optional(),
+  // Omitted or `false` = no credential configured at creation (the common
+  // case: nothing to enable yet). `true` computes and sets the canonical
+  // reference immediately (repository.ts does the insert, then a
+  // same-transaction update once the row's real id exists).
+  credentialEnabled: CREDENTIAL_ENABLED_SCHEMA.optional(),
 });
 
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
@@ -124,6 +159,14 @@ export const agentIdParamSchema = z.object({
   agentId: z.string().uuid("agentId 必须是合法的 UUID"),
 });
 
+/** F-1204's diagnostic endpoint request body (T-1203): an arbitrary JSON
+ * payload the caller wants forwarded to the Agent's invocationUrl — this
+ * module has no opinion on its shape, invocation-client.ts passes it
+ * through verbatim. */
+export const invocationTestSchema = z.object({
+  payload: z.unknown(),
+});
+
 /**
  * F-503: `PATCH /agents/:agentId` body — `Partial<CreateAgentInput>`
  * (design.md's interface contract), with one addition: `authorBio`,
@@ -151,6 +194,15 @@ export const updateAgentSchema = z.object({
   payoutAddress: ETH_ADDRESS_SCHEMA.optional(),
   pricingModel: PRICING_MODEL_SCHEMA.nullable().optional(),
   referencePrice: REFERENCE_PRICE_SCHEMA.nullable().optional(),
+  // Not nullable (unlike authorBio/pricingModel/referencePrice above):
+  // protocol_version is `NOT NULL DEFAULT 'v1'` with no "unset" state to
+  // clear back to — there's only ever the one legal value.
+  protocolVersion: PROTOCOL_VERSION_SCHEMA.optional(),
+  // `undefined` = don't change; `true` = enable (compute+set the canonical
+  // reference for this Agent's own id); `false` = disable (clear back to
+  // unconfigured) — a plain boolean already covers all three states a
+  // toggle needs, no `null` variant required.
+  credentialEnabled: CREDENTIAL_ENABLED_SCHEMA.optional(),
 });
 
 export type UpdateAgentInput = z.infer<typeof updateAgentSchema>;

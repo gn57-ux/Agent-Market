@@ -83,6 +83,7 @@ export function registerRatingsRoutes(app: FastifyInstance, pool: Pool): void {
         taskId: task.id,
         requesterAddress: sessionAddress,
         score: bodyParsed.data.score,
+        communicationScore: bodyParsed.data.communicationScore,
       });
       if (!rating) {
         await client.query("ROLLBACK");
@@ -129,6 +130,7 @@ export function registerRatingsRoutes(app: FastifyInstance, pool: Pool): void {
     return reply.send({
       ratingId: rating.id,
       score: rating.score,
+      communicationScore: rating.communicationScore,
       createdAt: rating.createdAt.toISOString(),
     });
   });

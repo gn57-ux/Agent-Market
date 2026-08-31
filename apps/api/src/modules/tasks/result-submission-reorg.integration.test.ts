@@ -48,7 +48,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, " +
-  "tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
+  "tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 const TASK_ESCROW_ADDRESS = "0x1234567890123456789012345678901234567890" as `0x${string}`;
 const YD_TOKEN_ADDRESS = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
@@ -182,8 +182,8 @@ runIfOptedIn("pending_result_submissions reorg lifecycle (integration, T-905 rou
       requester.address.toLowerCase(),
     ]);
     const { rows } = await pool.query<{ id: string }>(
-      `INSERT INTO tasks (requester_address, category, title, description, budget, token, delivery_deadline, status, accepted_agent_address, accepted_at)
-       VALUES ($1, 'writing', 'Task', 'desc', $2, $3, '2099-01-01T00:00:00Z', 'ACCEPTED', $4, now())
+      `INSERT INTO tasks (requester_address, category, title, description, budget, token, delivery_deadline, status, accepted_agent_address, accepted_at, expert_type)
+       VALUES ($1, 'writing', 'Task', 'desc', $2, $3, '2099-01-01T00:00:00Z', 'ACCEPTED', $4, now(), 'AUTOMATION')
        RETURNING id`,
       [requester.address.toLowerCase(), TASK_BUDGET, YD_TOKEN_ADDRESS, agent.address.toLowerCase()],
     );

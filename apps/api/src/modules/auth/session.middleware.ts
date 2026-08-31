@@ -28,7 +28,13 @@ declare module "fastify" {
   }
 }
 
-const SESSION_COOKIE_NAME = "session_token";
+/** Exported so other modules that need a best-effort ("don't 401, just tell
+ * me if there's a valid session") lookup can read the same cookie without
+ * duplicating this name — see agents/routes.ts's `getOptionalSessionAddress`
+ * for the one current consumer. This constant is not part of the
+ * `requireSession`/`request.address` interface-freeze (this file's own
+ * header doc comment) — it's just the cookie name, safe to reuse directly. */
+export const SESSION_COOKIE_NAME = "session_token";
 
 async function sessionMiddlewarePlugin(app: FastifyInstance, pool: Pool): Promise<void> {
   app.decorateRequest("address", undefined);

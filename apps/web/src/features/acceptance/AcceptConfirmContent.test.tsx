@@ -99,6 +99,7 @@ function taskRecordFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
     token: CHAIN_CONFIG.addresses.ydToken,
     deliveryDeadline: new Date().toISOString(),
     skillTags: [],
+    expertType: "AUTOMATION",
     status: "OPEN",
     fundingTxHash: `0x${"a".repeat(64)}`,
     createdAt: new Date().toISOString(),

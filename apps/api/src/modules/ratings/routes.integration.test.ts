@@ -32,7 +32,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 runIfOptedIn("POST /tasks/:taskId/ratings (integration, T-1003)", () => {
   let pool: Pool;
@@ -114,8 +114,8 @@ runIfOptedIn("POST /tasks/:taskId/ratings (integration, T-1003)", () => {
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO tasks
          (requester_address, category, title, description, budget, token, delivery_deadline,
-          status, accepted_agent_address, accepted_agent_id, accepted_at)
-       VALUES ($1, 'writing', 'Task', 'desc', 1000, $2, '2099-01-01T00:00:00Z', $3, $4, $5, now())
+          status, accepted_agent_address, accepted_agent_id, accepted_at, expert_type)
+       VALUES ($1, 'writing', 'Task', 'desc', 1000, $2, '2099-01-01T00:00:00Z', $3, $4, $5, now(), 'AUTOMATION')
        RETURNING id`,
       [
         requester.address.toLowerCase(),
@@ -176,6 +176,61 @@ runIfOptedIn("POST /tasks/:taskId/ratings (integration, T-1003)", () => {
     expect(stats.qualityScore).toBeCloseTo(1, 10); // score 5 -> (5-1)/4 = 1.0
     // AC-1008: this route must never touch the settlement counters.
     expect(stats).toMatchObject({ completed: 3, success: 2, overdue: 1 });
+  });
+
+  // F-1310 (Feature 13, T-1306): communicationScore is submitted in the
+  // same POST, but stays entirely optional — this test proves both the
+  // present and omitted cases persist correctly.
+  it("accepts an optional communicationScore alongside score, persisting it on the row (F-1310)", async () => {
+    const agentId = await insertAgentRow();
+    const taskId = await insertTaskWithStatus("RELEASED", agentId);
+    const token = await login(requester);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/ratings`,
+      cookies: { session_token: token },
+      payload: { score: 5, communicationScore: 4 },
+    });
+
+    expect(response.statusCode).toBe(201);
+
+    const getResponse = await app.inject({ method: "GET", url: `/tasks/${taskId}/ratings` });
+    const body = getResponse.json() as { score: number; communicationScore: number | null };
+    expect(body).toMatchObject({ score: 5, communicationScore: 4 });
+  });
+
+  it("persists communicationScore as null when the field is omitted entirely (never a fabricated default)", async () => {
+    const agentId = await insertAgentRow();
+    const taskId = await insertTaskWithStatus("RELEASED", agentId);
+    const token = await login(requester);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/ratings`,
+      cookies: { session_token: token },
+      payload: { score: 3 },
+    });
+    expect(response.statusCode).toBe(201);
+
+    const getResponse = await app.inject({ method: "GET", url: `/tasks/${taskId}/ratings` });
+    const body = getResponse.json() as { communicationScore: number | null };
+    expect(body.communicationScore).toBeNull();
+  });
+
+  it("rejects an out-of-range communicationScore (400), matching score's own 1-5 validation", async () => {
+    const agentId = await insertAgentRow();
+    const taskId = await insertTaskWithStatus("RELEASED", agentId);
+    const token = await login(requester);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/ratings`,
+      cookies: { session_token: token },
+      payload: { score: 5, communicationScore: 6 },
+    });
+
+    expect(response.statusCode).toBe(400);
   });
 
   it("accepts a rating on a REFUNDED task too — settlement outcome does not gate rating eligibility", async () => {

@@ -23,7 +23,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, " +
-  "tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
+  "tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 const VALID_DRAFT_PAYLOAD = {
   category: "writing",
@@ -32,6 +32,7 @@ const VALID_DRAFT_PAYLOAD = {
   description: "Need 500 words of marketing copy.",
   budget: "125500000000000000000",
   deliveryDeadline: "2099-01-01T00:00:00.000Z",
+  expertType: "CONTENT_GENERATION",
 };
 
 runIfOptedIn(
@@ -200,7 +201,7 @@ runIfOptedIn(
       expect(response.statusCode).toBe(400);
     });
 
-    it("returns the same taskId for a repeated Idempotency-Key without creating a second row (F-601 core contract)", async () => {
+    it("returns the same taskId for a repeated Idempotency-Key with the IDENTICAL payload, without creating a second row (F-601 core contract)", async () => {
       const token = await login(requester);
       const idempotencyKey = "client-generated-key-1";
 
@@ -208,11 +209,10 @@ runIfOptedIn(
       expect(first.statusCode).toBe(201);
       const firstTaskId = first.json().taskId;
 
-      const second = await createDraft(
-        token,
-        { title: "A different title — must be ignored" },
-        idempotencyKey,
-      );
+      // A genuine retry (network blip, double-click) resends the SAME
+      // payload — this must hit the idempotent-replay path, not create a
+      // second row.
+      const second = await createDraft(token, {}, idempotencyKey);
       expect(second.statusCode).toBe(201);
       expect(second.json().taskId).toBe(firstTaskId);
 
@@ -222,13 +222,119 @@ runIfOptedIn(
       );
       expect(rows[0].count).toBe(1);
 
-      // The second (duplicate) submission's payload must NOT have overwritten
-      // the original row — idempotent replay returns the existing task as-is,
-      // it doesn't silently apply the retry's body as an edit.
       const { rows: taskRows } = await pool.query(`SELECT title FROM tasks WHERE id = $1`, [
         firstTaskId,
       ]);
       expect(taskRows[0].title).toBe(VALID_DRAFT_PAYLOAD.title);
+    });
+
+    // T-609 (Feature 14, F-1405): a same-key replay whose payload genuinely
+    // differs from the original is a client bug — reusing an Idempotency-
+    // Key for a materially different logical request — not a legitimate
+    // retry. Previously this silently returned the ORIGINAL task as if the
+    // new data had been accepted, discarding the caller's actual intent
+    // without any signal that anything was wrong.
+    it("rejects a repeated Idempotency-Key whose payload differs from the original, with 409 IDEMPOTENCY_KEY_CONFLICT (T-609)", async () => {
+      const token = await login(requester);
+      const idempotencyKey = "client-generated-key-conflict";
+
+      const first = await createDraft(token, {}, idempotencyKey);
+      expect(first.statusCode).toBe(201);
+      const firstTaskId = first.json().taskId;
+
+      const second = await createDraft(
+        token,
+        { title: "A genuinely different title" },
+        idempotencyKey,
+      );
+      expect(second.statusCode).toBe(409);
+      expect(second.json()).toMatchObject({
+        error: { code: "IDEMPOTENCY_KEY_CONFLICT" },
+      });
+
+      // No second row, and the original is untouched.
+      const { rows } = await pool.query(
+        `SELECT count(*)::int AS count FROM tasks WHERE requester_address = $1 AND idempotency_key = $2`,
+        [requester.address.toLowerCase(), idempotencyKey],
+      );
+      expect(rows[0].count).toBe(1);
+      const { rows: taskRows } = await pool.query(`SELECT title FROM tasks WHERE id = $1`, [
+        firstTaskId,
+      ]);
+      expect(taskRows[0].title).toBe(VALID_DRAFT_PAYLOAD.title);
+    });
+
+    // T-609: every client-controlled field individually triggers the
+    // conflict, not just `title` — proves the comparison isn't accidentally
+    // narrowed to one field.
+    it.each([
+      ["category", { category: "translation" }],
+      ["description", { description: "A different description entirely." }],
+      ["budget", { budget: "1" }],
+      ["deliveryDeadline", { deliveryDeadline: "2099-06-01T00:00:00.000Z" }],
+      ["expertType", { expertType: "RESEARCH" }],
+      ["skillTags", { skillTags: ["a-totally-different-tag"] }],
+    ])(
+      "rejects a repeated Idempotency-Key when only %s differs (T-609)",
+      async (_label, overrides) => {
+        const token = await login(requester);
+        const idempotencyKey = `client-generated-key-${_label}`;
+
+        const first = await createDraft(token, {}, idempotencyKey);
+        expect(first.statusCode).toBe(201);
+
+        const second = await createDraft(token, overrides, idempotencyKey);
+        expect(second.statusCode).toBe(409);
+        expect(second.json()).toMatchObject({
+          error: { code: "IDEMPOTENCY_KEY_CONFLICT" },
+        });
+      },
+    );
+
+    // T-609: reordering (and duplicating) the same set of skill tags must
+    // NOT be treated as a conflict — the comparison is a set, not an
+    // ordered array, matching `createDraft`'s own de-duplication.
+    it("does not treat a reordered/duplicated-but-equivalent skillTags array as a conflict (T-609)", async () => {
+      const token = await login(requester);
+      const idempotencyKey = "client-generated-key-skilltags-reorder";
+
+      const first = await createDraft(token, { skillTags: ["copywriting", "seo"] }, idempotencyKey);
+      expect(first.statusCode).toBe(201);
+      const firstTaskId = first.json().taskId;
+
+      const second = await createDraft(
+        token,
+        { skillTags: ["seo", "copywriting", "seo"] },
+        idempotencyKey,
+      );
+      expect(second.statusCode).toBe(201);
+      expect(second.json().taskId).toBe(firstTaskId);
+    });
+
+    // Codex review (T-609 P2): BUDGET_SCHEMA's pattern accepts leading
+    // zeros, but PostgreSQL's NUMERIC column normalizes them away on
+    // read-back — a raw string comparison would wrongly treat this
+    // genuinely identical replay as a conflict.
+    it("does not treat a leading-zero budget as different from its normalized stored value (T-609)", async () => {
+      const token = await login(requester);
+      const idempotencyKey = "client-generated-key-budget-leading-zero";
+
+      const first = await createDraft(token, { budget: "007" }, idempotencyKey);
+      expect(first.statusCode).toBe(201);
+      const firstTaskId = first.json().taskId;
+
+      const { rows } = await pool.query(`SELECT budget FROM tasks WHERE id = $1`, [firstTaskId]);
+      expect(rows[0].budget).toBe("7");
+
+      // The exact same literal request (still "007") replayed — must be
+      // treated as identical, not a conflict.
+      const second = await createDraft(token, { budget: "007" }, idempotencyKey);
+      expect(second.statusCode).toBe(201);
+      expect(second.json().taskId).toBe(firstTaskId);
+
+      // A genuinely different numeric value must still be a real conflict.
+      const third = await createDraft(token, { budget: "8" }, idempotencyKey);
+      expect(third.statusCode).toBe(409);
     });
 
     it("honors an Idempotency-Key longer than 200 characters, not silently as if absent (Codex round 1 P2)", async () => {
@@ -239,11 +345,9 @@ runIfOptedIn(
       expect(first.statusCode).toBe(201);
       const firstTaskId = first.json().taskId;
 
-      const second = await createDraft(
-        token,
-        { title: "A different title — must be ignored" },
-        longKey,
-      );
+      // A genuine identical-payload retry — the long key's own truncation
+      // question is orthogonal to T-609's payload-comparison change.
+      const second = await createDraft(token, {}, longKey);
       expect(second.statusCode).toBe(201);
       // If the long key had been silently dropped (treated as absent), this
       // retry would have created a brand-new task instead of hitting the
@@ -281,6 +385,64 @@ runIfOptedIn(
         payload: { category: "writing" },
       });
       expect(response.statusCode).toBe(400);
+    });
+
+    // Feature 12 (F-1205/AC-1205): expertType round-trips through create,
+    // the create response body itself, and a subsequent GET detail — same
+    // three-path proof agents/mutations.integration.test.ts uses for
+    // protocolVersion/credentialRef.
+    it("round-trips expertType through create, the create response, and GET detail (AC-1205)", async () => {
+      const token = await login(requester);
+      const response = await createDraft(token, { expertType: "SOFTWARE_DEVELOPMENT" });
+      expect(response.statusCode).toBe(201);
+      expect(response.json().expertType).toBe("SOFTWARE_DEVELOPMENT");
+      const taskId = response.json().taskId;
+
+      const { rows } = await pool.query(`SELECT expert_type FROM tasks WHERE id = $1`, [taskId]);
+      expect(rows[0].expert_type).toBe("SOFTWARE_DEVELOPMENT");
+
+      const detail = await app.inject({
+        method: "GET",
+        url: `/tasks/${taskId}`,
+        cookies: { session_token: token },
+      });
+      expect(detail.json().expertType).toBe("SOFTWARE_DEVELOPMENT");
+    });
+
+    it("rejects a draft creation omitting expertType with 400 (F-1205: no default, must be explicit)", async () => {
+      const token = await login(requester);
+      const payloadWithoutExpertType: Record<string, unknown> = { ...VALID_DRAFT_PAYLOAD };
+      delete payloadWithoutExpertType.expertType;
+      const response = await app.inject({
+        method: "POST",
+        url: "/tasks/drafts",
+        cookies: { session_token: token },
+        payload: payloadWithoutExpertType,
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it("rejects an unrecognized expertType, including a lowercase variant, with 400 (AC-1205)", async () => {
+      const token = await login(requester);
+      const lowercase = await createDraft(token, { expertType: "software_development" });
+      expect(lowercase.statusCode).toBe(400);
+      const unknown = await createDraft(token, { expertType: "PROJECT_MANAGEMENT" });
+      expect(unknown.statusCode).toBe(400);
+    });
+
+    it("accepts each of the 5 legal expertType values (AC-1205)", async () => {
+      const token = await login(requester);
+      for (const expertType of [
+        "DATA_ANALYSIS",
+        "CONTENT_GENERATION",
+        "SOFTWARE_DEVELOPMENT",
+        "RESEARCH",
+        "AUTOMATION",
+      ]) {
+        const response = await createDraft(token, { expertType });
+        expect(response.statusCode).toBe(201);
+        expect(response.json().expertType).toBe(expertType);
+      }
     });
 
     it("rejects a draft creation with a malformed deliveryDeadline with 400", async () => {
@@ -354,6 +516,43 @@ runIfOptedIn(
       expect(body.description).toBe(VALID_DRAFT_PAYLOAD.description);
       expect(body.category).toBe(VALID_DRAFT_PAYLOAD.category);
       expect(body.skillTags.sort()).toEqual(["copywriting", "seo"]);
+    });
+
+    it("PATCH updates expertType when provided, and omitting it leaves the current value unchanged (F-1205: optional on update)", async () => {
+      const token = await login(requester);
+      const created = await createDraft(token, { expertType: "AUTOMATION" });
+      const taskId = created.json().taskId;
+
+      const changed = await app.inject({
+        method: "PATCH",
+        url: `/tasks/${taskId}/draft`,
+        cookies: { session_token: token },
+        payload: { expertType: "RESEARCH" },
+      });
+      expect(changed.statusCode).toBe(200);
+      expect(changed.json().expertType).toBe("RESEARCH");
+
+      const unrelatedEdit = await app.inject({
+        method: "PATCH",
+        url: `/tasks/${taskId}/draft`,
+        cookies: { session_token: token },
+        payload: { title: "Still Research" },
+      });
+      expect(unrelatedEdit.json().expertType).toBe("RESEARCH");
+    });
+
+    it("rejects a PATCH with an invalid expertType value with 400", async () => {
+      const token = await login(requester);
+      const created = await createDraft(token);
+      const taskId = created.json().taskId;
+
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/tasks/${taskId}/draft`,
+        cookies: { session_token: token },
+        payload: { expertType: "not_a_real_type" },
+      });
+      expect(response.statusCode).toBe(400);
     });
 
     it("replaces the full skillTags set when provided in a PATCH", async () => {

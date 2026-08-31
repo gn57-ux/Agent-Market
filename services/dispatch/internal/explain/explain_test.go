@@ -81,6 +81,50 @@ func TestExplain_QualityScoreNeutralPrior(t *testing.T) {
 	}
 }
 
+// --- v0.2 signal codes (Feature 13, T-1305) ---
+
+func TestExplain_V2CompletionRate_NumberReflectsNormalizedValue(t *testing.T) {
+	got := Explain(scoring.Reason{Code: scoring.ReasonV2CompletionRate, NormalizedValue: 0.92})
+	if got != "完成强度 92%" {
+		t.Fatalf("unexpected text: %q", got)
+	}
+}
+
+func TestExplain_V2QualityFeedback_NumberReflectsNormalizedValue(t *testing.T) {
+	got := Explain(scoring.Reason{Code: scoring.ReasonV2QualityFeedback, NormalizedValue: 0.75})
+	if got != "质量反馈 0.75" {
+		t.Fatalf("unexpected text: %q", got)
+	}
+}
+
+func TestExplain_V2Communication_NumberReflectsNormalizedValue(t *testing.T) {
+	got := Explain(scoring.Reason{Code: scoring.ReasonV2Communication, NormalizedValue: 0.6})
+	if got != "沟通体验 0.60" {
+		t.Fatalf("unexpected text: %q", got)
+	}
+}
+
+func TestExplain_V2DisputeSignal_NumberReflectsNormalizedValue(t *testing.T) {
+	got := Explain(scoring.Reason{Code: scoring.ReasonV2DisputeSignal, NormalizedValue: 1.0})
+	if got != "争议信号 1.00" {
+		t.Fatalf("unexpected text: %q", got)
+	}
+}
+
+func TestExplain_V2HistoricalScale_NumberReflectsNormalizedValue(t *testing.T) {
+	got := Explain(scoring.Reason{Code: scoring.ReasonV2HistoricalScale, NormalizedValue: 0.25})
+	if got != "历史完成规模 0.25" {
+		t.Fatalf("unexpected text: %q", got)
+	}
+}
+
+func TestExplain_V2NoHistoricalSample(t *testing.T) {
+	got := Explain(scoring.Reason{Code: scoring.ReasonV2NoHistoricalSample})
+	if got != "暂无历史结算样本，归类为新人探索位" {
+		t.Fatalf("unexpected text: %q", got)
+	}
+}
+
 func TestExplain_UnknownReasonCodePanics(t *testing.T) {
 	defer func() {
 		r := recover()

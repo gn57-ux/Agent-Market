@@ -121,6 +121,76 @@ describe("AgentCreatePage", () => {
     );
   });
 
+  // Feature 12 (F-1207/AC-1207): the "协议版本" field is a fixed read-only
+  // display, never an editable selector.
+  it("shows the protocol version as a fixed, disabled 'v1' display", async () => {
+    renderPage();
+    await connectAndLogIn();
+
+    const protocolVersionInput = screen.getByLabelText("协议版本") as HTMLInputElement;
+    expect(protocolVersionInput.value).toBe("v1");
+    expect(protocolVersionInput.disabled).toBe(true);
+  });
+
+  // T-1300: credentialRef is no longer owner-chosen free text — a checkbox
+  // toggles `credentialEnabled`, and the server computes the actual
+  // reference from the Agent's own real id (closing the front-running
+  // vector a free-text input used to allow). There is nothing left to
+  // validate client-side: a checkbox can't be malformed.
+  it("defaults the credential toggle to unchecked, and submits credentialEnabled unset when left alone", async () => {
+    vi.spyOn(agentsApi, "createAgent").mockResolvedValue({
+      agentId: "agent-123",
+      status: "ACTIVE",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      completedTaskCount: 0,
+      qualityScore: null,
+    });
+    renderPage();
+    await connectAndLogIn();
+
+    const checkbox = screen.getByLabelText("启用调用凭据引用") as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "My Agent" } });
+    fireEvent.change(screen.getByLabelText("介绍"), { target: { value: "desc" } });
+    fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("收款地址"), {
+      target: { value: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发布" }));
+
+    await waitFor(() => expect(screen.getByTestId("navigated-detail")).toBeTruthy());
+    expect(agentsApi.createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ credentialEnabled: undefined }),
+    );
+  });
+
+  it("submits credentialEnabled: true when the toggle is checked", async () => {
+    vi.spyOn(agentsApi, "createAgent").mockResolvedValue({
+      agentId: "agent-123",
+      status: "ACTIVE",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      completedTaskCount: 0,
+      qualityScore: null,
+    });
+    renderPage();
+    await connectAndLogIn();
+
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "My Agent" } });
+    fireEvent.change(screen.getByLabelText("介绍"), { target: { value: "desc" } });
+    fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("收款地址"), {
+      target: { value: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3" },
+    });
+    fireEvent.click(screen.getByLabelText("启用调用凭据引用"));
+    fireEvent.click(screen.getByRole("button", { name: "发布" }));
+
+    await waitFor(() => expect(screen.getByTestId("navigated-detail")).toBeTruthy());
+    expect(agentsApi.createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ credentialEnabled: true }),
+    );
+  });
+
   it("shows an error message and stays on the page when creation fails", async () => {
     vi.spyOn(agentsApi, "createAgent").mockRejectedValue(new Error("boom"));
     renderPage();

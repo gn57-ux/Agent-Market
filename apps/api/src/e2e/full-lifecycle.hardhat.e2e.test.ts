@@ -112,7 +112,7 @@ const contractsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 // Same well-known deterministic Hardhat Network default accounts T-906
 // already uses — publicly documented, hold no real value.
@@ -438,8 +438,8 @@ runIfOptedIn("Feature 10 full lifecycle (real Hardhat e2e, T-1007, PRD §16.5/§
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO tasks
            (requester_address, category, title, description, budget, token, delivery_deadline,
-            status, accepted_agent_address, accepted_agent_id, accepted_at)
-         VALUES ($1, 'writing', $2, 'desc', $3, $4, to_timestamp($5), 'ACCEPTED', $6, $7, now())
+            status, accepted_agent_address, accepted_agent_id, accepted_at, expert_type)
+         VALUES ($1, 'writing', $2, 'desc', $3, $4, to_timestamp($5), 'ACCEPTED', $6, $7, now(), 'AUTOMATION')
          RETURNING id`,
       [
         requester.address.toLowerCase(),

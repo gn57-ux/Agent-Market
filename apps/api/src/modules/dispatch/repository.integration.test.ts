@@ -53,7 +53,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, " +
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, " +
   "sessions, auth_nonces, users, schema_migrations CASCADE";
 
 const OWNER_ADDRESS = "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3";
@@ -90,8 +90,8 @@ async function insertAgent(
 async function insertTask(pool: Pool, status: string, acceptedAgentId: string): Promise<void> {
   await pool.query(
     `INSERT INTO tasks
-       (requester_address, category, title, description, budget, token, delivery_deadline, status, accepted_agent_id)
-     VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', $3, $4)`,
+       (requester_address, category, title, description, budget, token, delivery_deadline, status, accepted_agent_id, expert_type)
+     VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', $3, $4, 'AUTOMATION')`,
     [REQUESTER_ADDRESS, TOKEN_ADDRESS, status, acceptedAgentId],
   );
 }
@@ -181,8 +181,8 @@ runIfOptedIn(
     async function insertOpenTask(): Promise<string> {
       const taskInsert = await pool.query<{ id: string }>(
         `INSERT INTO tasks
-         (requester_address, category, title, description, budget, token, delivery_deadline, status)
-       VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN')
+         (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+       VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN', 'AUTOMATION')
        RETURNING id`,
         [REQUESTER_ADDRESS, TOKEN_ADDRESS],
       );
@@ -468,8 +468,8 @@ runIfOptedIn("resolveAcceptingAgentId (integration, T-806)", () => {
   async function insertTaskAndAgent(): Promise<{ taskId: string; agentId: string }> {
     const taskInsert = await pool.query<{ id: string }>(
       `INSERT INTO tasks
-         (requester_address, category, title, description, budget, token, delivery_deadline, status)
-       VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN')
+         (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+       VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN', 'AUTOMATION')
        RETURNING id`,
       [REQUESTER_ADDRESS, TOKEN_ADDRESS],
     );
@@ -658,8 +658,8 @@ runIfOptedIn("round-gating + run_id + exact-nonce + CONSUMED (integration, Featu
   async function insertOpenTask(): Promise<string> {
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO tasks
-         (requester_address, category, title, description, budget, token, delivery_deadline, status)
-       VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN')
+         (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+       VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN', 'AUTOMATION')
        RETURNING id`,
       [REQUESTER_ADDRESS, TOKEN_ADDRESS],
     );

@@ -7,9 +7,10 @@
     "dev": "node --env-file-if-exists=../../.env --import tsx/esm --watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node --env-file-if-exists=../../.env dist/server.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json",
     "test": "vitest run",
-    "migrate": "node --env-file-if-exists=../../.env --import tsx/esm src/db/migrate-cli.ts"
+    "migrate": "node --env-file-if-exists=../../.env --import tsx/esm src/db/migrate-cli.ts",
+    "backfill-embeddings": "node --env-file-if-exists=../../.env --import tsx/esm scripts/backfill-embeddings.ts"
   },
   "dependencies": {
     "@agent-market/domain": "workspace:*",

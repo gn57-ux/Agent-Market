@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import type { Queryable } from "../../db/pool.js";
+import { computeCredentialRef } from "./credential.js";
 
 export type AgentStatus = "ACTIVE" | "INACTIVE";
 
@@ -22,6 +23,13 @@ export interface AgentRow {
   skillTags: string[];
   createdAt: Date;
   updatedAt: Date;
+  /** Feature 12 (agent-task-fields-credentials): always `"v1"` in this
+   * stage — see 0013_add_agent_task_credentials.sql's `CHECK`. */
+  protocolVersion: string;
+  /** Feature 12: a reference string only (`env://VAR_NAME`), never the
+   * real credential value — see credential.ts (T-1202) for the one place
+   * that resolves this to an actual secret. `null` = not configured yet. */
+  credentialRef: string | null;
 }
 
 interface AgentQueryRow {
@@ -42,6 +50,8 @@ interface AgentQueryRow {
   quality_score: number | null;
   created_at: Date;
   updated_at: Date;
+  protocol_version: string;
+  credential_ref: string | null;
 }
 
 function toAgentRow(row: AgentQueryRow, skillTags: string[]): AgentRow {
@@ -64,6 +74,8 @@ function toAgentRow(row: AgentQueryRow, skillTags: string[]): AgentRow {
     skillTags,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    protocolVersion: row.protocol_version,
+    credentialRef: row.credential_ref,
   };
 }
 
@@ -81,6 +93,14 @@ export interface InsertAgentInput {
    * this stays a string end-to-end. */
   referencePrice?: string;
   skillTags: string[];
+  /** Omitted uses the migration's own `DEFAULT 'v1'`. */
+  protocolVersion?: string;
+  /** T-1300: `true` computes and sets the canonical `credentialRef` for
+   * this Agent's own id (a same-transaction UPDATE after the INSERT, since
+   * the real id doesn't exist before then); omitted/`false` leaves it
+   * unconfigured. Never a free-text string — see credential.ts's
+   * `computeCredentialRef` doc comment for why. */
+  credentialEnabled?: boolean;
 }
 
 /**
@@ -99,11 +119,12 @@ export async function insertAgent(pool: Pool, input: InsertAgentInput): Promise<
     const { rows } = await client.query<AgentQueryRow>(
       `INSERT INTO agents
          (owner_address, name, description, category, author_bio, invocation_url,
-          payout_address, pricing_model, reference_price)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          payout_address, pricing_model, reference_price, protocol_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING id, owner_address, name, description, category, author_bio, invocation_url,
                  payout_address, pricing_model, reference_price, status, completed_task_count,
-                 success_count, overdue_count, quality_score, created_at, updated_at`,
+                 success_count, overdue_count, quality_score, created_at, updated_at,
+                 protocol_version, credential_ref`,
       [
         input.ownerAddress,
         input.name,
@@ -114,11 +135,29 @@ export async function insertAgent(pool: Pool, input: InsertAgentInput): Promise<
         input.payoutAddress,
         input.pricingModel ?? null,
         input.referencePrice ?? null,
+        // Explicit "v1" (matching the migration's own DEFAULT) rather than
+        // omitting the column when unset — Zod only ever accepts the
+        // literal "v1" anyway (schema.ts's PROTOCOL_VERSION_SCHEMA), so
+        // there is no other value this could resolve to.
+        input.protocolVersion ?? "v1",
       ],
     );
     const row = rows[0];
     if (!row) {
       throw new Error("insertAgent: INSERT ... RETURNING produced no row");
+    }
+
+    // T-1300: credential_ref can only ever be the canonical value derived
+    // from this row's own real id (the migration's own CHECK enforces the
+    // same binding) — that id doesn't exist until the INSERT above returns
+    // it, so "enable credential" is necessarily a second statement in this
+    // same transaction, never a value passed into the INSERT itself.
+    if (input.credentialEnabled) {
+      row.credential_ref = computeCredentialRef(row.id);
+      await client.query(`UPDATE agents SET credential_ref = $2 WHERE id = $1`, [
+        row.id,
+        row.credential_ref,
+      ]);
     }
 
     for (const skillTag of input.skillTags) {
@@ -204,7 +243,7 @@ export async function listAgents(
       `SELECT a.id, a.owner_address, a.name, a.description, a.category, a.author_bio,
               a.invocation_url, a.payout_address, a.pricing_model, a.reference_price,
               a.status, a.completed_task_count, a.success_count, a.overdue_count,
-              a.quality_score, a.created_at, a.updated_at,
+              a.quality_score, a.created_at, a.updated_at, a.protocol_version, a.credential_ref,
               COALESCE(
                 array_agg(s.skill_tag) FILTER (WHERE s.skill_tag IS NOT NULL),
                 '{}'
@@ -234,7 +273,7 @@ export async function getAgentById(pool: Queryable, agentId: string): Promise<Ag
     `SELECT a.id, a.owner_address, a.name, a.description, a.category, a.author_bio,
             a.invocation_url, a.payout_address, a.pricing_model, a.reference_price,
             a.status, a.completed_task_count, a.success_count, a.overdue_count,
-            a.quality_score, a.created_at, a.updated_at,
+            a.quality_score, a.created_at, a.updated_at, a.protocol_version, a.credential_ref,
             COALESCE(
               array_agg(s.skill_tag) FILTER (WHERE s.skill_tag IS NOT NULL),
               '{}'
@@ -263,6 +302,13 @@ export interface UpdateAgentInput {
    * the same name and schema.ts's REFERENCE_PRICE_SCHEMA doc comment. */
   referencePrice?: string | null;
   skillTags?: string[];
+  /** Not nullable — see schema.ts's updateAgentSchema doc comment: there is
+   * no "unset" state to clear protocol_version back to. */
+  protocolVersion?: string;
+  /** T-1300: `undefined` = don't change; `true` = enable (compute+set);
+   * `false` = disable (clear to `NULL`). See InsertAgentInput's field of
+   * the same name. */
+  credentialEnabled?: boolean;
 }
 
 /**
@@ -285,6 +331,17 @@ export async function updateAgent(
   try {
     await client.query("BEGIN");
 
+    // T-1300: credential_ref is never taken as a value directly — `true`
+    // computes the one canonical value this agentId can ever have, `false`
+    // clears it, `undefined` leaves the column untouched (falls out of the
+    // `!== undefined` filter below like every other field here).
+    const credentialRefValue =
+      patch.credentialEnabled === undefined
+        ? undefined
+        : patch.credentialEnabled
+          ? computeCredentialRef(agentId)
+          : null;
+
     const fieldMap: Record<string, unknown> = {
       name: patch.name,
       description: patch.description,
@@ -294,6 +351,8 @@ export async function updateAgent(
       payout_address: patch.payoutAddress,
       pricing_model: patch.pricingModel,
       reference_price: patch.referencePrice,
+      protocol_version: patch.protocolVersion,
+      credential_ref: credentialRefValue,
     };
     const entries = Object.entries(fieldMap).filter(([, value]) => value !== undefined);
 

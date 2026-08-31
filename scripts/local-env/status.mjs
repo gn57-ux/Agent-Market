@@ -5,10 +5,18 @@ import { readManifest, manifestExists, MANIFEST_PATH } from "./manifest.mjs";
 import { verifyProcessAlive } from "./process-check.mjs";
 import { verifyFingerprint, ChainFingerprintMismatchError } from "./chain-fingerprint.mjs";
 import { isPortInUse } from "./ports.mjs";
+import { checkOllamaEmbedding, formatOllamaPreflightLines } from "./ollama-preflight.mjs";
 
 async function main() {
   if (!manifestExists()) {
     console.log("没有找到清单 —— 当前没有由本工具管理的环境在运行。");
+    // F-1317: Ollama runs independently of this tool's managed
+    // environment, so its readiness is still worth reporting even when
+    // there's no manifest — read-only, never affects process.exitCode.
+    const ollamaResult = await checkOllamaEmbedding();
+    for (const line of formatOllamaPreflightLines(ollamaResult)) {
+      console.log(line);
+    }
     return;
   }
   const manifest = readManifest();
@@ -70,6 +78,14 @@ async function main() {
       "\n⚠️ 至少一个记录的进程已不存活，环境状态不完整；建议 pnpm env:stop 后重新 pnpm env:start。",
     );
     process.exitCode = 1;
+  }
+
+  // F-1317: read-only, informational only — never affects process.exitCode
+  // (see ollama-preflight.mjs's own header comment for why).
+  console.log("");
+  const ollamaResult = await checkOllamaEmbedding();
+  for (const line of formatOllamaPreflightLines(ollamaResult)) {
+    console.log(line);
   }
 }
 

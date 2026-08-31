@@ -99,6 +99,19 @@ const DELIVERY_DEADLINE_SCHEMA = z
   .datetime({ message: "截止时间必须是合法的 ISO 8601 时间字符串" })
   .refine((value) => new Date(value).getTime() > Date.now(), "截止时间必须晚于当前时间");
 
+// Feature 12 (F-1205): mirrors the 5 values in
+// 0013_add_agent_task_credentials.sql's `tasks.expert_type` CHECK exactly —
+// any drift between this enum and that CHECK would let a value pass Zod
+// and then fail the database with a raw constraint-violation error instead
+// of this schema's own Chinese-readable 400. `expertType` is a distinct
+// axis from `category` (market grouping) and `skillTags` (concrete
+// abilities) — see requirements.md F-1205, they don't derive from one
+// another.
+const EXPERT_TYPE_SCHEMA = z.enum(
+  ["DATA_ANALYSIS", "CONTENT_GENERATION", "SOFTWARE_DEVELOPMENT", "RESEARCH", "AUTOMATION"],
+  { message: "专家类型必须是 5 个合法枚举值之一" },
+);
+
 /**
  * F-601: everything `POST /tasks/drafts` accepts. `requesterAddress` is
  * deliberately NOT a field here — it comes from the authenticated session
@@ -112,6 +125,12 @@ export const createDraftSchema = z.object({
   description: DESCRIPTION_SCHEMA,
   budget: BUDGET_SCHEMA,
   deliveryDeadline: DELIVERY_DEADLINE_SCHEMA,
+  // Required, no default (F-1205: "不允许'未选择'状态进入数据库，草稿创建时必须显式
+  // 选择") — the migration's own DB-level DEFAULT 'AUTOMATION' exists only for
+  // the historical-row/rollout-compatibility reason documented in
+  // 0013_add_agent_task_credentials.sql, not as a real fallback API callers
+  // may rely on.
+  expertType: EXPERT_TYPE_SCHEMA,
 });
 
 export type CreateDraftInput = z.infer<typeof createDraftSchema>;
@@ -132,6 +151,7 @@ export const updateDraftSchema = z.object({
   description: DESCRIPTION_SCHEMA.optional(),
   budget: BUDGET_SCHEMA.optional(),
   deliveryDeadline: DELIVERY_DEADLINE_SCHEMA.optional(),
+  expertType: EXPERT_TYPE_SCHEMA.optional(),
 });
 
 export type UpdateDraftInput = z.infer<typeof updateDraftSchema>;

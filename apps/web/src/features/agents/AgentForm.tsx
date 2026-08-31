@@ -11,6 +11,18 @@ export interface AgentFormValues {
   payoutAddress: string;
   pricingModel: string;
   referencePriceText: string;
+  /** T-1300: a toggle, not owner-chosen free text — see
+   * api.ts's `CreateAgentInput.credentialEnabled` doc comment for why
+   * (Codex finding: a free-text reference let an attacker pre-claim a
+   * victim Agent's future reference before the operator provisioned it). */
+  credentialEnabled: boolean;
+  /** Display-only — the actual current computed reference string (or
+   * `null`), shown read-only when `credentialEnabled` so the owner knows
+   * exactly which env var name to ask the operator to provision. Never
+   * read by `agentFormValuesToInput`; only `credentialEnabled` is ever
+   * sent. `undefined` before the Agent exists (AgentCreatePage — there is
+   * no id yet to compute a reference from). */
+  credentialRefDisplay: string | null | undefined;
 }
 
 export function emptyAgentFormValues(): AgentFormValues {
@@ -24,6 +36,8 @@ export function emptyAgentFormValues(): AgentFormValues {
     payoutAddress: "",
     pricingModel: "",
     referencePriceText: "",
+    credentialEnabled: false,
+    credentialRefDisplay: undefined,
   };
 }
 
@@ -37,6 +51,12 @@ export function agentFormValuesFromAgent(agent: {
   payoutAddress: string;
   pricingModel: string | null;
   referencePrice: string | null;
+  /** Absent (non-owner viewer, T-1203 round-2 fix) is treated the same as
+   * `null` — see api.ts's `Agent.credentialRef` doc comment. AgentEditPage
+   * only ever renders this form for the Agent's own owner, so in practice
+   * this is always present here, but the type stays honest about the
+   * response shape. */
+  credentialRef?: string | null;
 }): AgentFormValues {
   return {
     name: agent.name,
@@ -48,6 +68,8 @@ export function agentFormValuesFromAgent(agent: {
     payoutAddress: agent.payoutAddress,
     pricingModel: agent.pricingModel ?? "",
     referencePriceText: agent.referencePrice ?? "",
+    credentialEnabled: Boolean(agent.credentialRef),
+    credentialRefDisplay: agent.credentialRef ?? null,
   };
 }
 
@@ -113,6 +135,10 @@ export function agentFormValuesToInput(
     payoutAddress: values.payoutAddress.trim(),
     pricingModel: optionalTextField(values.pricingModel, originalValues.pricingModel),
     referencePrice,
+    credentialEnabled:
+      values.credentialEnabled === originalValues.credentialEnabled
+        ? undefined
+        : values.credentialEnabled,
   };
 }
 
@@ -137,6 +163,7 @@ export function toCreateAgentInput(input: UpdateAgentInput): CreateAgentInput {
     payoutAddress: input.payoutAddress ?? "",
     pricingModel: input.pricingModel ?? undefined,
     referencePrice: input.referencePrice ?? undefined,
+    credentialEnabled: input.credentialEnabled ?? undefined,
   };
 }
 
@@ -168,6 +195,10 @@ export function AgentForm({
     return (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       setValues((current) => ({ ...current, [key]: event.target.value }));
     };
+  }
+
+  function handleCredentialEnabledChange(event: React.ChangeEvent<HTMLInputElement>) {
+    setValues((current) => ({ ...current, credentialEnabled: event.target.checked }));
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -251,6 +282,46 @@ export function AgentForm({
           className={inputClasses}
         />
       </label>
+      <label className={labelClasses}>
+        协议版本
+        {/* F-1207: fixed display, no selector — this stage has exactly one
+            legal value ("v1"), and offering a dropdown would misleadingly
+            imply multi-protocol support already exists. Never sent by
+            AgentForm at all (api.ts's CreateAgentInput doc comment) —
+            apps/api's own DEFAULT 'v1' is authoritative either way. */}
+        <input
+          value="v1"
+          disabled
+          readOnly
+          className={`${inputClasses} cursor-not-allowed opacity-70`}
+        />
+      </label>
+      <div className="flex flex-col gap-1.5">
+        {/* T-1300: a toggle, not a free-text input — the owner never
+            chooses or types a reference string (that used to let an
+            attacker pre-claim a victim Agent's future reference before the
+            operator provisioned it). The server computes the one
+            deterministic reference this Agent's own real id can ever
+            produce; this checkbox only asks "should one exist or not." */}
+        <label className="flex items-center gap-2 text-caption font-medium text-ink-secondary">
+          <input
+            type="checkbox"
+            checked={values.credentialEnabled}
+            onChange={handleCredentialEnabledChange}
+            className="h-4 w-4 rounded border-divider-light"
+          />
+          启用调用凭据引用
+        </label>
+        <span className="text-caption text-ink-secondary">
+          启用后由平台自动生成一个专属引用（不是真实密钥），请将该引用告知运营方，由其在服务端配置对应的环境变量。
+        </span>
+        {values.credentialEnabled && values.credentialRefDisplay !== undefined && (
+          <p className="rounded-input bg-canvas-warm px-3 py-2 text-caption text-ink-primary">
+            当前引用：
+            <span className="font-mono">{values.credentialRefDisplay ?? "保存后生成"}</span>
+          </p>
+        )}
+      </div>
       <label className={labelClasses}>
         参考价格
         {/* type="text" + inputMode="decimal", not type="number": a number

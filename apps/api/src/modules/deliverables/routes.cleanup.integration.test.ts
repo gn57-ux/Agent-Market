@@ -60,7 +60,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
 
 function buildMultipartPayload(content: Buffer): { payload: Buffer; contentType: string } {
   const boundary = "----t902cleanuptestboundary";
@@ -151,8 +151,8 @@ runIfOptedIn(
         requester.address.toLowerCase(),
       ]);
       const { rows } = await pool.query<{ id: string }>(
-        `INSERT INTO tasks (requester_address, category, title, description, budget, token, delivery_deadline, status, accepted_agent_address)
-         VALUES ($1, 'writing', 'Task', 'desc', 1000, $2, '2099-01-01T00:00:00Z', 'ACCEPTED', $3)
+        `INSERT INTO tasks (requester_address, category, title, description, budget, token, delivery_deadline, status, accepted_agent_address, expert_type)
+         VALUES ($1, 'writing', 'Task', 'desc', 1000, $2, '2099-01-01T00:00:00Z', 'ACCEPTED', $3, 'AUTOMATION')
          RETURNING id`,
         [
           requester.address.toLowerCase(),

@@ -29,6 +29,18 @@ export interface Agent {
   qualityScore: number | null;
   createdAt: string;
   updatedAt: string;
+  /** Feature 12: always `"v1"` in this stage. */
+  protocolVersion: string;
+  /** Feature 12/T-1300: a reference string only (`env://AGENT_<this Agent's
+   * own id>`), never a real credential value — see apps/api's
+   * repository.ts `AgentRow.credentialRef` doc comment. `null` = not
+   * configured yet. Only present in the response when the caller is this
+   * Agent's own owner (apps/api's routes.ts, T-1203 round-2 fix) — a
+   * non-owner's `Agent` object simply won't have this key, so treat its
+   * absence the same as `null` here. This is a READ-only computed value —
+   * see `CreateAgentInput`/`UpdateAgentInput`'s `credentialEnabled` for the
+   * write-side toggle that produces it. */
+  credentialRef?: string | null;
 }
 
 export interface CreateAgentInput {
@@ -43,6 +55,16 @@ export interface CreateAgentInput {
   /** Decimal text, never a JS `number` — see `Agent.referencePrice`'s doc
    * comment. AgentForm.tsx never parses this through `Number()`. */
   referencePrice?: string;
+  /** Omitted uses apps/api's own `DEFAULT 'v1'` — this stage has no other
+   * legal value, so AgentForm.tsx never sends this explicitly. */
+  protocolVersion?: "v1";
+  /** T-1300: a toggle, not a free-text reference — `true` asks the server
+   * to compute+set the one deterministic `credentialRef` this Agent's own
+   * real id can ever produce; omitted/`false` leaves it unconfigured. An
+   * owner-chosen string is no longer accepted at all (Codex finding: it let
+   * an attacker pre-claim a victim Agent's future reference before the
+   * operator provisioned it — see apps/api's migration 0013 doc comment). */
+  credentialEnabled?: boolean;
 }
 
 /**
@@ -63,6 +85,9 @@ export interface UpdateAgentInput {
   payoutAddress?: string;
   pricingModel?: string | null;
   referencePrice?: string | null;
+  /** `undefined` = don't change; `true` = enable; `false` = disable/clear —
+   * see `CreateAgentInput.credentialEnabled`'s doc comment. */
+  credentialEnabled?: boolean;
 }
 
 export interface ListAgentsParams {

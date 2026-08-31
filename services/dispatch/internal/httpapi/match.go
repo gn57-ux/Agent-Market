@@ -70,6 +70,34 @@ type matchCandidate struct {
 	QualityScore       *float64 `json:"qualityScore"`
 	CreatedAt          string   `json:"createdAt"` // RFC3339
 	IsBanned           bool     `json:"isBanned"`
+	// SemanticSimilarity (Feature 13, T-1304): apps/api only sends this
+	// non-zero for a "v0.2" request (design.md's contract) — a plain
+	// (non-pointer) float64 so an absent field on the wire (every "v0.1"
+	// request today) decodes to Go's natural zero value with no special
+	// casing needed here, matching domain.CandidateSnapshot's identical
+	// field.
+	SemanticSimilarity float64 `json:"semanticSimilarity"`
+	// ReputationSignals (Feature 13, T-1305): nil for every "v0.1" request
+	// (apps/api's reputation-signals.ts, T-1306, only computes this for
+	// "v0.2") — a pointer to the whole nested object, not five separate
+	// pointer fields flattened here, so "the object was entirely absent"
+	// and "the object was present with every field null" stay
+	// distinguishable at the wire layer, even though convertMatchRequest
+	// converts both shapes to the same domain.ReputationSignals{} zero
+	// value (see its own comment on why that's the correct choice).
+	ReputationSignals *matchReputationSignals `json:"reputationSignals"`
+}
+
+// matchReputationSignals is POST /match's wire format for one candidate's
+// F-1306/F-1308 five-signal input. Field names match design.md's interface
+// contract and domain.ReputationSignals exactly — see that type's doc
+// comment for why a nil field means "this signal is missing," never 0.
+type matchReputationSignals struct {
+	CompletionRate  *float64 `json:"completionRate"`
+	QualityFeedback *float64 `json:"qualityFeedback"`
+	Communication   *float64 `json:"communication"`
+	DisputeSignal   *float64 `json:"disputeSignal"`
+	HistoricalScale *float64 `json:"historicalScale"`
 }
 
 // matchResponse is POST /match's response wire format.
@@ -133,6 +161,26 @@ func handleMatch(w http.ResponseWriter, r *http.Request) {
 			if err := checkNoDuplicateKeys(c, fmt.Sprintf("candidates[%d]", i)); err != nil {
 				writeMatchError(w, http.StatusBadRequest, err.Error())
 				return
+			}
+			// reputationSignals (Feature 13, T-1305) is the one nested
+			// object this service's wire format defines — every other
+			// object shape it parses is flat (matchRequest, matchCandidate;
+			// see checkNoDuplicateKeys' own scope-limitation note). A
+			// duplicate key inside THIS object needs its own check for the
+			// exact same reason the two calls above exist: without it,
+			// {"completionRate":0.1,"completionRate":0.9} silently keeps
+			// only the last value instead of being rejected.
+			var rawForReputationSignals struct {
+				ReputationSignals json.RawMessage `json:"reputationSignals"`
+			}
+			if err := json.Unmarshal(c, &rawForReputationSignals); err == nil &&
+				len(rawForReputationSignals.ReputationSignals) > 0 &&
+				!bytes.Equal(bytes.TrimSpace(rawForReputationSignals.ReputationSignals), []byte("null")) {
+				label := fmt.Sprintf("candidates[%d].reputationSignals", i)
+				if err := checkNoDuplicateKeys(rawForReputationSignals.ReputationSignals, label); err != nil {
+					writeMatchError(w, http.StatusBadRequest, err.Error())
+					return
+				}
 			}
 		}
 	}
@@ -232,6 +280,15 @@ func checkNoDuplicateKeys(raw json.RawMessage, objectLabel string) error {
 // RFC3339 timestamps, UUID-shaped taskId/agentId, wallet-address format,
 // status enum, count field ranges/relationships, qualityScore range,
 // non-empty category) happens here, before the pipeline runs.
+//
+// ReputationSignals (Feature 13, T-1305) is set directly on each returned
+// CandidateSnapshot — never returned via a second, AgentID-keyed map. A
+// map was this function's first version; a Codex review round 1 P2 caught
+// that it silently mis-binds when two candidates share one AgentID (this
+// project explicitly permits that — see CandidateSnapshot.ReputationSignals'
+// own doc comment). Threading the value through the same struct that
+// already survives eligibility.Filter's index-preserving filtering closes
+// that class of bug structurally.
 func convertMatchRequest(req matchRequest) (domain.TaskFeatures, []domain.CandidateSnapshot, error) {
 	if req.TaskID == "" {
 		return domain.TaskFeatures{}, nil, errInvalidRequest("taskId is required")
@@ -311,6 +368,12 @@ func convertMatchRequest(req matchRequest) (domain.TaskFeatures, []domain.Candid
 		if c.QualityScore != nil && (*c.QualityScore < 0 || *c.QualityScore > 1) {
 			return domain.TaskFeatures{}, nil, fieldErr("qualityScore must be between 0 and 1")
 		}
+		if c.SemanticSimilarity < -1 || c.SemanticSimilarity > 1 {
+			return domain.TaskFeatures{}, nil, fieldErr("semanticSimilarity must be between -1 and 1")
+		}
+		if err := validateReputationSignalsRange(c.ReputationSignals); err != nil {
+			return domain.TaskFeatures{}, nil, fieldErr(err.Error())
+		}
 
 		level, err := domain.ParseLevel(c.Level)
 		if err != nil {
@@ -337,10 +400,61 @@ func convertMatchRequest(req matchRequest) (domain.TaskFeatures, []domain.Candid
 			CreatedAt:          createdAt,
 			IsNewcomer:         domain.IsNewcomer(c.CompletedTaskCount),
 			IsBanned:           c.IsBanned,
+			SemanticSimilarity: c.SemanticSimilarity,
+			ReputationSignals:  toDomainReputationSignals(c.ReputationSignals),
 		})
 	}
 
 	return task, candidates, nil
+}
+
+// toDomainReputationSignals converts the wire's nilable pointer-to-object
+// shape to domain.ReputationSignals' plain-value zero-means-absent shape.
+// A nil wire object (the whole "reputationSignals" key absent or explicit
+// JSON null) and an explicitly-present object with every field null both
+// produce the same all-nil domain.ReputationSignals{} — ScoreV2 already
+// treats those two input shapes identically (see its own doc comment), so
+// this function doesn't need to preserve the distinction past this point.
+func toDomainReputationSignals(signals *matchReputationSignals) domain.ReputationSignals {
+	if signals == nil {
+		return domain.ReputationSignals{}
+	}
+	return domain.ReputationSignals{
+		CompletionRate:  signals.CompletionRate,
+		QualityFeedback: signals.QualityFeedback,
+		Communication:   signals.Communication,
+		DisputeSignal:   signals.DisputeSignal,
+		HistoricalScale: signals.HistoricalScale,
+	}
+}
+
+// validateReputationSignalsRange checks every present field of signals (nil
+// itself is valid — see matchReputationSignals' doc comment) is within
+// [0, 1], the range every F-1308 signal definition is normalized to. A nil
+// field is skipped, not defaulted to any value, matching F-1309. Checked in
+// this fixed field order — same convention as the sequential candidate
+// field checks above it — so a request with multiple out-of-range fields
+// always reports the same one first.
+func validateReputationSignalsRange(signals *matchReputationSignals) error {
+	if signals == nil {
+		return nil
+	}
+	if signals.CompletionRate != nil && (*signals.CompletionRate < 0 || *signals.CompletionRate > 1) {
+		return fmt.Errorf("reputationSignals.completionRate must be between 0 and 1")
+	}
+	if signals.QualityFeedback != nil && (*signals.QualityFeedback < 0 || *signals.QualityFeedback > 1) {
+		return fmt.Errorf("reputationSignals.qualityFeedback must be between 0 and 1")
+	}
+	if signals.Communication != nil && (*signals.Communication < 0 || *signals.Communication > 1) {
+		return fmt.Errorf("reputationSignals.communication must be between 0 and 1")
+	}
+	if signals.DisputeSignal != nil && (*signals.DisputeSignal < 0 || *signals.DisputeSignal > 1) {
+		return fmt.Errorf("reputationSignals.disputeSignal must be between 0 and 1")
+	}
+	if signals.HistoricalScale != nil && (*signals.HistoricalScale < 0 || *signals.HistoricalScale > 1) {
+		return fmt.Errorf("reputationSignals.historicalScale must be between 0 and 1")
+	}
+	return nil
 }
 
 // runMatchPipeline executes the fixed orchestration pipeline: eligibility
@@ -358,12 +472,26 @@ func convertMatchRequest(req matchRequest) (domain.TaskFeatures, []domain.Candid
 // scored candidate. Index alignment has no such ambiguity: each ScoreResult
 // is bound to the exact CandidateSnapshot it was computed from, never a
 // same-AgentID stand-in).
+//
+// Scoring branch (Feature 13, T-1305): "v0.2" calls scoring.ScoreAllV2
+// (ReputationSignals-based, never errors); every other value — including
+// "v0.1" and any unrecognized string — goes through the untouched
+// scoring.ScoreAll path, which still fails loudly on an unrecognized
+// version via weightsFor. This `if` is the only place that knows two
+// scoring entry points exist; nothing downstream (slotting, explain) is
+// aware which one produced a given ScoreResult.
 func runMatchPipeline(task domain.TaskFeatures, candidates []domain.CandidateSnapshot) (matchResponse, error) {
 	eligible := eligibility.Filter(task, candidates)
 
-	scored, err := scoring.ScoreAll(task, eligible)
-	if err != nil {
-		return matchResponse{}, err
+	var scored []scoring.ScoreResult
+	if task.AlgorithmVersion == "v0.2" {
+		scored = scoring.ScoreAllV2(eligible)
+	} else {
+		var err error
+		scored, err = scoring.ScoreAll(task, eligible)
+		if err != nil {
+			return matchResponse{}, err
+		}
 	}
 
 	boundCandidates := make([]slotting.ScoredCandidate, 0, len(scored))
@@ -371,6 +499,12 @@ func runMatchPipeline(task domain.TaskFeatures, candidates []domain.CandidateSna
 		boundCandidates = append(boundCandidates, slotting.ScoredCandidate{
 			Result:             result,
 			CompletedTaskCount: eligible[i].CompletedTaskCount,
+			// F-1309/F-1312 (Feature 13, T-1304 round 2 fix): a "v0.2"
+			// candidate with no historical sample must never win a
+			// TOP_SCORE slot on its Score alone — result.NoHistoricalSample
+			// is always false for a v0.1 Score/ScoreAll result, so this
+			// line is a no-op for every "v0.1" request.
+			ExcludeFromTopScore: result.NoHistoricalSample,
 		})
 	}
 

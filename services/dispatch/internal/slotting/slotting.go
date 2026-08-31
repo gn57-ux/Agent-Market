@@ -50,6 +50,16 @@ type Slot struct {
 type ScoredCandidate struct {
 	Result             scoring.ScoreResult
 	CompletedTaskCount int
+
+	// ExcludeFromTopScore (Feature 13, T-1304/F-1309/F-1312) keeps this
+	// candidate out of the TOP_SCORE selection below regardless of its
+	// Score — it can still be picked for the EXPLORATION slot via the
+	// existing newcomer-pool/fallback mechanism, unchanged. Always false
+	// for every v0.1 candidate (httpapi only ever sets this from
+	// scoring.ScoreResult.NoHistoricalSample, which v0.1's Score/ScoreAll
+	// never produces), so this field cannot change v0.1 behavior — see
+	// TestSelect_ExcludeFromTopScore_DoesNotAffectV01Candidates.
+	ExcludeFromTopScore bool
 }
 
 // Select returns up to three slots for one task's scored candidates, per
@@ -66,6 +76,14 @@ type ScoredCandidate struct {
 //     remaining candidate instead, but its SlotType stays EXPLORATION (PRD:
 //     "新人池为空时，由下一名最高分候选补位").
 //
+// A candidate with ExcludeFromTopScore set (Feature 13/F-1309/F-1312) is
+// skipped when filling the two TOP_SCORE ranks, no matter how it sorts —
+// this shifts the rank counts above (fewer than 2 TOP_SCORE slots when
+// too few non-excluded candidates exist, EXPLORATION taking whichever rank
+// number follows) but never removes such a candidate from consideration
+// for the EXPLORATION slot itself, which still runs the same newcomer-
+// pool/fallback logic over everyone not already placed into TOP_SCORE.
+//
 // candidates need not arrive pre-sorted — Select sorts them itself by
 // Score descending, tie-broken by AgentID ascending, and that sort is the
 // only ranking this package (or any other) performs.
@@ -77,19 +95,35 @@ func Select(taskID, algorithmVersion string, candidates []ScoredCandidate) []Slo
 	sorted := dedupeByAgentID(sortedCandidates(candidates))
 
 	slots := make([]Slot, 0, 3)
-	topCount := len(sorted)
-	if topCount > 2 {
-		topCount = 2
-	}
-	for i := 0; i < topCount; i++ {
-		slots = append(slots, newSlot(sorted[i], i+1, SlotTypeTopScore))
+	placed := make(map[string]struct{}, 2)
+	for _, c := range sorted {
+		if len(slots) == 2 {
+			break
+		}
+		if c.ExcludeFromTopScore {
+			continue
+		}
+		slots = append(slots, newSlot(c, len(slots)+1, SlotTypeTopScore))
+		placed[c.Result.AgentID] = struct{}{}
 	}
 
-	if len(sorted) < 3 {
+	// remaining preserves sorted's order (Score descending / AgentID
+	// ascending) minus whatever was placed above — equivalent to
+	// sorted[topCount:] when nothing is excluded (the pre-F-1309 case),
+	// but correct even when TOP_SCORE picks and skipped-over excluded
+	// candidates are interleaved.
+	remaining := make([]ScoredCandidate, 0, len(sorted)-len(placed))
+	for _, c := range sorted {
+		if _, ok := placed[c.Result.AgentID]; ok {
+			continue
+		}
+		remaining = append(remaining, c)
+	}
+
+	if len(remaining) == 0 {
 		return slots
 	}
 
-	remaining := sorted[2:] // already sorted by the same rule, per sortedCandidates
 	pool := newcomerPool(remaining)
 
 	var chosen ScoredCandidate
@@ -101,7 +135,7 @@ func Select(taskID, algorithmVersion string, candidates []ScoredCandidate) []Slo
 		chosen = remaining[0]
 	}
 
-	slots = append(slots, newSlot(chosen, 3, SlotTypeExploration))
+	slots = append(slots, newSlot(chosen, len(slots)+1, SlotTypeExploration))
 	return slots
 }
 

@@ -34,7 +34,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, " +
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, " +
   "sessions, auth_nonces, users, schema_migrations CASCADE";
 
 const REQUESTER_ADDRESS = "0xaa83fefc63f0cd0e873a0000c6d07ef7b77e90d1";
@@ -136,8 +136,8 @@ runIfOptedIn(
       ]);
       const { rows } = await pool.query<{ id: string }>(
         `INSERT INTO tasks
-           (requester_address, category, title, description, budget, token, delivery_deadline, status)
-         VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', $3)
+           (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+         VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', $3, 'AUTOMATION')
          RETURNING id`,
         [REQUESTER_ADDRESS, TOKEN_ADDRESS, status],
       );

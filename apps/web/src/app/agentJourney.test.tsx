@@ -47,6 +47,15 @@ const CHAIN_CONFIG: ChainConfig = {
 let store: Map<string, Agent>;
 let nextId: number;
 
+// T-1300: mirrors apps/api's credential.ts `computeCredentialRef` (a
+// deterministic function of the Agent's own id) closely enough for this
+// fake backend's contract purposes — not byte-identical to the real
+// implementation, but same shape/determinism, which is all this journey
+// test's own assertions ever depend on.
+function fakeComputeCredentialRef(agentId: string): string {
+  return `env://AGENT_${agentId.replace(/-/g, "").toUpperCase()}`;
+}
+
 function makeAgentRow(id: string, input: CreateAgentInput): Agent {
   const now = "2026-01-01T00:00:00.000Z";
   return {
@@ -68,6 +77,8 @@ function makeAgentRow(id: string, input: CreateAgentInput): Agent {
     qualityScore: null,
     createdAt: now,
     updatedAt: now,
+    protocolVersion: input.protocolVersion ?? "v1",
+    credentialRef: input.credentialEnabled ? fakeComputeCredentialRef(id) : null,
   };
 }
 
@@ -82,6 +93,9 @@ function applyPatch(agent: Agent, patch: UpdateAgentInput): Agent {
   if (patch.payoutAddress !== undefined) next.payoutAddress = patch.payoutAddress;
   if (patch.pricingModel !== undefined) next.pricingModel = patch.pricingModel;
   if (patch.referencePrice !== undefined) next.referencePrice = patch.referencePrice;
+  if (patch.credentialEnabled !== undefined) {
+    next.credentialRef = patch.credentialEnabled ? fakeComputeCredentialRef(agent.agentId) : null;
+  }
   return next;
 }
 

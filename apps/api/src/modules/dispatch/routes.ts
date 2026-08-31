@@ -11,7 +11,13 @@ import {
 import { canonicalJsonSha256 } from "./input-digest.js";
 import { issueAcceptancePermit } from "./permit.service.js";
 import {
+  assembleReputationSignals,
+  toReputationSignalsWire,
+  type ReputationSignalsDigest,
+} from "./reputation-signals.js";
+import {
   assembleCandidateSnapshots,
+  type CandidateSnapshot,
   getCandidateInvitationsForSession,
   getLatestRecommendationCandidates,
   getLatestRecommendationRunId,
@@ -19,6 +25,7 @@ import {
   getPermitForAgent,
   getRecommendationCandidatesForRun,
   getRequiredAgentLevel,
+  getTaskSimilarityByAgentId,
   hasUnexpiredOutstandingPermits,
   insertPermitsForRunIfAbsent,
   insertRecommendationRunWithPermits,
@@ -33,11 +40,15 @@ import {
   taskIdParamSchema,
 } from "./schema.js";
 
-/**
- * T-705's single implemented algorithm version — deliberately not
- * configurable (the capsule: "本 Feature 唯一实现的版本，不做成可配置").
- */
-const ALGORITHM_VERSION = "v0.1";
+/** T-705's original, still fully unchanged v0.1 algorithm. */
+const V01_ALGORITHM_VERSION = "v0.1";
+
+/** Feature 13's semantic-recall-extended algorithm — `matchTask` only ever
+ * selects this when `resolveAlgorithmVersionAndEnrichCandidates` finds and
+ * successfully uses the task's own embedding (F-1304/F-1305); every other
+ * outcome, including any failure along the way, falls back to
+ * `V01_ALGORITHM_VERSION` with the candidate pool unmodified. */
+const V02_ALGORITHM_VERSION = "v0.2";
 
 /** The one status `POST /tasks/:taskId/match` and
  * `POST /tasks/:taskId/acceptance-permits` operate on (Feature 7 sync,
@@ -169,6 +180,87 @@ export type MatchTaskResult =
  * apps/api — this function only gathers data, makes one HTTP call, and
  * writes the result back (T-705 capsule's explicit boundary).
  */
+/**
+ * F-1304/F-1305 (Feature 13, T-1303): decides one `matchTask` call's
+ * `algorithmVersion` and, only for "v0.2", enriches `candidates` with
+ * `semanticSimilarity` (F-1305's OR-branch input) and `reputationSignals`
+ * (F-1306, computed via T-1306's `assembleReputationSignals` — a
+ * completely separate data source from the embedding/pgvector path, but
+ * folded into this same function and the same try/catch: a "v0.2" run
+ * whose reputation-signal query fails would otherwise report
+ * `algorithmVersion: "v0.2"` while scoring every candidate as if none of
+ * them had any history at all, a confusing degraded middle ground this
+ * function avoids by treating that failure exactly like an embedding
+ * failure — fall back to "v0.1" with the pool untouched).
+ *
+ * ANY failure along the way — no task embedding yet, a pgvector query
+ * error, a reputation-signals query error — degrades to
+ * `V01_ALGORITHM_VERSION` with `candidates` returned completely unchanged
+ * (F-1304's degrade path: "复用 v0.1 完全相同的资格过滤代码，不新建平行实现").
+ * This function never partially enriches a candidate pool.
+ *
+ * `getTaskSimilarityByAgentId`'s `null` return (Codex review round 1, P2)
+ * is the single, TOCTOU-free signal for "no task embedding" — see its own
+ * doc comment for why an earlier separate exists-check-then-query design
+ * could let a concurrent embedding delete/regenerate desynchronize the
+ * two, silently sending "v0.2" with every similarity wrongly defaulted to
+ * 0 instead of correctly falling back to "v0.1". The reputation-signals
+ * query only runs AFTER that's confirmed non-null, both to avoid the
+ * wasted query in the common "not embedded yet" case and to keep this
+ * function's only two possible outcomes exactly "v0.1, pool unchanged" or
+ * "v0.2, pool fully enriched" — never a partial state in between.
+ *
+ * Returns `reputationSignalsDigestByAgentId` alongside the wire-shaped
+ * `candidates` (Feature 13, T-1307): `candidates[].reputationSignals` is
+ * the flat `{signal: value}` projection (`toReputationSignalsWire`) Go's
+ * wire contract expects, but F-1313 requires persisting the RICHER digest
+ * (value + sampleSize per signal) into `recommendation_candidates.
+ * reputation_signals` for later replay — `matchTask` reads this map (by
+ * the WINNING candidates' agentId) when building that persisted row,
+ * rather than either re-querying or trying to reverse-engineer sampleSize
+ * out of the flat wire shape it no longer carries.
+ */
+async function resolveAlgorithmVersionAndEnrichCandidates(
+  pool: Pool,
+  taskId: string,
+  candidates: CandidateSnapshot[],
+): Promise<{
+  algorithmVersion: string;
+  candidates: CandidateSnapshot[];
+  reputationSignalsDigestByAgentId: Map<string, ReputationSignalsDigest>;
+}> {
+  try {
+    const agentIds = candidates.map((candidate) => candidate.agentId);
+    const similarityByAgentId = await getTaskSimilarityByAgentId(pool, taskId, agentIds);
+    if (similarityByAgentId === null) {
+      return {
+        algorithmVersion: V01_ALGORITHM_VERSION,
+        candidates,
+        reputationSignalsDigestByAgentId: new Map(),
+      };
+    }
+    const reputationSignalsDigestByAgentId = await assembleReputationSignals(pool, agentIds);
+    return {
+      algorithmVersion: V02_ALGORITHM_VERSION,
+      candidates: candidates.map((candidate) => {
+        const digest = reputationSignalsDigestByAgentId.get(candidate.agentId);
+        return {
+          ...candidate,
+          semanticSimilarity: similarityByAgentId.get(candidate.agentId) ?? 0,
+          reputationSignals: digest ? toReputationSignalsWire(digest) : undefined,
+        };
+      }),
+      reputationSignalsDigestByAgentId,
+    };
+  } catch {
+    return {
+      algorithmVersion: V01_ALGORITHM_VERSION,
+      candidates,
+      reputationSignalsDigestByAgentId: new Map(),
+    };
+  }
+}
+
 async function matchTask(
   pool: Pool,
   sessionAddress: string,
@@ -190,17 +282,22 @@ async function matchTask(
   // wasted Go call and wasted signing; insertRecommendationRunWithPermits
   // re-does the authoritative version of this check under the task lock.
   if (await hasUnexpiredOutstandingPermits(pool, task.id)) {
-    const currentCandidates = await getLatestRecommendationCandidates(pool, task.id);
+    const current = await getLatestRecommendationCandidates(pool, task.id);
     return {
       ok: true,
       taskId: task.id,
-      algorithmVersion: ALGORITHM_VERSION,
-      recommendationCount: currentCandidates.length,
+      // A run must exist to have produced these OUTSTANDING permits, so
+      // `current.algorithmVersion` is never null here in practice — the
+      // V01 fallback is defensive, not an expected branch.
+      algorithmVersion: current.algorithmVersion ?? V01_ALGORITHM_VERSION,
+      recommendationCount: current.candidates.length,
     };
   }
 
   const requiredLevel = (await getRequiredAgentLevel(pool, taskId)) ?? "BEGINNER";
-  const candidates = await assembleCandidateSnapshots(pool, task.category);
+  const baseCandidates = await assembleCandidateSnapshots(pool, task.category);
+  const { algorithmVersion, candidates, reputationSignalsDigestByAgentId } =
+    await resolveAlgorithmVersionAndEnrichCandidates(pool, task.id, baseCandidates);
 
   const request: MatchRequest = {
     taskId: task.id,
@@ -209,7 +306,7 @@ async function matchTask(
     deliveryDeadline: task.deliveryDeadline.toISOString(),
     requiredLevel,
     requesterAddress: task.requesterAddress,
-    algorithmVersion: ALGORITHM_VERSION,
+    algorithmVersion,
     candidates,
   };
 
@@ -232,7 +329,7 @@ async function matchTask(
   // service's own contract nor a database FK prevents this class of
   // mix-up (the FK only checks that the agent_id exists somewhere, not
   // that it was actually a candidate for this run).
-  if (matchResponse.taskId !== task.id || matchResponse.algorithmVersion !== ALGORITHM_VERSION) {
+  if (matchResponse.taskId !== task.id || matchResponse.algorithmVersion !== algorithmVersion) {
     return {
       ok: false,
       reason: "dispatch_unavailable",
@@ -240,6 +337,13 @@ async function matchTask(
     };
   }
   const walletByAgentId = new Map(candidates.map((c) => [c.agentId, c.walletAddress]));
+  // F-1313 (Feature 13, T-1307): same "read once off the already-fetched
+  // candidates" pattern as walletByAgentId — semanticSimilarity is
+  // `undefined` for every candidate on a "v0.1" run, so this map's values
+  // are `undefined` throughout in that case too.
+  const semanticSimilarityByAgentId = new Map(
+    candidates.map((c) => [c.agentId, c.semanticSimilarity]),
+  );
   const seenAgentIds = new Set<string>();
   const seenRanks = new Set<number>();
   // Collected in the same loop that validates each recommendation is a real
@@ -299,17 +403,24 @@ async function matchTask(
   try {
     await insertRecommendationRunWithPermits(pool, {
       taskId: task.id,
-      algorithmVersion: ALGORITHM_VERSION,
+      algorithmVersion,
       // The full candidate pool sent to Go, not the recommendation count —
       // see InsertRecommendationRunInput's own doc comment (repository.ts).
       candidateCount: candidates.length,
       inputDigest,
+      // F-1313 (Feature 13, T-1307): semanticSimilarity/reputationSignals
+      // are looked up from data this function already has in memory
+      // (candidates' own field, and reputationSignalsDigestByAgentId) —
+      // never re-queried. Both are `undefined` for a "v0.1" run, matching
+      // `RecommendationCandidateInput`'s own contract for that case.
       candidates: matchResponse.recommendations.map((recommendation) => ({
         agentId: recommendation.agentId,
         rank: recommendation.rank,
         slotType: recommendation.slotType,
         score: recommendation.score,
         reasons: recommendation.reasons,
+        semanticSimilarity: semanticSimilarityByAgentId.get(recommendation.agentId),
+        reputationSignals: reputationSignalsDigestByAgentId.get(recommendation.agentId),
       })),
       permits: signedPermits,
     });
@@ -318,13 +429,15 @@ async function matchTask(
       // Lost the race: a concurrent /match call committed an unexpired
       // round in the gap between this function's own pre-check and
       // insertRecommendationRunWithPermits acquiring the task lock. Same
-      // idempotent fallback as the pre-check above.
-      const currentCandidates = await getLatestRecommendationCandidates(pool, task.id);
+      // idempotent fallback as the pre-check above — reports the WINNING
+      // call's real algorithmVersion, not this call's own (possibly
+      // different) decision.
+      const current = await getLatestRecommendationCandidates(pool, task.id);
       return {
         ok: true,
         taskId: task.id,
-        algorithmVersion: ALGORITHM_VERSION,
-        recommendationCount: currentCandidates.length,
+        algorithmVersion: current.algorithmVersion ?? V01_ALGORITHM_VERSION,
+        recommendationCount: current.candidates.length,
       };
     }
     if (error instanceof TaskNotOpenForPermitsError) {
@@ -339,7 +452,7 @@ async function matchTask(
   return {
     ok: true,
     taskId: task.id,
-    algorithmVersion: ALGORITHM_VERSION,
+    algorithmVersion,
     recommendationCount: matchResponse.recommendations.length,
   };
 }
@@ -540,7 +653,7 @@ export function registerDispatchRoutes(app: FastifyInstance, pool: Pool): void {
       return reply.status(404).send({ error: { message: "未找到该任务。" } });
     }
 
-    const candidates = await getLatestRecommendationCandidates(pool, taskId);
+    const { candidates } = await getLatestRecommendationCandidates(pool, taskId);
     return reply.send({
       recommendations: candidates.map((candidate) => ({
         agentId: candidate.agentId,

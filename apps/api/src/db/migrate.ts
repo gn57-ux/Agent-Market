@@ -63,6 +63,20 @@ async function listMigrationFiles(migrationsDir: string): Promise<string[]> {
 }
 
 /**
+ * Feature 13 (T-1300): `CREATE EXTENSION vector` (0015's own first
+ * statement) fails with Postgres's raw `extension "vector" is not
+ * available` when the pgvector `.so`/`.control` files aren't installed at
+ * the OS level — a message that gives an operator no indication of what to
+ * actually do about it. Detected by substring match on the extension name
+ * rather than a specific SQLSTATE code, since this is the one Postgres
+ * error message this project has confirmed reads exactly this way (real,
+ * uninstalled-extension testing, not a guessed error code).
+ */
+export function isMissingVectorExtensionError(error: unknown): boolean {
+  return error instanceof Error && /extension "vector" is not available/.test(error.message);
+}
+
+/**
  * Applies every `*.sql` file in `migrationsDir` (sorted by filename — files
  * are named with a numeric prefix, e.g. `0001_create_users.sql`) that is not
  * yet recorded in `schema_migrations`. Each file runs inside its own
@@ -109,6 +123,13 @@ export async function runMigrations(pool: Pool, migrationsDir: string): Promise<
       applied.push(file);
     } catch (error) {
       await client.query("ROLLBACK");
+      if (isMissingVectorExtensionError(error)) {
+        throw new Error(
+          `迁移 ${file} 需要 PostgreSQL 的 vector 扩展（pgvector），但当前数据库所在的 PostgreSQL 尚未安装该扩展。` +
+            "请先在操作系统层面安装 pgvector（例如 macOS: `brew install pgvector`），确认扩展文件与当前 PostgreSQL 版本匹配后，再重新运行迁移。",
+          { cause: error },
+        );
+      }
       throw error;
     } finally {
       client.release();

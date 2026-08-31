@@ -87,6 +87,46 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 /**
+ * Feature 14 (T-609): true idempotency-key semantics — a replay under the
+ * same key is only "the same logical request recalled" if its payload is
+ * ACTUALLY the same. Compares every field the client controls (not
+ * `requesterAddress`/`token`, which are server-derived and therefore can't
+ * legitimately differ between two calls carrying the same key from the
+ * same session). `skillTags` compared as a set (order/duplicates
+ * irrelevant — `createDraft` itself already de-duplicates before storage,
+ * see its own `[...new Set(...)]` call).
+ *
+ * Codex review (T-609 P2): `budget` is compared as a `BigInt`, not the raw
+ * string. `BUDGET_SCHEMA`'s pattern (`/^\d+$/`) accepts leading zeros
+ * (e.g. `"001"`), but PostgreSQL's `NUMERIC` column normalizes them away on
+ * read-back (`existing.budget` comes back as `"1"`) — a genuinely identical
+ * retry that happens to reuse a leading-zero literal would otherwise fail
+ * a raw string comparison and be wrongly rejected as a conflict.
+ * `BigInt(...)` is safe here specifically because both sides are already
+ * guaranteed to be valid unsigned-integer strings by this point (Zod
+ * validated `input.budget`; `existing.budget` only ever came from this
+ * same schema's own prior INSERT).
+ */
+function draftPayloadMatches(existing: TaskRow, input: CreateDraftInput): boolean {
+  if (
+    existing.category !== input.category ||
+    existing.title !== input.title ||
+    existing.description !== input.description ||
+    BigInt(existing.budget) !== BigInt(input.budget) ||
+    existing.expertType !== input.expertType ||
+    existing.deliveryDeadline.getTime() !== new Date(input.deliveryDeadline).getTime()
+  ) {
+    return false;
+  }
+  const existingSkillTags = [...new Set(existing.skillTags)].sort();
+  const inputSkillTags = [...new Set(input.skillTags)].sort();
+  return (
+    existingSkillTags.length === inputSkillTags.length &&
+    existingSkillTags.every((tag, index) => tag === inputSkillTags[index])
+  );
+}
+
+/**
  * F-601/AC-601: creates a `DRAFT` task owned by `sessionAddress` (the
  * caller's verified session address — routes.ts gets this from
  * `request.address`, never from request body input, mirroring agents/
@@ -94,8 +134,15 @@ function isUniqueViolation(error: unknown): boolean {
  *
  * Idempotency (F-601 "支持客户端幂等键" / the capsule's core
  * requirement): when `idempotencyKey` is supplied, an existing task created
- * by the same requester with the same key is returned as-is instead of
- * inserting a duplicate. Two request phases both need this check:
+ * by the same requester with the same key AND THE SAME PAYLOAD is returned
+ * as-is instead of inserting a duplicate — a genuine retry (network
+ * failure, double-click) of the identical logical request. T-609 (Feature
+ * 14, F-1405): if the stored payload DIFFERS from this call's payload, that
+ * is a real client bug (reusing a key for a materially different request),
+ * not a legitimate replay — this now returns `idempotency_key_conflict`
+ * instead of silently discarding the caller's new data and returning the
+ * old task as if nothing were wrong. Two request phases both need the
+ * lookup:
  *
  * 1. Up front (`findDraftByIdempotencyKey` before insert) — the common
  *    case, avoids even attempting an insert that's already been done.
@@ -108,14 +155,29 @@ function isUniqueViolation(error: unknown): boolean {
  *    contract atomic under real concurrency instead of merely "usually
  *    works" — the DB's UNIQUE constraint is the actual synchronization
  *    point, application code only needs to translate its failure mode into
- *    the same success response the winner got.
+ *    the same success response the winner got (or the same conflict, if
+ *    the winner's payload also differs from this caller's).
  */
+export type CreateDraftResult =
+  | {
+      ok: true;
+      task: TaskRow;
+      /** False when this call returned an existing row via idempotency-key
+       * replay (either the fast path or the concurrent-race catch below)
+       * rather than performing a genuine insert. Callers that trigger side
+       * effects meant to happen once per save (e.g. T-1302's embedding
+       * generation) must check this before firing them — a replay is the
+       * same save event recalled, not a new one. */
+      isNewlyCreated: boolean;
+    }
+  | { ok: false; reason: "idempotency_key_conflict" };
+
 export async function createDraft(
   pool: Pool,
   sessionAddress: string,
   input: CreateDraftInput,
   idempotencyKey: string | null,
-): Promise<TaskRow> {
+): Promise<CreateDraftResult> {
   const requesterAddress = normalizeAddress(sessionAddress);
   const skillTags = [...new Set(input.skillTags)];
   const token = resolveYdTokenAddress();
@@ -123,12 +185,15 @@ export async function createDraft(
   if (idempotencyKey) {
     const existing = await findDraftByIdempotencyKey(pool, requesterAddress, idempotencyKey);
     if (existing) {
-      return existing;
+      if (!draftPayloadMatches(existing, input)) {
+        return { ok: false, reason: "idempotency_key_conflict" };
+      }
+      return { ok: true, task: existing, isNewlyCreated: false };
     }
   }
 
   try {
-    return await insertTaskDraft(pool, {
+    const task = await insertTaskDraft(pool, {
       requesterAddress,
       category: input.category,
       title: input.title,
@@ -138,12 +203,17 @@ export async function createDraft(
       deliveryDeadline: new Date(input.deliveryDeadline),
       idempotencyKey,
       skillTags,
+      expertType: input.expertType,
     });
+    return { ok: true, task, isNewlyCreated: true };
   } catch (error) {
     if (idempotencyKey && isUniqueViolation(error)) {
       const existing = await findDraftByIdempotencyKey(pool, requesterAddress, idempotencyKey);
       if (existing) {
-        return existing;
+        if (!draftPayloadMatches(existing, input)) {
+          return { ok: false, reason: "idempotency_key_conflict" };
+        }
+        return { ok: true, task: existing, isNewlyCreated: false };
       }
     }
     throw error;
@@ -277,6 +347,7 @@ export async function updateDraft(
     budget: input.budget,
     deliveryDeadline: input.deliveryDeadline ? new Date(input.deliveryDeadline) : undefined,
     skillTags: input.skillTags ? [...new Set(input.skillTags)] : undefined,
+    expertType: input.expertType,
   });
 
   if (result.outcome === "not_found") {

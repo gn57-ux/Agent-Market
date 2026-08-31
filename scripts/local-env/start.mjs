@@ -36,6 +36,7 @@ import {
   processesInGroup,
 } from "./process-check.mjs";
 import { terminateProcessGroup } from "./process-terminate.mjs";
+import { checkOllamaEmbedding, formatOllamaPreflightLines } from "./ollama-preflight.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -429,6 +430,15 @@ async function runStartupSequence(startedServices) {
   console.log(`API：       http://localhost:${PORTS.api}`);
   console.log(`Hardhat RPC：${rpcUrl}（chainId 31337）`);
   console.log(`Go dispatch：http://127.0.0.1:${PORTS.dispatch}`);
+
+  // F-1317: read-only, informational only — never affects this script's
+  // exit code (see ollama-preflight.mjs's own header comment for why).
+  console.log("");
+  const ollamaResult = await checkOllamaEmbedding();
+  for (const line of formatOllamaPreflightLines(ollamaResult)) {
+    console.log(line);
+  }
+
   console.log("\nMetaMask 添加/切换网络指引：");
   console.log(`  网络名称：Agent Market Local`);
   console.log(`  RPC URL：${rpcUrl}`);

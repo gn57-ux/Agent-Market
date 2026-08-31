@@ -95,6 +95,10 @@ function insertTask(pool: Pool, overrides: Partial<Record<string, unknown>> = {}
     "token",
     "delivery_deadline",
     "status",
+    // T-1201b: 0014_drop_expert_type_default.sql removed the column's
+    // compatibility DEFAULT — every raw INSERT INTO tasks in this codebase
+    // (production or test fixture) must now supply it explicitly.
+    "expert_type",
   ];
   const params: unknown[] = [
     values.requester_address,
@@ -105,6 +109,7 @@ function insertTask(pool: Pool, overrides: Partial<Record<string, unknown>> = {}
     values.token,
     values.delivery_deadline,
     values.status,
+    "AUTOMATION",
   ];
   if (values.required_agent_level !== undefined) {
     columns.push("required_agent_level");
@@ -149,7 +154,7 @@ runIfOptedIn("dispatch-matching fields migration (integration, AC-710)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
     );
     await pool.end();
   });

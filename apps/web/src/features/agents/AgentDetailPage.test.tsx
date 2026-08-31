@@ -35,6 +35,7 @@ function agentFixture(overrides: Partial<Agent> = {}): Agent {
     qualityScore: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    protocolVersion: "v1",
     ...overrides,
   };
 }

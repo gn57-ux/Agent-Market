@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest, FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { verifySession } from "../auth/session.service.js";
 import { createChainRpcClient } from "../chain/rpc.client.js";
+import { embedTaskOnSave } from "../embeddings/embed-on-save.js";
 import { formatZodError } from "../../shared/zod-error.js";
 import type {
   FundingIntentResult,
@@ -44,6 +45,7 @@ import {
 // T-602 round 1, P2: the literal previously declared here duplicated the
 // shared code with no compile-time link back to it).
 const TASK_STATE_CONFLICT: ErrorCode = "TASK_STATE_CONFLICT";
+const IDEMPOTENCY_KEY_CONFLICT: ErrorCode = "IDEMPOTENCY_KEY_CONFLICT";
 
 const IDEMPOTENCY_KEY_HEADER = "idempotency-key";
 
@@ -91,6 +93,7 @@ function toTaskDraftJson(task: TaskRow) {
     token: task.token,
     deliveryDeadline: task.deliveryDeadline.toISOString(),
     skillTags: task.skillTags,
+    expertType: task.expertType,
     status: task.status,
     fundingTxHash: task.fundingTxHash,
     createdAt: task.createdAt.toISOString(),
@@ -480,7 +483,31 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     }
 
     const idempotencyKey = readIdempotencyKey(request);
-    const task = await createDraft(pool, sessionAddress, parsed.data, idempotencyKey);
+    const result = await createDraft(pool, sessionAddress, parsed.data, idempotencyKey);
+
+    // T-609 (Feature 14, F-1405): a same-key replay whose payload doesn't
+    // match the original request is a client bug, not a legitimate retry —
+    // reject it rather than silently returning the stale original as if
+    // the new data had been accepted.
+    if (!result.ok) {
+      return reply.status(409).send({
+        error: {
+          code: IDEMPOTENCY_KEY_CONFLICT,
+          message: "同一 Idempotency-Key 已用于一个字段不同的请求，拒绝创建。",
+        },
+      });
+    }
+    const { task, isNewlyCreated } = result;
+
+    // F-1301/F-1303/T-1302: fire-and-forget, never awaited — see agents/
+    // routes.ts's identical comment on POST /agents for the full reasoning.
+    // Only fires on a genuine insert — an idempotent replay returns the same
+    // unchanged row, and re-embedding it would let a client exhaust the
+    // shared monthly budget purely by resending the same Idempotency-Key.
+    // F-1303's "最多触发一次" is per save EVENT, not per HTTP request.
+    if (isNewlyCreated) {
+      void embedTaskOnSave(pool, task).catch(() => {});
+    }
 
     return reply.status(201).send(toTaskDraftJson(task));
   });
@@ -508,6 +535,8 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
     if (!result.ok) {
       return sendMutationFailure(reply, result);
     }
+    // F-1301/T-1302: see POST /tasks/drafts's identical comment above.
+    void embedTaskOnSave(pool, result.task).catch(() => {});
     return reply.send(toTaskDraftJson(result.task));
   });
 

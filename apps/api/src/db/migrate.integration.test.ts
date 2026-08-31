@@ -36,7 +36,7 @@ runIfOptedIn("runMigrations (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -56,6 +56,11 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0010_create_pending_result_submissions.sql",
       "0011_create_disputes.sql",
       "0012_create_ratings.sql",
+      "0013_add_agent_task_credentials.sql",
+      "0014_drop_expert_type_default.sql",
+      "0015_create_vector_recall_scoring.sql",
+      "0016_create_embedding_budget.sql",
+      "0017_ollama_embedding_dimension.sql",
     ]);
     expect(result.alreadyApplied).toEqual([]);
 
@@ -66,10 +71,11 @@ runIfOptedIn("runMigrations (integration)", () => {
          'tasks', 'task_skills', 'chain_transactions', 'chain_events', 'task_state_history',
          'blocked_wallets', 'recommendation_runs', 'recommendation_candidates',
          'acceptance_permits', 'deliverables', 'pending_result_submissions', 'disputes',
-         'audit_logs', 'ratings')`,
+         'audit_logs', 'ratings', 'agent_embeddings', 'task_embeddings', 'embedding_budget_usage')`,
     );
     expect(rows.map((row) => row.table_name).sort()).toEqual([
       "acceptance_permits",
+      "agent_embeddings",
       "agent_skills",
       "agents",
       "audit_logs",
@@ -79,11 +85,13 @@ runIfOptedIn("runMigrations (integration)", () => {
       "chain_transactions",
       "deliverables",
       "disputes",
+      "embedding_budget_usage",
       "pending_result_submissions",
       "ratings",
       "recommendation_candidates",
       "recommendation_runs",
       "sessions",
+      "task_embeddings",
       "task_skills",
       "task_state_history",
       "tasks",
@@ -107,6 +115,11 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0010_create_pending_result_submissions.sql",
       "0011_create_disputes.sql",
       "0012_create_ratings.sql",
+      "0013_add_agent_task_credentials.sql",
+      "0014_drop_expert_type_default.sql",
+      "0015_create_vector_recall_scoring.sql",
+      "0016_create_embedding_budget.sql",
+      "0017_ollama_embedding_dimension.sql",
     ]);
   });
 });

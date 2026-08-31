@@ -14,7 +14,7 @@
     "env:start": "node scripts/local-env/start.mjs",
     "env:stop": "node scripts/local-env/stop.mjs",
     "env:status": "node scripts/local-env/status.mjs",
-    "env:test": "node --test scripts/local-env/*.test.mjs"
+    "env:test": "AGENT_MARKET_TEST_LOCAL_ENV_DIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/agent-market-env-test.XXXXXX\")\" node --test scripts/local-env/*.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9",
