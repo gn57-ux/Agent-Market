@@ -11,6 +11,8 @@ import { registerDisputesRoutes } from "./modules/disputes/routes.js";
 import { registerDispatchRoutes } from "./modules/dispatch/routes.js";
 import { registerRatingsRoutes } from "./modules/ratings/routes.js";
 import { registerTasksRoutes } from "./modules/tasks/routes.js";
+import { registerOfficeRoutes } from "./modules/office/routes.js";
+import type { OfficeFundsReader } from "./modules/office/funds-reader.js";
 
 export interface BuildAppOptions {
   /** Test seam: pass a Pool bound to a throwaway test database instead of
@@ -23,6 +25,7 @@ export interface BuildAppOptions {
    * only reasoning about it. Production callers omit this and get the
    * default `true`. */
   logger?: FastifyServerOptions["logger"];
+  officeFundsReader?: OfficeFundsReader;
 }
 
 /** The frontend origin allowed to call this API with credentials
@@ -102,6 +105,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // uses `app.requireSession` as a preHandler (T-1003).
   void app.register(async (instance) => {
     registerRatingsRoutes(instance, pool);
+  });
+
+  void app.register(async (instance) => {
+    registerOfficeRoutes(instance, pool, options.officeFundsReader);
   });
 
   return app;

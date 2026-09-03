@@ -14,15 +14,18 @@
     "env:start": "node scripts/local-env/start.mjs",
     "env:stop": "node scripts/local-env/stop.mjs",
     "env:status": "node scripts/local-env/status.mjs",
-    "env:test": "AGENT_MARKET_TEST_LOCAL_ENV_DIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/agent-market-env-test.XXXXXX\")\" node --test scripts/local-env/*.test.mjs"
+    "env:test": "AGENT_MARKET_TEST_LOCAL_ENV_DIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/agent-market-env-test.XXXXXX\")\" node --test scripts/local-env/*.test.mjs",
+    "office-cocos:sync-check": "node scripts/office-cocos-sync-check.mjs",
+    "office-cocos:sync-record": "node scripts/office-cocos-sync-check.mjs --record"
   },
   "devDependencies": {
     "@eslint/js": "^9",
+    "@playwright/test": "^1.62.1",
     "eslint": "^9",
     "globals": "^15",
+    "pg": "^8.12.0",
     "prettier": "^3",
     "typescript-eslint": "^8",
-    "pg": "^8.12.0",
     "viem": "^2.19.0",
     "zod": "^3.23.8"
   }

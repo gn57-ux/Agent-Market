@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-28T18:00:00.000Z",
+  "viewer": { "address": "0x1234567890abcdef1234567890abcdef12345678" },
+  "agents": [
+    {
+      "agentId": "mock-agent-1",
+      "name": "Research Scout",
+      "category": "Research",
+      "skillTags": ["web", "summary"],
+      "status": "ACTIVE",
+      "completionRate": 0.92,
+      "qualityScore": 4.8
+    },
+    {
+      "agentId": "mock-agent-2",
+      "name": "Visual Maker",
+      "category": "Design",
+      "skillTags": ["image", "layout"],
+      "status": "ACTIVE",
+      "completionRate": 0.84,
+      "qualityScore": 4.6
+    }
+  ],
+  "taskBoard": {
+    "published": [
+      {
+        "taskId": "mock-task-1",
+        "title": "Prepare market brief",
+        "status": "OPEN",
+        "budget": "120000000000000000000",
+        "deliveryDeadline": "2026-08-30T18:00:00.000Z"
+      }
+    ],
+    "accepted": [
+      {
+        "taskId": "mock-task-2",
+        "title": "Review launch assets",
+        "status": "SUBMITTED",
+        "budget": "80000000000000000000",
+        "deliveryDeadline": "2026-08-29T18:00:00.000Z"
+      }
+    ]
+  },
+  "funds": {
+    "kind": "available",
+    "tokenSymbol": "YD",
+    "decimals": 18,
+    "walletBalance": "640000000000000000000",
+    "lockedBudget": "120000000000000000000",
+    "agentStake": "4800000000000000000",
+    "pendingSettlement": "84800000000000000000",
+    "observedBlockNumber": "1842"
+  },
+  "deliveryDesk": [
+    {
+      "taskId": "mock-task-2",
+      "title": "Review launch assets",
+      "status": "SUBMITTED",
+      "budget": "80000000000000000000",
+      "deliveryDeadline": "2026-08-29T18:00:00.000Z",
+      "submittedAt": "2026-08-28T17:00:00.000Z",
+      "reviewDeadline": "2026-08-31T17:00:00.000Z",
+      "disputeStatus": "NONE"
+    }
+  ],
+  "achievements": {
+    "completedTaskCount": 12,
+    "averageRating": 4.7,
+    "qualityScore": 4.8,
+    "overdueCount": 1,
+    "recentCompletedTasks": [
+      {
+        "taskId": "mock-task-3",
+        "title": "Audit API contract",
+        "status": "RELEASED",
+        "budget": "50000000000000000000",
+        "deliveryDeadline": "2026-08-27T18:00:00.000Z"
+      }
+    ]
+  }
+}

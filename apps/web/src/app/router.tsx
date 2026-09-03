@@ -10,6 +10,7 @@ import { MyPublishedTasksPage } from "../features/tasks/MyPublishedTasksPage.js"
 import { MyAcceptedTasksPage } from "../features/tasks/MyAcceptedTasksPage.js";
 import { TaskMarketPage } from "../features/tasks/TaskMarketPage.js";
 import { TaskDetailPage } from "../features/tasks/TaskDetailPage.js";
+import { OfficePage } from "../features/office/OfficePage.js";
 
 /**
  * The single route table for apps/web (Feature 5 kickoff instruction:
@@ -34,6 +35,7 @@ export const router = createBrowserRouter([
       { path: "tasks/mine", element: <MyPublishedTasksPage /> },
       { path: "tasks/accepted", element: <MyAcceptedTasksPage /> },
       { path: "tasks/:taskId", element: <TaskDetailPage /> },
+      { path: "office", element: <OfficePage /> },
     ],
   },
 ]);

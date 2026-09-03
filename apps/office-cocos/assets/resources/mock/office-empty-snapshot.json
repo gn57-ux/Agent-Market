@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-28T18:00:00.000Z",
+  "viewer": { "address": "0x1234567890abcdef1234567890abcdef12345678" },
+  "agents": [],
+  "taskBoard": { "published": [], "accepted": [] },
+  "funds": {
+    "kind": "available",
+    "tokenSymbol": "YD",
+    "decimals": 18,
+    "walletBalance": "0",
+    "lockedBudget": "0",
+    "agentStake": "0",
+    "pendingSettlement": "0",
+    "observedBlockNumber": "1842"
+  },
+  "deliveryDesk": [],
+  "achievements": {
+    "completedTaskCount": 0,
+    "averageRating": null,
+    "qualityScore": null,
+    "overdueCount": 0,
+    "recentCompletedTasks": []
+  }
+}
