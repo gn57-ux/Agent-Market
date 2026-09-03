@@ -3,23 +3,18 @@ import type { CookieSerializeOptions } from "@fastify/cookie";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { completeLogin } from "./completeLogin.js";
-import { getActiveNonce, issueNonce } from "./nonce.store.js";
+import type { IdentityProvider } from "./identity-provider.js";
 import { nonceRequestSchema, verifyRequestSchema } from "./schema.js";
-import { buildSignInMessage, verifySignInSignature } from "./signInMessage.js";
 import { revokeSession } from "./session.service.js";
 import { formatZodError } from "../../shared/zod-error.js";
 
-const SESSION_COOKIE_NAME = "session_token";
-
-/** Domain field embedded in the sign-in message (F-404, design.md). Not
- * secret, just an anti-phishing binding (the same purpose EIP-4361's
- * `domain` field serves) — a signature produced for a different domain's
- * challenge won't match this one's reconstructed message. No dedicated
- * `.env.example` default beyond "localhost" is meaningful before a real
- * deployment domain exists; revisit when this ships behind a real host. */
-function authDomain(): string {
-  return process.env.AUTH_DOMAIN ?? "localhost";
-}
+// Exported (F-1601/T-1601): privy-routes.ts's /auth/verify/privy reuses
+// this cookie name and the two helpers below verbatim rather than
+// reimplementing them — decision 2 requires its set-cookie logic to be
+// identical to /auth/verify's, not a parallel copy that could drift. The
+// four existing route handlers below are otherwise byte-for-byte
+// unchanged (AC-1601 non-regression).
+export const SESSION_COOKIE_NAME = "session_token";
 
 /**
  * Whether the session cookie should carry `Secure`. Codex review (T-404
@@ -34,14 +29,14 @@ function authDomain(): string {
  * misconfigured/unconfigured real deployment now defaults to secure rather
  * than to insecure.
  */
-function cookieShouldBeSecure(): boolean {
+export function cookieShouldBeSecure(): boolean {
   return process.env.COOKIE_INSECURE_LOCAL_DEV !== "1";
 }
 
 /** `path` must match between `setCookie` and `clearCookie` for the browser
  * to actually recognize them as the same cookie — shared here so
  * `/auth/logout` can't drift from `/auth/verify`'s own setCookie call. */
-function sessionCookiePath(): Pick<CookieSerializeOptions, "path"> {
+export function sessionCookiePath(): Pick<CookieSerializeOptions, "path"> {
   return { path: "/" };
 }
 
@@ -51,7 +46,7 @@ function sessionCookiePath(): Pick<CookieSerializeOptions, "path"> {
 // validation failures (missing/malformed fields) are a plain 400 with the
 // Zod issue text, not one of these codes — malformed input isn't a domain
 // error, and PRD §11.4's table doesn't define a generic one for it.
-const WALLET_SIGNATURE_INVALID: ErrorCode = "WALLET_SIGNATURE_INVALID";
+export const WALLET_SIGNATURE_INVALID: ErrorCode = "WALLET_SIGNATURE_INVALID";
 
 /**
  * Registers the full F-404/F-405 auth route surface: `/auth/nonce`,
@@ -60,14 +55,18 @@ const WALLET_SIGNATURE_INVALID: ErrorCode = "WALLET_SIGNATURE_INVALID";
  * protected routes is registered separately — see
  * `session.middleware.ts`'s `registerSessionMiddleware`.
  */
-export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
+export function registerAuthRoutes(
+  app: FastifyInstance,
+  pool: Pool,
+  provider: IdentityProvider,
+): void {
   app.post("/auth/nonce", async (request, reply) => {
     const parsed = nonceRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
-    const issued = await issueNonce(pool, parsed.data.address);
+    const issued = await provider.beginAuth(pool, parsed.data.address);
     return reply.send({
       nonce: issued.nonce,
       issuedAt: issued.issuedAt.toISOString(),
@@ -75,6 +74,23 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
     });
   });
 
+  // F-1601 (T-1600): this specific route stays SIWE-shaped — `verifyRequestSchema`
+  // below still requires `address`+`signature`+`nonce`, and always builds
+  // `proof` as `{ signature }`. That's a real, honest limit of the
+  // adapter boundary, not an oversight: `completeLogin`'s own dependency
+  // on `IdentityProvider` (not `SiweIdentityProvider` directly) is what
+  // makes F-1603's rollback possible (swap the composition root's default
+  // provider), but a wire-compatible provider swap on THIS SAME route
+  // only works for providers that also speak nonce+signature. Privy's real
+  // flow (T-1601) verifies an already-issued access token, not a
+  // nonce/signature challenge-response, and reviewing code (N4, real
+  // finding) correctly caught an earlier version of this comment
+  // overclaiming that this handler "no longer knows or cares" about the
+  // proof shape — it does, deliberately, until T-1601 decides whether
+  // Privy gets its own route or this one grows a provider-selected
+  // request schema. Not solved here: no real second provider shape exists
+  // yet to design a generic contract against (T-1610's ADR/threat-model
+  // docs must land before T-1601 can even start).
   app.post("/auth/verify", async (request, reply) => {
     const parsed = verifyRequestSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -82,51 +98,22 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool): void {
     }
     const { address, signature, nonce } = parsed.data;
 
-    // Must look up (not consume) first: verifying the signature has to
-    // happen before the nonce is burned, so an invalid-signature attempt
-    // doesn't cost a legitimate client its one chance to retry (see
-    // getActiveNonce's doc comment).
-    const active = await getActiveNonce(pool, address, nonce);
-    if (!active) {
-      return reply.status(401).send({
-        error: {
-          code: WALLET_SIGNATURE_INVALID,
-          message: "nonce 不存在、已被使用或已过期。",
-        },
-      });
-    }
-
-    const message = buildSignInMessage({
-      domain: authDomain(),
-      address,
-      nonce,
-      issuedAt: active.issuedAt,
-      expiresAt: active.expiresAt,
-    });
-    const validSignature = await verifySignInSignature({ address, message, signature });
-    if (!validSignature) {
-      return reply.status(401).send({
-        error: {
-          code: WALLET_SIGNATURE_INVALID,
-          message: "签名与预期消息不匹配。",
-        },
-      });
-    }
-
-    // Atomic one-time-use enforcement + session issuance: a concurrent
-    // /auth/verify for the same nonce could have consumed it between the
-    // lookup above and here (e.g. two requests racing with the same
-    // replayed valid signature) — completeLogin's UPDATE ... WHERE
-    // consumed = false is what actually guarantees only one of them wins.
-    // Consuming the nonce, recording the login, and issuing the session all
-    // happen in one transaction (Codex review, T-404 round 2, P2), so a
-    // failure issuing the session doesn't leave the nonce burned with no
-    // session to show for it.
-    const result = await completeLogin(pool, address, nonce);
+    // completeLogin verifies the proof (via `provider`), records the
+    // login, and issues the session all in one transaction. Every `!ok`
+    // branch below maps to the SAME WALLET_SIGNATURE_INVALID code Feature
+    // 4's existing tests already assert on (AC-1601) — the `reason` only
+    // changes the human-readable message, never the contract.
+    const result = await completeLogin(pool, provider, address, nonce, { signature });
     if (!result.ok) {
-      return reply.status(401).send({
-        error: { code: WALLET_SIGNATURE_INVALID, message: "nonce 已被使用。" },
-      });
+      const message =
+        result.reason === "not_found"
+          ? "nonce 不存在、已被使用或已过期。"
+          : result.reason === "already_consumed"
+            ? "nonce 已被使用。"
+            : result.reason === "expired"
+              ? "nonce 已过期。"
+              : "签名与预期消息不匹配。";
+      return reply.status(401).send({ error: { code: WALLET_SIGNATURE_INVALID, message } });
     }
     const session = result.session;
 

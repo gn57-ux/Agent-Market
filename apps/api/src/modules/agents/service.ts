@@ -5,13 +5,19 @@ import {
   getAgentById,
   insertAgent,
   listAgents,
+  setAgentPricingType,
   setAgentStatus,
   updateAgent as updateAgentRow,
   type AgentRow,
   type AgentStatus,
   type ListAgentsResult,
 } from "./repository.js";
-import type { CreateAgentInput, ListAgentsQuery, UpdateAgentInput } from "./schema.js";
+import type {
+  ChangeAgentPricingTypeInput,
+  CreateAgentInput,
+  ListAgentsQuery,
+  UpdateAgentInput,
+} from "./schema.js";
 import { callAgent, type InvocationResult } from "./invocation-client.js";
 
 /**
@@ -47,10 +53,14 @@ function isUniqueViolation(error: unknown): boolean {
  * every `requireOwnedAgent` call site (including `testAgentInvocation`'s,
  * which never touches credential_ref writes at all) to handle a reason it
  * can't actually receive. */
-type OwnershipCheckResult =
+export type OwnershipCheckResult =
   { ok: true; agent: AgentRow } | { ok: false; reason: "not_found" | "forbidden" };
 
-async function requireOwnedAgent(
+/** Exported so review.ts's `submitAgentForReview` (T-1605) can reuse the
+ * exact same ownership check rather than re-deriving it — the rule
+ * "session address must match the Agent's owner_address, case-
+ * insensitively" belongs here once (CLAUDE.md 原则 6). */
+export async function requireOwnedAgent(
   pool: Queryable,
   sessionAddress: string,
   agentId: string,
@@ -100,6 +110,13 @@ export async function createAgent(
   const ownerAddress = normalizeAddress(sessionAddress);
   const payoutAddress = normalizeAddress(input.payoutAddress);
   const skillTags = [...new Set(input.skillTags)];
+  // F-1604 (design.md 决策 5, T-1604) — the ENTIRE review-routing rule,
+  // owned exactly here and nowhere else: FREE Agents skip review
+  // (F-1604's direct-to-market path), every other pricing mode enters
+  // PENDING_REVIEW (F-1605). `pricingType` alone decides this — never
+  // `referencePrice`'s presence/value (the exact inference design.md
+  // 决策 5 rejected as a real, demonstrated review-bypass vulnerability).
+  const reviewStatus = input.pricingType === "FREE" ? "ACTIVE" : "PENDING_REVIEW";
 
   try {
     const agent = await insertAgent(pool, {
@@ -112,6 +129,8 @@ export async function createAgent(
       payoutAddress,
       pricingModel: input.pricingModel,
       referencePrice: input.referencePrice,
+      pricingType: input.pricingType,
+      reviewStatus,
       skillTags,
       protocolVersion: input.protocolVersion,
       credentialEnabled: input.credentialEnabled,
@@ -129,9 +148,20 @@ export async function createAgent(
   }
 }
 
-/** F-502: thin pass-through to the repository — pagination/filter parsing
- * already happened in schema.ts, there's no ownership or default-value
- * logic to apply for a read-only listing. */
+/**
+ * F-502/AC-1604: pagination/filter parsing already happened in schema.ts,
+ * but this is NOT a pure pass-through — `reviewStatus: "ACTIVE"` is
+ * unconditionally forced here, never taken from `query` (there is no
+ * `reviewStatus` field on `ListAgentsQuery`/`listAgentsQuerySchema` at
+ * all — a caller cannot override this). AC-1604's actual requirement
+ * ("付费 Agent 创建后不可见，直到审核通过") applies to every caller of the
+ * PUBLIC market listing with no exception, including the Agent's own
+ * owner — an owner who wants to check their own pending Agent's status
+ * uses `GET /agents/:agentId` directly (unaffected by this filter), not
+ * this listing. A future admin review-queue endpoint (T-1605) reuses
+ * `listAgents` directly with its own explicit `reviewStatus`, not through
+ * this market-specific wrapper.
+ */
 export async function listAgentsForMarket(
   pool: Queryable,
   query: ListAgentsQuery,
@@ -140,15 +170,39 @@ export async function listAgentsForMarket(
     category: query.category,
     skillTag: query.skillTag,
     status: query.status,
+    reviewStatus: "ACTIVE",
     page: query.page,
     pageSize: query.pageSize,
   });
 }
 
-/** F-502/F-508: `null` when no Agent exists with this id — routes.ts turns
- * that into a 404, this layer just reports absence. */
-export async function getAgentDetail(pool: Queryable, agentId: string): Promise<AgentRow | null> {
-  return getAgentById(pool, agentId);
+/**
+ * F-502/F-508: `null` when no Agent exists with this id, OR (Codex review,
+ * T-1605 round 1 P1) when it exists but the viewer isn't allowed to see it
+ * yet — routes.ts turns either case into the SAME 404, deliberately: a
+ * `PENDING_REVIEW`/`REJECTED`/`SUSPENDED` Agent must stay indistinguishable
+ * from "doesn't exist" to anyone but its own owner or an admin (AC-1604's
+ * "审核通过前不可见" only actually held for `GET /agents`'s list — this
+ * endpoint had no `reviewStatus` check at all, so a stranger who knew or
+ * guessed the UUID could still read the full detail of an Agent that was
+ * never supposed to be visible to them). A 403 here would leak the Agent's
+ * existence and current review state to someone with no right to either.
+ */
+export async function getAgentDetail(
+  pool: Queryable,
+  agentId: string,
+  viewer: { address: string | undefined; isAdmin: boolean },
+): Promise<AgentRow | null> {
+  const agent = await getAgentById(pool, agentId);
+  if (!agent) {
+    return null;
+  }
+  const isOwner =
+    viewer.address !== undefined && agent.ownerAddress === normalizeAddress(viewer.address);
+  if (agent.reviewStatus !== "ACTIVE" && !isOwner && !viewer.isAdmin) {
+    return null;
+  }
+  return agent;
 }
 
 /**
@@ -219,6 +273,95 @@ export async function setAgentActiveStatus(
 
   const updated = await setAgentStatus(pool, agentId, status);
   if (!updated) {
+    return { ok: false, reason: "not_found" };
+  }
+  return { ok: true, agent: updated };
+}
+
+/**
+ * F-1604 (design.md 决策 5, T-1604) — the dedicated, explicit-confirmation
+ * pricing-type change (never available via the general `updateAgent`
+ * PATCH — see schema.ts's `changeAgentPricingTypeSchema` doc comment for
+ * why). Same ownership check as `updateAgent`/`setAgentActiveStatus`.
+ *
+ * The re-review rule is specifically about crossing the FREE boundary —
+ * design.md 决策 5's actual concern ("Agent 所有者不能靠改价格模式绕过审核"):
+ * - non-FREE → FREE: no re-review needed, FREE never requires it —
+ *   `review_status` moves directly to `ACTIVE` (matches F-1604's own
+ *   direct-to-market rule for FREE Agents at creation time).
+ * - FREE → non-FREE: MUST re-enter review — this is the exact bypass
+ *   design.md 决策 5 closes: an owner cannot create as FREE (skip review),
+ *   then flip to a paid mode and keep the free pass.
+ * - non-FREE → a different non-FREE mode (e.g. PER_TASK → SUBSCRIPTION):
+ *   no review-status change — this Agent was already reviewed as "some
+ *   paid mode" and stays reviewed; design.md 决策 5 never asked for
+ *   re-review on every pricing edit, only at the FREE boundary.
+ * Every crossing writes an `agent_review_audit_logs` row (F-1607) via
+ * `setAgentPricingType`'s single transaction; a non-crossing change does
+ * not (there is no review-status transition to audit).
+ *
+ * N4 round-1 real findings (both P1), both fixed here:
+ *
+ * 1. REJECTED/SUSPENDED override — the platform (T-1605/T-1606, later
+ *    Tasks) can reject or suspend an Agent, a deliberate adverse decision
+ *    about that specific Agent. The FREE-boundary rule above, applied
+ *    unconditionally, would let the OWNER silently reverse that decision
+ *    just by toggling pricingType (switch to FREE → auto-ACTIVE overwrites
+ *    a REJECTED/SUSPENDED verdict; switch away from FREE while already
+ *    SUSPENDED → auto-PENDING_REVIEW does the same). Only admin approve or
+ *    the owner's own appeal flow may move an Agent out of REJECTED/
+ *    SUSPENDED — never a pricing-type change alone. Guarded below: when
+ *    the CURRENT (freshly-locked) review_status is REJECTED or SUSPENDED,
+ *    the decision callback returns `null` — pricing_type still updates
+ *    (still a legitimate business-config edit), review_status does not.
+ * 2. Race condition — `wasFree`/`willBeFree` are no longer computed from
+ *    `owned.agent` (a pre-transaction snapshot read before any lock).
+ *    That snapshot could be stale by the time `setAgentPricingType`
+ *    actually acquires its row lock, letting two concurrent requests both
+ *    decide from the same stale state (see that function's own doc
+ *    comment for the exact exploitable sequence this produced). The
+ *    decision is now a callback `setAgentPricingType` invokes AFTER its
+ *    own `SELECT ... FOR UPDATE`, so `current` is guaranteed to be
+ *    whatever the last COMMITTED write actually left behind.
+ */
+export async function changeAgentPricingType(
+  pool: Pool,
+  sessionAddress: string,
+  agentId: string,
+  input: ChangeAgentPricingTypeInput,
+): Promise<AgentMutationResult> {
+  const owned = await requireOwnedAgent(pool, sessionAddress, agentId);
+  if (!owned.ok) {
+    return owned;
+  }
+
+  const actorAddress = normalizeAddress(sessionAddress);
+  const newPricingType = input.pricingType;
+
+  const updated = await setAgentPricingType(pool, agentId, newPricingType, (current) => {
+    if (current.reviewStatus === "REJECTED" || current.reviewStatus === "SUSPENDED") {
+      return null;
+    }
+    const wasFree = current.pricingType === "FREE";
+    const willBeFree = newPricingType === "FREE";
+    if (wasFree === willBeFree) {
+      return null;
+    }
+    return willBeFree
+      ? {
+          toReviewStatus: "ACTIVE",
+          actorAddress,
+          reason: "pricingType 变更为 FREE，无需审核直接上架。",
+        }
+      : {
+          toReviewStatus: "PENDING_REVIEW",
+          actorAddress,
+          reason: `pricingType 从 FREE 变更为 ${newPricingType}，需重新进入审核。`,
+        };
+  });
+  if (!updated) {
+    // Same defensive "existed at the ownership check, gone now" case as
+    // updateAgent — no delete endpoint exists, so not expected in practice.
     return { ok: false, reason: "not_found" };
   }
   return { ok: true, agent: updated };

@@ -104,6 +104,11 @@ export function AgentEditPage() {
             submitLabel="保存"
             pending={pending}
             errorMessage={submitError}
+            // pricingType is intentionally ignored here — the edit form
+            // renders it read-only (AgentForm.tsx's own doc comment: a
+            // PATCH request never accepts this field; changing it after
+            // creation requires the dedicated confirmation endpoint,
+            // which this form doesn't wire up).
             onSubmit={(input) => void handleSubmit(agent, input)}
           />
         </div>

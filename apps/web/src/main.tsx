@@ -4,6 +4,7 @@ import "./index.css";
 import { App } from "./App";
 import { WalletProvider } from "./features/wallet/WalletProvider.js";
 import { SessionProvider } from "./features/session/SessionProvider.js";
+import { PrivyAppProvider } from "./features/session/privy/PrivyAppProvider.js";
 
 const container = document.getElementById("root");
 if (!container) {
@@ -13,9 +14,14 @@ if (!container) {
 createRoot(container).render(
   <StrictMode>
     <WalletProvider>
-      <SessionProvider>
-        <App />
-      </SessionProvider>
+      {/* Must wrap SessionProvider: SessionProvider.loginWithPrivy() reads
+          the Privy login bridge PrivyAppProvider mounts (only when
+          VITE_PRIVY_APP_ID is configured — see PrivyAppProvider.tsx). */}
+      <PrivyAppProvider>
+        <SessionProvider>
+          <App />
+        </SessionProvider>
+      </PrivyAppProvider>
     </WalletProvider>
   </StrictMode>,
 );

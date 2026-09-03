@@ -69,8 +69,10 @@ function makeAgentRow(id: string, input: CreateAgentInput): Agent {
     invocationUrl: input.invocationUrl ?? null,
     payoutAddress: input.payoutAddress,
     pricingModel: input.pricingModel ?? null,
+    pricingType: input.pricingType,
     referencePrice: input.referencePrice ?? null,
     status: "ACTIVE",
+    reviewStatus: input.pricingType === "FREE" ? "ACTIVE" : "PENDING_REVIEW",
     completedTaskCount: 0,
     successCount: 0,
     overdueCount: 0,
@@ -116,6 +118,8 @@ beforeEach(async () => {
     return {
       agentId: row.agentId,
       status: row.status,
+      reviewStatus: row.reviewStatus,
+      pricingType: row.pricingType,
       createdAt: row.createdAt,
       completedTaskCount: row.completedTaskCount,
       qualityScore: row.qualityScore,
@@ -284,6 +288,7 @@ async function createAgentViaForm(fields: {
   fireEvent.change(screen.getByLabelText("收款地址"), {
     target: { value: fields.payoutAddress },
   });
+  fireEvent.change(screen.getByLabelText("计费类型"), { target: { value: "FREE" } });
   fireEvent.click(screen.getByRole("button", { name: "发布" }));
 
   // Successful creation navigates to /agents/:agentId — wait for the detail
@@ -422,6 +427,7 @@ describe("Agent registration journey (AC-501 automated substitute — see file h
         category: "writing",
         skillTags: [],
         payoutAddress: "0x9999999999999999999999999999999999999999",
+        pricingType: "FREE",
       }),
       ownerAddress: "0x9999999999999999999999999999999999999999",
     };

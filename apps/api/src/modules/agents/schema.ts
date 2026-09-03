@@ -29,6 +29,16 @@ const INVOCATION_URL_SCHEMA = z
   .refine((value) => /^https?:\/\//i.test(value), "调用地址必须是 http(s) URL");
 const PRICING_MODEL_SCHEMA = z.string().trim().max(100);
 
+// F-1604/F-1605 (Feature 16, T-1604, design.md 决策 5) — the explicit
+// pricing-mode enum that ALONE decides whether an Agent needs review
+// (`pricingType === 'FREE'`), never inferred from `referencePrice` being
+// empty/zero. Mirrors 0019_add_agent_review_status.sql's CHECK constraint
+// exactly, same "one Zod rule per DB constraint" convention as
+// PROTOCOL_VERSION_SCHEMA above.
+const PRICING_TYPE_SCHEMA = z.enum(["FREE", "PER_TASK", "SUBSCRIPTION", "HOURLY"], {
+  message: "pricingType 必须是 FREE/PER_TASK/SUBSCRIPTION/HOURLY 之一",
+});
+
 // F-1201/F-1202 (Feature 12): the migration's own CHECK constraints are the
 // authoritative source of "what's legal" (0013_add_agent_task_credentials.sql)
 // — these two schemas mirror those exact constraints so a malformed request
@@ -120,6 +130,14 @@ export const createAgentSchema = z.object({
   payoutAddress: ETH_ADDRESS_SCHEMA,
   pricingModel: PRICING_MODEL_SCHEMA.optional(),
   referencePrice: REFERENCE_PRICE_SCHEMA.optional(),
+  // F-1604 (T-1604): REQUIRED, not optional — every new Agent going
+  // forward must explicitly declare its pricing mode (design.md 决策 5's
+  // whole point: no inference from referencePrice, no silent default for
+  // NEW creations). The migration's own 'PER_TASK' DEFAULT exists only to
+  // backfill HISTORICAL rows that predate this column; a fresh POST
+  // /agents omitting this field is a client bug, not a legitimate "use
+  // the default" case.
+  pricingType: PRICING_TYPE_SCHEMA,
   // Omitted entirely uses the migration's own DEFAULT ('v1'); the only
   // reason a caller would supply it explicitly is to be self-documenting.
   protocolVersion: PROTOCOL_VERSION_SCHEMA.optional(),
@@ -206,3 +224,55 @@ export const updateAgentSchema = z.object({
 });
 
 export type UpdateAgentInput = z.infer<typeof updateAgentSchema>;
+
+/**
+ * F-1604 (T-1604, design.md 决策 5) — `POST /agents/:agentId/pricing-type`'s
+ * body. Deliberately NOT a field on `updateAgentSchema`/the general PATCH:
+ * design.md 决策 5 explicitly requires that a pricingType change "须走显式
+ * 确认，不能是普通字段 PATCH 静默生效" — a plain PATCH could silently flip an
+ * Agent between FREE (no review) and a paid mode as a side effect of an
+ * unrelated edit (e.g. updating `description` in the same request body).
+ * This mirrors the codebase's own established precedent for state-
+ * changing actions with real side effects: dedicated `POST .../activate`
+ * `.../deactivate` action routes, not a general-purpose PATCH field
+ * (confirmed against this module's existing routes.ts — no
+ * "confirmation flag" pattern exists anywhere else in this codebase to
+ * follow instead).
+ */
+export const changeAgentPricingTypeSchema = z.object({
+  pricingType: PRICING_TYPE_SCHEMA,
+});
+
+export type ChangeAgentPricingTypeInput = z.infer<typeof changeAgentPricingTypeSchema>;
+
+// F-1605/T-1605: design.md's interface contract requires reject to carry a
+// reason ("reject 必须携带 reason"), and tasks.md's T-1605 entry explicitly
+// extends the SAME requirement to suspend ("与 reject 共享'拒绝/停用理由必
+// 填'的应用层校验") — one rule, defined once, reused by both schemas below
+// rather than two independently-drifting copies (CLAUDE.md 原则 6: 设计知识
+// 只能有一个归属).
+const REVIEW_REASON_SCHEMA = z.string().trim().min(1, "必须填写理由");
+
+export const rejectAgentReviewSchema = z.object({
+  reason: REVIEW_REASON_SCHEMA,
+});
+
+export const suspendAgentReviewSchema = z.object({
+  reason: REVIEW_REASON_SCHEMA,
+});
+
+export type RejectAgentReviewInput = z.infer<typeof rejectAgentReviewSchema>;
+export type SuspendAgentReviewInput = z.infer<typeof suspendAgentReviewSchema>;
+
+// GET /admin/agents/review-queue's own pagination — same page/pageSize
+// rules as listAgentsQuerySchema above, but no category/skillTag/status
+// (the queue is always exactly reviewStatus='PENDING_REVIEW', not a
+// caller-chosen filter), so this is its own small schema rather than an
+// awkward `.pick()`/`.omit()` off a schema whose other fields don't apply
+// here.
+export const reviewQueueQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(20).default(20),
+});
+
+export type ReviewQueueQuery = z.infer<typeof reviewQueueQuerySchema>;

@@ -54,6 +54,13 @@ export function SignInButton({ variant = "light" }: SignInButtonProps = {}) {
     );
   }
 
+  // F-1601: two permanently-side-by-side entry points, not a dropdown/tab —
+  // ADR-0002/requirements.md's "两者并存，渐进迁移" means a new visitor must
+  // not be able to miss that a Privy option exists just because MetaMask
+  // happens to render first. Both buttons share `session.status`'s single
+  // "signing_in" state (SessionProvider owns one state machine for both
+  // login methods, not one per method), so both disable together while
+  // either flow is in flight — a login can only be one thing at a time.
   return (
     <span className="flex flex-wrap items-center gap-2 text-caption">
       <button
@@ -64,7 +71,26 @@ export function SignInButton({ variant = "light" }: SignInButtonProps = {}) {
       >
         {session.status === "signing_in" ? "登录中…" : "登录（签名验证钱包身份）"}
       </button>
-      {session.status === "error" && session.errorMessage && (
+      <button
+        type="button"
+        onClick={() => void session.loginWithPrivy()}
+        disabled={session.status === "signing_in"}
+        className={
+          isDark
+            ? `rounded-control border border-divider-dark px-4 py-1.5 font-medium ${textClass} transition-colors hover:border-action-blue-on-dark hover:text-action-blue-on-dark disabled:cursor-not-allowed disabled:opacity-50`
+            : `rounded-control border border-divider-light px-4 py-1.5 font-medium ${textClass} transition-colors hover:border-action-blue hover:text-action-blue disabled:cursor-not-allowed disabled:opacity-50`
+        }
+      >
+        {session.status === "signing_in" ? "登录中…" : "用 Privy 登录"}
+      </button>
+      {/* T-1611: `loginWithPrivy()`'s already_consumed/invalid_proof/network-
+          failure recovery path (SessionProvider.tsx) intentionally lands on
+          `status === "signed_out"` with `errorMessage` set (not "error") —
+          the SDK-side cleanup it just performed IS a real recovery, not a
+          stuck/unknown failure state, but the message ("凭证已失效，请重新
+          登录") still needs to reach the user, so this must render on
+          `signed_out` too, not only `error`. */}
+      {(session.status === "error" || session.status === "signed_out") && session.errorMessage && (
         <span role="alert" className="text-warning">
           {" "}
           {session.errorMessage}
