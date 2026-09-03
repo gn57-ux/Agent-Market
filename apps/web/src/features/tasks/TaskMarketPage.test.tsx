@@ -16,6 +16,7 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
     token: `0x${"1".repeat(40)}` as const,
     deliveryDeadline: "2033-01-01T00:00:00.000Z",
     skillTags: [],
+    expertType: "AUTOMATION",
     status: "OPEN",
     fundingTxHash: null,
     createdAt: "2026-01-01T00:00:00.000Z",

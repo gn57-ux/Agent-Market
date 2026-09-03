@@ -37,6 +37,9 @@ export interface TaskRecord {
   token: string;
   deliveryDeadline: string;
   skillTags: string[];
+  /** Feature 12 (F-1205): distinct from `category` (market grouping) and
+   * `skillTags` (concrete abilities) — see apps/api's schema.ts. */
+  expertType: string;
   status: TaskStatusValue;
   fundingTxHash: string | null;
   createdAt: string;
@@ -60,6 +63,12 @@ export interface CreateDraftInput {
   budget: string;
   /** ISO 8601 datetime string. */
   deliveryDeadline: string;
+  /** Feature 12 (F-1205): required — apps/api's `createDraftSchema` rejects
+   * a draft creation that omits this (no default, "不允许'未选择'状态进入数据库").
+   * T-1204 wires a minimal hardcoded value through `TaskCreatePage` to keep
+   * the existing wizard working; T-1206 replaces that with a real user-
+   * facing selector step without changing this contract. */
+  expertType: string;
 }
 
 export type UpdateDraftInput = Partial<CreateDraftInput>;

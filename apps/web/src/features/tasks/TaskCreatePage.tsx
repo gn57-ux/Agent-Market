@@ -30,6 +30,10 @@ interface TaskFormValues {
   skillTags: string[];
   title: string;
   description: string;
+  /** Feature 12 (F-1205): "" means "not yet selected" (same convention as
+   * `category`/`title`'s own empty-string-is-invalid gating below) — never
+   * a real enum value, never sent to the backend as-is. */
+  expertType: string;
   budgetText: string;
   /** `<input type="datetime-local">`'s own value format (no timezone) —
    * converted to a UTC ISO string only at submit time (`toDeliveryDeadlineIso`). */
@@ -42,6 +46,7 @@ function emptyFormValues(): TaskFormValues {
     skillTags: [],
     title: "",
     description: "",
+    expertType: "",
     budgetText: "",
     deliveryDeadlineLocal: "",
   };
@@ -49,6 +54,27 @@ function emptyFormValues(): TaskFormValues {
 
 function toDeliveryDeadlineIso(localValue: string): string {
   return new Date(localValue).toISOString();
+}
+
+/**
+ * Feature 12 (F-1205), T-1206: the 5 legal values apps/api's
+ * `EXPERT_TYPE_SCHEMA` (tasks/schema.ts) accepts, mapped to their
+ * user-facing Chinese labels. Order here is the select's option order and
+ * the single source both the `<select>` and every summary echo (sidebar
+ * card, step-4 confirm, post-creation `DraftSummary`) read from — adding a
+ * 6th value only ever needs a change in this one place, not one per
+ * display site.
+ */
+const EXPERT_TYPE_LABELS: Record<string, string> = {
+  DATA_ANALYSIS: "数据分析",
+  CONTENT_GENERATION: "内容生成",
+  SOFTWARE_DEVELOPMENT: "软件开发",
+  RESEARCH: "研究",
+  AUTOMATION: "自动化",
+};
+
+function expertTypeLabel(value: string): string {
+  return EXPERT_TYPE_LABELS[value] ?? value;
 }
 
 /** Task C: `<input type="datetime-local">`'s `min` attribute and the live
@@ -90,6 +116,7 @@ function toCreateDraftInput(values: TaskFormValues, ydDecimals: number): CreateD
     description: values.description.trim(),
     budget: parseAmount(values.budgetText.trim(), ydDecimals).toString(),
     deliveryDeadline: toDeliveryDeadlineIso(values.deliveryDeadlineLocal),
+    expertType: values.expertType,
   };
 }
 
@@ -241,6 +268,12 @@ function TaskSummaryCard({ values, stakeRateBps, reviewWindowSeconds }: TaskSumm
         <div className="flex justify-between gap-4">
           <dt className="text-ink-secondary">分类</dt>
           <dd className="text-right text-ink-primary">{values.category.trim() || "尚未选择"}</dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt className="text-ink-secondary">专家类型</dt>
+          <dd className="text-right text-ink-primary">
+            {values.expertType ? expertTypeLabel(values.expertType) : "尚未选择"}
+          </dd>
         </div>
         <div className="flex justify-between gap-4">
           <dt className="text-ink-secondary">技能标签</dt>
@@ -534,7 +567,10 @@ export function TaskCreatePage() {
   const step1Valid =
     formValues.title.trim() !== "" &&
     formValues.category.trim() !== "" &&
-    formValues.description.trim() !== "";
+    formValues.description.trim() !== "" &&
+    // F-1205/AC-1207: "未选择时阻止进入下一步" — mirrors the same
+    // empty-string-is-invalid gate category/title already use.
+    formValues.expertType.trim() !== "";
   // Task C: the previous gate only checked "非空"（non-empty), matching the
   // pattern-only budget check and the missing `min` on the deadline input —
   // a single-character title or a "0" budget or a past deadline could all
@@ -669,6 +705,28 @@ export function TaskCreatePage() {
                           <option key={option} value={option} />
                         ))}
                       </datalist>
+                    </label>
+                    <label className={labelClasses} htmlFor="task-expert-type">
+                      专家类型
+                      <select
+                        id="task-expert-type"
+                        value={formValues.expertType}
+                        onChange={(event) =>
+                          setFormValues((current) => ({
+                            ...current,
+                            expertType: event.target.value,
+                          }))
+                        }
+                        required
+                        className={inputClasses}
+                      >
+                        <option value="">请选择专家类型</option>
+                        {Object.entries(EXPERT_TYPE_LABELS).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                     <label className={labelClasses} htmlFor="task-description">
                       描述
@@ -843,6 +901,12 @@ export function TaskCreatePage() {
                         <dt className="text-ink-secondary">分类</dt>
                         <dd className="text-ink-primary">{formValues.category}</dd>
                       </div>
+                      <div>
+                        <dt className="text-ink-secondary">专家类型</dt>
+                        <dd className="text-ink-primary">
+                          {expertTypeLabel(formValues.expertType)}
+                        </dd>
+                      </div>
                       <div className="sm:col-span-2">
                         <dt className="text-ink-secondary">描述</dt>
                         <dd className="whitespace-pre-wrap text-ink-primary">
@@ -947,6 +1011,10 @@ function DraftSummary({ task }: { task: TaskRecord }) {
       <div>
         <dt className="text-ink-secondary">分类</dt>
         <dd className="text-ink-primary">{task.category}</dd>
+      </div>
+      <div>
+        <dt className="text-ink-secondary">专家类型</dt>
+        <dd className="text-ink-primary">{expertTypeLabel(task.expertType)}</dd>
       </div>
       <div>
         <dt className="text-ink-secondary">预算（最小单位）</dt>

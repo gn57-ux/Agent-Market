@@ -1,7 +1,15 @@
 // 真实故障注入测试：manifest.mjs 的原子写入。用真实文件系统操作验证
 // "manifest 部分写入或进程中途崩溃"这一类场景不会让 readManifest() 读到
-// 损坏的 JSON——不 mock fs，直接对真实的 MANIFEST_PATH 做操作，测试结束
-// 后清理，不影响其他测试或真实 env:start 的清单。
+// 损坏的 JSON——不 mock fs，直接对 MANIFEST_PATH 做操作，测试结束后清理。
+//
+// T-1311 真实事故订正：本文件曾经声称"不影响真实 env:start 的清单"，但
+// MANIFEST_PATH 当时是无条件常量，这句话并不成立——`pnpm env:test` 与一个
+// 真实运行的环境并存时，这里的写入/删除操作确实覆盖过真实清单（真实发生，
+// 详见 manifest.mjs 顶部 `AGENT_MARKET_TEST_LOCAL_ENV_DIR` 的说明）。现在
+// 隔离是真实的：只有 `pnpm env:test`（package.json 的 npm script）会设置
+// 这个环境变量，把 MANIFEST_PATH 重定向到一次性临时目录；人工直接运行
+// `node scripts/local-env/manifest.test.mjs` 而不经过该 npm script 时不会
+// 有这层隔离，请优先用 `pnpm env:test`。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, writeFileSync, rmSync } from "node:fs";

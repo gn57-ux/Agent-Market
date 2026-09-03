@@ -1,0 +1,27 @@
+-- Feature 12 (agent-task-fields-credentials), T-1201b.
+--
+-- Follow-up to 0013_add_agent_task_credentials.sql's `tasks.expert_type`
+-- column. That migration deliberately kept `DEFAULT 'AUTOMATION'` — a
+-- migration-time technical placeholder covering historical rows the
+-- `ADD COLUMN ... NOT NULL` needed, NOT a real business default (see its
+-- own doc comment) — because at that point `insertTaskDraft`
+-- (apps/api/src/modules/tasks/repository.ts) did not yet accept or write
+-- `expert_type` at all, and dropping the DEFAULT immediately would have
+-- broken every `POST /tasks/drafts` call before T-1201/T-1204 landed
+-- (user decision, 2026-08-29, overriding N4 round 1's P1 in favor of round
+-- 2's real finding — see T-1200's own tasks.md entry).
+--
+-- Both preconditions are now satisfied: T-1204 made `expertType` a required
+-- Zod field on `POST /tasks/drafts` (schema.ts's `createDraftSchema`, no
+-- `.default()`) and wired it through `insertTaskDraft`'s INSERT unconditionally;
+-- T-1206 made the one production caller (TaskCreatePage.tsx's task-creation
+-- wizard) always send a real user-selected value. `insertTaskDraft` has
+-- exactly one caller in this codebase (tasks/service.ts's `createDraft`),
+-- and that caller now always supplies `expertType` — so no code path can
+-- reach this table's INSERT without a value, and the DEFAULT is no longer
+-- doing anything for real traffic. Dropping it here is what closes T-1200
+-- round 1's original concern (a standing DEFAULT silently masking a future
+-- bug where a write path forgets to supply the field) for real, rather than
+-- deferring it further.
+ALTER TABLE tasks
+  ALTER COLUMN expert_type DROP DEFAULT;

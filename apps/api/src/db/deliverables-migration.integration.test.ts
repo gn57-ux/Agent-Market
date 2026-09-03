@@ -38,7 +38,7 @@ runIfOptedIn("deliverables migration (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -47,8 +47,8 @@ runIfOptedIn("deliverables migration (integration)", () => {
     const {
       rows: [task],
     } = await pool.query<{ id: string }>(
-      `INSERT INTO tasks (requester_address, category, title, description, budget, token, delivery_deadline, status)
-       VALUES ($1, 'writing', 'Test task', 'desc', 100, $2, now() + interval '7 days', 'ACCEPTED')
+      `INSERT INTO tasks (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+       VALUES ($1, 'writing', 'Test task', 'desc', 100, $2, now() + interval '7 days', 'ACCEPTED', 'AUTOMATION')
        RETURNING id`,
       [REQUESTER_ADDRESS, "0x1111111111111111111111111111111111111111"],
     );

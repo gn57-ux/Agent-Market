@@ -95,14 +95,17 @@ describe("agentFormValuesToInput", () => {
 
 describe("toCreateAgentInput", () => {
   it("maps null/undefined optional fields to undefined for the create request", () => {
-    const input = toCreateAgentInput({
-      name: "N",
-      description: "D",
-      category: "C",
-      skillTags: ["a"],
-      authorBio: null,
-      payoutAddress: "0xabc",
-    });
+    const input = toCreateAgentInput(
+      {
+        name: "N",
+        description: "D",
+        category: "C",
+        skillTags: ["a"],
+        authorBio: null,
+        payoutAddress: "0xabc",
+      },
+      "FREE",
+    );
     expect(input.authorBio).toBeUndefined();
     expect(input.name).toBe("N");
     expect(input.payoutAddress).toBe("0xabc");
@@ -120,6 +123,7 @@ describe("agentFormValuesFromAgent", () => {
       invocationUrl: null,
       payoutAddress: "0xabc",
       pricingModel: null,
+      pricingType: "FREE",
       referencePrice: null,
     });
     expect(values.skillTagsText).toBe("a, b");
@@ -147,6 +151,7 @@ describe("AgentForm", () => {
     fireEvent.change(screen.getByLabelText("收款地址"), {
       target: { value: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3" },
     });
+    fireEvent.change(screen.getByLabelText("计费类型"), { target: { value: "FREE" } });
     fireEvent.click(screen.getByRole("button", { name: "发布" }));
 
     expect(onSubmit).toHaveBeenCalledWith(
@@ -156,6 +161,7 @@ describe("AgentForm", () => {
         category: "writing",
         payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
       }),
+      "FREE",
     );
   });
 
@@ -170,6 +176,7 @@ describe("AgentForm", () => {
       invocationUrl: null,
       payoutAddress: "0xabc",
       pricingModel: null,
+      pricingType: "FREE",
       referencePrice: null,
     });
     render(
@@ -186,7 +193,7 @@ describe("AgentForm", () => {
     fireEvent.change(screen.getByLabelText("作者介绍"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ authorBio: null }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ authorBio: null }), "FREE");
   });
 
   it("shows the error message and disables the submit button while pending", () => {

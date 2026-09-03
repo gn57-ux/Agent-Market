@@ -7,6 +7,7 @@ import { buildApp } from "../../app.js";
 import { runMigrations } from "../../db/migrate.js";
 import { requireTestDatabaseUrl } from "../../db/test-support.js";
 import { buildSignInMessage } from "../auth/signInMessage.js";
+import { computeCredentialRef } from "./credential.js";
 
 // See db/migrate.integration.test.ts's header comment: skipped unless a
 // human opts in with RUN_DB_INTEGRATION_TESTS=1 against a confirmed-safe
@@ -36,7 +37,7 @@ runIfOptedIn(
 
     afterAll(async () => {
       await pool.query(
-        "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+        "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE",
       );
       await pool.end();
     });
@@ -87,6 +88,7 @@ runIfOptedIn(
           category: "writing",
           skillTags: ["copywriting"],
           payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+          pricingType: "FREE",
         },
       });
       expect(response.statusCode).toBe(201);
@@ -150,6 +152,238 @@ runIfOptedIn(
       // name from the previous PATCH must still be intact — clearing other
       // fields must not reset unrelated columns.
       expect(body.name).toBe("Still Has A Bio");
+    });
+
+    // Feature 12 (agent-task-fields-credentials), T-1201, AC-1201/AC-1202.
+    // GET is called with the owner's own session cookie (T-1203 round-2
+    // Finding 1 fix — see the dedicated visibility tests below — means
+    // credentialRef is only ever present in the response for the Agent's
+    // own owner; an anonymous GET here would see the field omitted
+    // entirely, not `null`).
+    it("defaults protocolVersion to 'v1' and credentialRef to null when credentialEnabled is omitted at creation", async () => {
+      const token = await login(owner);
+      const agentId = await createAgent(token);
+
+      const response = await app.inject({
+        method: "GET",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().protocolVersion).toBe("v1");
+      expect(response.json().credentialRef).toBeNull();
+    });
+
+    // T-1300: credentialRef is no longer owner-chosen free text — it's a
+    // toggle (`credentialEnabled`) the server resolves into the one
+    // deterministic reference this Agent's own real id can ever produce
+    // (env://AGENT_<id, dashes stripped, hex uppercased>). This closes the
+    // front-running vector Codex found in the pre-fix free-text scheme (an
+    // attacker could pre-claim env://AGENT_<victim's public id> on their
+    // own Agent before the operator ever provisioned it).
+    it("accepts and round-trips a computed credentialRef through create, GET detail, and GET list (as the owner)", async () => {
+      const token = await login(owner);
+      const createResponse = await app.inject({
+        method: "POST",
+        url: "/agents",
+        cookies: { session_token: token },
+        payload: {
+          name: "Agent With Credential",
+          description: "desc",
+          category: "writing",
+          payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+          pricingType: "FREE",
+          credentialEnabled: true,
+        },
+      });
+      expect(createResponse.statusCode).toBe(201);
+      const agentId = createResponse.json().agentId;
+      const expectedRef = computeCredentialRef(agentId);
+
+      const detail = await app.inject({
+        method: "GET",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+      });
+      expect(detail.json().credentialRef).toBe(expectedRef);
+
+      const list = await app.inject({
+        method: "GET",
+        url: "/agents",
+        cookies: { session_token: token },
+      });
+      const listed = list
+        .json()
+        .items.find((item: { agentId: string }) => item.agentId === agentId);
+      expect(listed?.credentialRef).toBe(expectedRef);
+    });
+
+    // T-1203 round-2 Finding 1 (P1): credentialRef must never reach a caller
+    // who isn't the Agent's own owner — previously any anonymous or stranger
+    // caller could read the exact reference string and paste it into their
+    // own Agent to borrow the victim's real credential via the diagnostic
+    // endpoint. `undefined` is asserted (key omitted), not `null` — the
+    // response must not even reveal whether a credential is configured.
+    it("hides credentialRef from GET detail/list for anonymous and non-owner callers, even when a real value is set", async () => {
+      const token = await login(owner);
+      const createResponse = await app.inject({
+        method: "POST",
+        url: "/agents",
+        cookies: { session_token: token },
+        payload: {
+          name: "Agent With Secret Credential",
+          description: "desc",
+          category: "writing",
+          payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+          pricingType: "FREE",
+          credentialEnabled: true,
+        },
+      });
+      expect(createResponse.statusCode).toBe(201);
+      const agentId = createResponse.json().agentId;
+
+      const anonymousDetail = await app.inject({ method: "GET", url: `/agents/${agentId}` });
+      expect(anonymousDetail.json().credentialRef).toBeUndefined();
+
+      const strangerToken = await login(stranger);
+      const strangerDetail = await app.inject({
+        method: "GET",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: strangerToken },
+      });
+      expect(strangerDetail.json().credentialRef).toBeUndefined();
+
+      const anonymousList = await app.inject({ method: "GET", url: "/agents" });
+      const listedForAnonymous = anonymousList
+        .json()
+        .items.find((item: { agentId: string }) => item.agentId === agentId);
+      expect(listedForAnonymous?.credentialRef).toBeUndefined();
+
+      const strangerList = await app.inject({
+        method: "GET",
+        url: "/agents",
+        cookies: { session_token: strangerToken },
+      });
+      const listedForStranger = strangerList
+        .json()
+        .items.find((item: { agentId: string }) => item.agentId === agentId);
+      expect(listedForStranger?.credentialRef).toBeUndefined();
+    });
+
+    // T-1300 (replaces the old free-text-reuse test): two different Agents
+    // enabling their credential each get their OWN distinct, non-colliding
+    // reference — the front-running/reuse vector a shared free-text string
+    // used to allow is now structurally impossible, proven here across two
+    // real Agents rather than asserted about the schema alone.
+    it("gives two different Agents two different, non-colliding computed credentialRefs", async () => {
+      const token = await login(owner);
+      const first = await app.inject({
+        method: "POST",
+        url: "/agents",
+        cookies: { session_token: token },
+        payload: {
+          name: "First Agent",
+          description: "desc",
+          category: "writing",
+          payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+          pricingType: "FREE",
+          credentialEnabled: true,
+        },
+      });
+      expect(first.statusCode).toBe(201);
+
+      const strangerToken = await login(stranger);
+      const second = await app.inject({
+        method: "POST",
+        url: "/agents",
+        cookies: { session_token: strangerToken },
+        payload: {
+          name: "Second Agent",
+          description: "desc",
+          category: "writing",
+          payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+          pricingType: "FREE",
+          credentialEnabled: true,
+        },
+      });
+      expect(second.statusCode).toBe(201);
+      expect(computeCredentialRef(first.json().agentId)).not.toBe(
+        computeCredentialRef(second.json().agentId),
+      );
+    });
+
+    // T-1300: an attacker cannot "front-run" a victim's future reference —
+    // there is no free-text input left to submit at all. This proves the
+    // API boundary itself: attempting to send a raw string is simply
+    // ignored by the toggle schema (a non-boolean value is a 400, not a
+    // silently-accepted string).
+    it("rejects a non-boolean credentialEnabled value (400) — there is no free-text credentialRef input anymore", async () => {
+      const token = await login(owner);
+      const response = await app.inject({
+        method: "POST",
+        url: "/agents",
+        cookies: { session_token: token },
+        payload: {
+          name: "Attempted Free Text",
+          description: "desc",
+          category: "writing",
+          payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+          pricingType: "FREE",
+          credentialEnabled: "env://AGENT_SOME_VICTIM_ID",
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it("PATCH toggles credentialEnabled on and off, always resolving to this Agent's own computed reference", async () => {
+      const token = await login(owner);
+      const agentId = await createAgent(token);
+      const expectedRef = computeCredentialRef(agentId);
+
+      const setValue = await app.inject({
+        method: "PATCH",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+        payload: { credentialEnabled: true },
+      });
+      expect(setValue.statusCode).toBe(200);
+      expect(setValue.json().credentialRef).toBe(expectedRef);
+
+      // Omitting the field entirely must not clear it.
+      const unrelatedEdit = await app.inject({
+        method: "PATCH",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+        payload: { name: "Still Has A Credential" },
+      });
+      expect(unrelatedEdit.json().credentialRef).toBe(expectedRef);
+
+      const clear = await app.inject({
+        method: "PATCH",
+        url: `/agents/${agentId}`,
+        cookies: { session_token: token },
+        payload: { credentialEnabled: false },
+      });
+      expect(clear.statusCode).toBe(200);
+      expect(clear.json().credentialRef).toBeNull();
+    });
+
+    it("rejects a protocolVersion other than 'v1' (400)", async () => {
+      const token = await login(owner);
+      const response = await app.inject({
+        method: "POST",
+        url: "/agents",
+        cookies: { session_token: token },
+        payload: {
+          name: "Future Protocol Agent",
+          description: "desc",
+          category: "writing",
+          payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+          pricingType: "FREE",
+          protocolVersion: "v2",
+        },
+      });
+      expect(response.statusCode).toBe(400);
     });
 
     it("PATCH stores and returns a high-precision referencePrice byte-identical (Codex round 3 blocking)", async () => {
@@ -342,7 +576,7 @@ runIfOptedIn("activate/deactivate over real HTTP (integration, T-505 P1 regressi
   afterAll(async () => {
     await app.close();
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -391,6 +625,7 @@ runIfOptedIn("activate/deactivate over real HTTP (integration, T-505 P1 regressi
         category: "writing",
         skillTags: ["copywriting"],
         payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
+        pricingType: "FREE",
       }),
     });
     const body = await response.json();

@@ -75,6 +75,7 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
     token: CHAIN_CONFIG.addresses.ydToken,
     deliveryDeadline: "2033-01-01T00:00:00.000Z",
     skillTags: [],
+    expertType: "AUTOMATION",
     status: "DRAFT",
     fundingTxHash: null,
     createdAt: "2026-01-01T00:00:00.000Z",

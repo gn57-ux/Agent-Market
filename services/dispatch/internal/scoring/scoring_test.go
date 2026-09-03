@@ -1,6 +1,7 @@
 package scoring
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -504,5 +505,239 @@ func TestScoreAll_ReturnsNilResultsOnError(t *testing.T) {
 	}
 	if results != nil {
 		t.Fatalf("expected nil results alongside the error, got %v", results)
+	}
+}
+
+// --- ScoreV2 / ScoreAllV2 (Feature 13, T-1305) ---
+
+func f(v float64) *float64 { return &v }
+
+// allSignalsPresent is F-1308's five real signal values, all present — the
+// baseline every single-signal test below starts from and deviates from in
+// exactly one field, matching this file's existing baseCandidate()
+// convention.
+func allSignalsPresent() domain.ReputationSignals {
+	return domain.ReputationSignals{
+		CompletionRate:  f(0.9),
+		QualityFeedback: f(0.8),
+		Communication:   f(0.7),
+		DisputeSignal:   f(1.0),
+		HistoricalScale: f(0.5),
+	}
+}
+
+// TestScoreV2_AllSignalsPresent_MatchesHandCalculatedWeightedAverage is
+// AC-1304's "缺失值重新归一化的真实计算验证" positive counterpart: every
+// signal present, so no renormalization applies — this is a plain F-1311
+// weighted sum, checked against a value computed by hand from the exact
+// same weights (0.30/0.30/0.15/0.20/0.05) and inputs above.
+func TestScoreV2_AllSignalsPresent_MatchesHandCalculatedWeightedAverage(t *testing.T) {
+	want := 0.9*0.30 + 0.8*0.30 + 0.7*0.15 + 1.0*0.20 + 0.5*0.05 // = 0.84
+	got := ScoreV2("agent-1", allSignalsPresent())
+	if math.Abs(got.Score-want) > 1e-6 {
+		t.Fatalf("Score = %v, want %v", got.Score, want)
+	}
+	if len(got.Reasons) != 5 {
+		t.Fatalf("expected 5 Reasons (one per present signal), got %d: %+v", len(got.Reasons), got.Reasons)
+	}
+}
+
+// TestScoreV2_MissingCommunication_RenormalizesRemainingWeights is
+// requirements.md F-1309's own worked example, reproduced exactly: with
+// communication missing, the remaining four weights (0.30/0.30/0.20/0.05)
+// sum to 0.85, and each is divided by 0.85 for the actual weighted average
+// — this test computes that expected value independently (not by calling
+// any of this package's own code a second time) and compares.
+func TestScoreV2_MissingCommunication_RenormalizesRemainingWeights(t *testing.T) {
+	signals := allSignalsPresent()
+	signals.Communication = nil
+
+	remainingWeightSum := 0.30 + 0.30 + 0.20 + 0.05 // 0.85, matches F-1309's own worked example
+	want := (0.9*0.30 + 0.8*0.30 + 1.0*0.20 + 0.5*0.05) / remainingWeightSum
+
+	got := ScoreV2("agent-1", signals)
+	if math.Abs(got.Score-want) > 1e-6 {
+		t.Fatalf("Score = %v, want %v", got.Score, want)
+	}
+	if len(got.Reasons) != 4 {
+		t.Fatalf("expected 4 Reasons (communication excluded, not a neutral-prior placeholder), got %d: %+v", len(got.Reasons), got.Reasons)
+	}
+	for _, r := range got.Reasons {
+		if r.Code == ReasonV2Communication {
+			t.Fatalf("missing communication must not produce a Reason at all (F-1309 forbids substituting any value for it), got one: %+v", r)
+		}
+	}
+}
+
+// TestScoreV2_OnlyOneSignalPresent_EqualsThatSignalsRawValue: with every
+// other signal missing, renormalization reduces to weight/weight = 1, so
+// the final score must exactly equal the one present signal's own value —
+// a sharper edge case than "one signal missing" (above).
+func TestScoreV2_OnlyOneSignalPresent_EqualsThatSignalsRawValue(t *testing.T) {
+	got := ScoreV2("agent-1", domain.ReputationSignals{HistoricalScale: f(0.42)})
+	if math.Abs(got.Score-0.42) > 1e-6 {
+		t.Fatalf("Score = %v, want 0.42 (the sole present signal's own value)", got.Score)
+	}
+	if len(got.Reasons) != 1 || got.Reasons[0].Code != ReasonV2HistoricalScale {
+		t.Fatalf("expected exactly one ReasonV2HistoricalScale, got %+v", got.Reasons)
+	}
+}
+
+// TestScoreV2_AllSignalsMissing_ScoresZeroWithNoHistoricalSampleReason is
+// F-1309/F-1312's "无历史样本" case: never an error, Score is exactly 0 (so
+// this candidate can never outrank one with real history in a TOP_SCORE
+// slot — see ScoreV2's doc comment), and Reasons contains exactly the one
+// dedicated code, not an empty slice and not any of the five per-signal
+// codes.
+func TestScoreV2_AllSignalsMissing_ScoresZeroWithNoHistoricalSampleReason(t *testing.T) {
+	got := ScoreV2("agent-newcomer", domain.ReputationSignals{})
+	if got.Score != 0 {
+		t.Fatalf("Score = %v, want exactly 0", got.Score)
+	}
+	if len(got.Reasons) != 1 || got.Reasons[0].Code != ReasonV2NoHistoricalSample {
+		t.Fatalf("expected exactly one ReasonV2NoHistoricalSample, got %+v", got.Reasons)
+	}
+	if got.AgentID != "agent-newcomer" {
+		t.Fatalf("AgentID = %q, want %q", got.AgentID, "agent-newcomer")
+	}
+	if !got.NoHistoricalSample {
+		t.Fatal("expected NoHistoricalSample to be true — slotting.Select relies on this to keep this candidate out of TOP_SCORE (F-1309/F-1312)")
+	}
+}
+
+// TestScoreV2_NoHistoricalSampleFalseWhenAnySignalPresent: the
+// NoHistoricalSample flag slotting.Select depends on must be false
+// whenever ScoreV2 actually computed a real weighted average — even with
+// only one signal present.
+func TestScoreV2_NoHistoricalSampleFalseWhenAnySignalPresent(t *testing.T) {
+	got := ScoreV2("agent-1", domain.ReputationSignals{HistoricalScale: f(0.5)})
+	if got.NoHistoricalSample {
+		t.Fatal("expected NoHistoricalSample to be false when at least one signal is present")
+	}
+}
+
+// TestScore_NoHistoricalSampleAlwaysFalse: v0.1's Score never sets this
+// field — it's a v0.2-only concept — so it must stay Go's zero value
+// (false) for every v0.1 result, regardless of input.
+func TestScore_NoHistoricalSampleAlwaysFalse(t *testing.T) {
+	result := mustScore(t, baseTask(), baseCandidate())
+	if result.NoHistoricalSample {
+		t.Fatal("expected v0.1's Score to never set NoHistoricalSample")
+	}
+}
+
+// TestScoreV2_ReasonsFollowFixedFieldOrder pins AC-1306's reproducibility
+// down to the Reasons slice's own order, independent of which signals
+// happen to be present: completionRate, qualityFeedback, communication,
+// disputeSignal, historicalScale — never any other order.
+func TestScoreV2_ReasonsFollowFixedFieldOrder(t *testing.T) {
+	got := ScoreV2("agent-1", allSignalsPresent())
+	wantOrder := []ReasonCode{
+		ReasonV2CompletionRate,
+		ReasonV2QualityFeedback,
+		ReasonV2Communication,
+		ReasonV2DisputeSignal,
+		ReasonV2HistoricalScale,
+	}
+	if len(got.Reasons) != len(wantOrder) {
+		t.Fatalf("expected %d Reasons, got %d: %+v", len(wantOrder), len(got.Reasons), got.Reasons)
+	}
+	for i, code := range wantOrder {
+		if got.Reasons[i].Code != code {
+			t.Fatalf("Reasons[%d].Code = %q, want %q", i, got.Reasons[i].Code, code)
+		}
+	}
+}
+
+// TestScoreV2_RepeatedCallsAreIdentical mirrors TestScore_RepeatedCallsAreIdentical
+// (AC-1306): the same input must produce byte-identical output every time.
+func TestScoreV2_RepeatedCallsAreIdentical(t *testing.T) {
+	signals := allSignalsPresent()
+	first := ScoreV2("agent-1", signals)
+	second := ScoreV2("agent-1", signals)
+	if first.Score != second.Score {
+		t.Fatalf("Score differs across identical calls: %v vs %v", first.Score, second.Score)
+	}
+	if len(first.Reasons) != len(second.Reasons) {
+		t.Fatalf("Reasons length differs across identical calls: %d vs %d", len(first.Reasons), len(second.Reasons))
+	}
+}
+
+// TestScoreV2_DoesNotMutateInputPointers mirrors
+// TestResolveQualityScore_DoesNotMutatePointerTarget — ScoreV2 only
+// dereferences signals' pointers to read them, never writes through any of
+// them.
+func TestScoreV2_DoesNotMutateInputPointers(t *testing.T) {
+	completion := 0.6
+	signals := domain.ReputationSignals{CompletionRate: &completion}
+	_ = ScoreV2("agent-1", signals)
+	if completion != 0.6 {
+		t.Fatalf("ScoreV2 mutated the caller's CompletionRate pointer target: got %v, want 0.6", completion)
+	}
+}
+
+// TestScoreAllV2_OrderMatchesInput mirrors TestScoreAll_ResultIndependentOfInputOrder's
+// core guarantee for the v0.2 path: scored[i] is always candidates[i]'s
+// result, read from that same candidate's own ReputationSignals field —
+// not looked up via any second, separately-ordered structure.
+func TestScoreAllV2_OrderMatchesInput(t *testing.T) {
+	candidates := []domain.CandidateSnapshot{
+		{AgentID: "agent-a", ReputationSignals: domain.ReputationSignals{HistoricalScale: f(0.1)}},
+		{AgentID: "agent-b", ReputationSignals: domain.ReputationSignals{HistoricalScale: f(0.9)}},
+		{AgentID: "agent-c", ReputationSignals: domain.ReputationSignals{HistoricalScale: f(0.5)}},
+	}
+	results := ScoreAllV2(candidates)
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	wantAgentIDs := []string{"agent-a", "agent-b", "agent-c"}
+	wantScores := []float64{0.1, 0.9, 0.5}
+	for i := range results {
+		if results[i].AgentID != wantAgentIDs[i] {
+			t.Fatalf("results[%d].AgentID = %q, want %q", i, results[i].AgentID, wantAgentIDs[i])
+		}
+		if math.Abs(results[i].Score-wantScores[i]) > 1e-6 {
+			t.Fatalf("results[%d].Score = %v, want %v", i, results[i].Score, wantScores[i])
+		}
+	}
+}
+
+// TestScoreAllV2_DuplicateAgentIDsScoreIndependently is the direct
+// regression for the Codex round 1 P2 finding: an earlier version of this
+// function took a second, AgentID-keyed map parameter, which silently
+// merged/overwrote two candidate snapshots sharing one AgentID (a shape
+// this project explicitly allows — see CandidateSnapshot.ReputationSignals'
+// own doc comment). Reading ReputationSignals directly off each
+// CandidateSnapshot makes that impossible: two entries with the same
+// AgentID but different signals must each score using their OWN data.
+func TestScoreAllV2_DuplicateAgentIDsScoreIndependently(t *testing.T) {
+	candidates := []domain.CandidateSnapshot{
+		{AgentID: "agent-dup", ReputationSignals: domain.ReputationSignals{HistoricalScale: f(0.2)}},
+		{AgentID: "agent-dup", ReputationSignals: domain.ReputationSignals{HistoricalScale: f(0.8)}},
+	}
+	results := ScoreAllV2(candidates)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if math.Abs(results[0].Score-0.2) > 1e-6 {
+		t.Fatalf("results[0].Score = %v, want 0.2 (this candidate's own signal, not the other duplicate's)", results[0].Score)
+	}
+	if math.Abs(results[1].Score-0.8) > 1e-6 {
+		t.Fatalf("results[1].Score = %v, want 0.8 (this candidate's own signal, not the other duplicate's)", results[1].Score)
+	}
+}
+
+// TestScoreAllV2_ZeroValueReputationSignalsIsNoHistoricalSample: a
+// candidate whose ReputationSignals was never set (Go's natural zero
+// value — every field nil) must score identically to ScoreV2's own
+// documented "no historical sample" case, not error or panic.
+func TestScoreAllV2_ZeroValueReputationSignalsIsNoHistoricalSample(t *testing.T) {
+	candidates := []domain.CandidateSnapshot{{AgentID: "agent-unlisted"}}
+	results := ScoreAllV2(candidates)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Score != 0 || len(results[0].Reasons) != 1 || results[0].Reasons[0].Code != ReasonV2NoHistoricalSample {
+		t.Fatalf("expected the 'no historical sample' outcome, got %+v", results[0])
 	}
 }

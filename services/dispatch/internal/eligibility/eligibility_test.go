@@ -94,6 +94,46 @@ func TestFilter_Category_NegativeWhenMismatch(t *testing.T) {
 	mustEliminated(t, baseTask(), c)
 }
 
+// --- Condition 2 (v0.2 extension, F-1305/T-1304): semantic similarity OR ---
+
+func TestFilter_SemanticSimilarity_PositiveWhenAboveThresholdAndV02(t *testing.T) {
+	task := baseTask()
+	task.AlgorithmVersion = "v0.2"
+	c := baseCandidate()
+	c.Category = "translation" // exact match fails on purpose
+	c.SemanticSimilarity = v02SemanticSimilarityThreshold
+	mustEligible(t, task, c)
+}
+
+func TestFilter_SemanticSimilarity_NegativeWhenBelowThresholdAndV02(t *testing.T) {
+	task := baseTask()
+	task.AlgorithmVersion = "v0.2"
+	c := baseCandidate()
+	c.Category = "translation"
+	c.SemanticSimilarity = v02SemanticSimilarityThreshold - 0.01
+	mustEliminated(t, task, c)
+}
+
+// The core "v0.1 never reads this field" guarantee design.md requires: an
+// identical category-mismatch-but-high-similarity candidate that passes
+// under "v0.2" (proven above) must still be eliminated when the SAME task
+// is "v0.1" — the OR-branch cannot leak into the version it's not scoped to.
+func TestFilter_SemanticSimilarity_NegativeWhenAboveThresholdButNotV02(t *testing.T) {
+	task := baseTask() // AlgorithmVersion "v0" (not "v0.2")
+	c := baseCandidate()
+	c.Category = "translation"
+	c.SemanticSimilarity = 1.0 // maximally similar, still must not matter
+	mustEliminated(t, task, c)
+}
+
+func TestFilter_SemanticSimilarity_PositiveOnExactCategoryMatchRegardlessOfSimilarity(t *testing.T) {
+	task := baseTask()
+	task.AlgorithmVersion = "v0.2"
+	c := baseCandidate() // category already matches
+	c.SemanticSimilarity = 0
+	mustEligible(t, task, c)
+}
+
 // --- Condition 3: skill tag overlap (at-least-one, documented assumption) ---
 
 func TestFilter_SkillTags_PositiveWhenOneOverlaps(t *testing.T) {

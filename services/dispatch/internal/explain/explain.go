@@ -35,6 +35,18 @@ func Explain(reason scoring.Reason) string {
 		return fmt.Sprintf("归一化质量分 %.2f", reason.NormalizedValue)
 	case scoring.ReasonQualityScoreNeutralPrior:
 		return "暂无历史评分，使用平台中性基准"
+	case scoring.ReasonV2CompletionRate:
+		return fmt.Sprintf("完成强度 %.0f%%", reason.NormalizedValue*100)
+	case scoring.ReasonV2QualityFeedback:
+		return fmt.Sprintf("质量反馈 %.2f", reason.NormalizedValue)
+	case scoring.ReasonV2Communication:
+		return fmt.Sprintf("沟通体验 %.2f", reason.NormalizedValue)
+	case scoring.ReasonV2DisputeSignal:
+		return fmt.Sprintf("争议信号 %.2f", reason.NormalizedValue)
+	case scoring.ReasonV2HistoricalScale:
+		return fmt.Sprintf("历史完成规模 %.2f", reason.NormalizedValue)
+	case scoring.ReasonV2NoHistoricalSample:
+		return "暂无历史结算样本，归类为新人探索位"
 	default:
 		panic(fmt.Sprintf("explain: unknown scoring.ReasonCode %q — a template mapping is missing for this code", reason.Code))
 	}

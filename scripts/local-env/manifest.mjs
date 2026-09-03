@@ -17,7 +17,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-export const LOCAL_ENV_DIR = path.join(REPO_ROOT, "local-env");
+// T-1311 incident fix: this directory (and therefore MANIFEST_PATH) used
+// to be an unconditional constant — `scripts/local-env/*.test.mjs`'s real
+// fault-injection tests (writeManifest/deleteManifest calls exercising
+// crash-recovery scenarios) operated on this exact same path as a real,
+// live `pnpm env:start`. Real incident: running `pnpm env:test` while a
+// real environment was up let a test's own manifest write/delete clobber
+// the live environment's manifest — the processes themselves kept running
+// (this tool never touches processes it didn't spawn), but env:status/
+// env:stop lost the only record of them until the manifest was manually
+// reconstructed from on-chain/process state. `AGENT_MARKET_TEST_LOCAL_ENV_DIR`
+// (set only by the `env:test` npm script, never by a human running
+// env:start/env:status/env:stop directly) redirects every test file's
+// reads/writes to one isolated, disposable directory for that whole test
+// run — production behavior (no env var set) is completely unchanged.
+export const LOCAL_ENV_DIR =
+  process.env.AGENT_MARKET_TEST_LOCAL_ENV_DIR || path.join(REPO_ROOT, "local-env");
 export const MANIFEST_PATH = path.join(LOCAL_ENV_DIR, "manifest.json");
 
 const AddressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "不是合法的以太坊地址");

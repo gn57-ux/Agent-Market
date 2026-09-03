@@ -39,8 +39,8 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, " +
-  "sessions, auth_nonces, users, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, " +
+  "sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE";
 
 const TOKEN_ADDRESS = "0x8883fefc63f0cd0e873a0000c6d07ef7b77e90d7";
 
@@ -142,8 +142,8 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     ]);
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO tasks
-         (requester_address, category, title, description, budget, token, delivery_deadline, status)
-       VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN')
+         (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+       VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN', 'AUTOMATION')
        RETURNING id`,
       [requesterAddress, TOKEN_ADDRESS],
     );
@@ -177,6 +177,42 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
       ]);
     }
     return id;
+  }
+
+  // T-1309 (Ollama migration): both embeddings tables were rebuilt to
+  // vector(1024) — see 0017_ollama_embedding_dimension.sql. These fixtures
+  // only exercise this file's own dispatch-routing logic (which never
+  // interprets a vector's actual dimension itself, just passes it through
+  // to a real cosine-distance query), so a synthetic 1024-dim vector is
+  // exactly as valid a fixture here as the old 1536-dim one was.
+  function fakeVector(seed: number): number[] {
+    return Array.from({ length: 1024 }, (_, i) => Math.sin(seed + i) * 0.01);
+  }
+
+  function toVectorLiteral(vector: number[]): string {
+    return `[${vector.join(",")}]`;
+  }
+
+  /** Feature 13/T-1303: inserts a real `task_embeddings` row — the one
+   * signal `getTaskSimilarityByAgentId` reads to decide "v0.2" is even
+   * possible for this task. */
+  async function insertTaskEmbedding(taskId: string, seed: number): Promise<void> {
+    await pool.query(
+      `INSERT INTO task_embeddings (task_id, embedding, provider, model, dimension, embedding_version)
+       VALUES ($1, $2, 'ollama', 'bge-m3:latest', 1024, 'v1')`,
+      [taskId, toVectorLiteral(fakeVector(seed))],
+    );
+  }
+
+  /** Same seed as the paired `insertTaskEmbedding` call produces a
+   * near-identical vector (cosine similarity close to 1) — a different
+   * seed produces a genuinely dissimilar one. */
+  async function insertAgentEmbedding(agentId: string, seed: number): Promise<void> {
+    await pool.query(
+      `INSERT INTO agent_embeddings (agent_id, embedding, provider, model, dimension, embedding_version)
+       VALUES ($1, $2, 'ollama', 'bge-m3:latest', 1024, 'v1')`,
+      [agentId, toVectorLiteral(fakeVector(seed))],
+    );
   }
 
   it("401s an unauthenticated request", async () => {
@@ -251,6 +287,212 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     expect(candidateRows).toHaveLength(1);
     expect(candidateRows[0]?.agent_id).toBe(agentId);
     expect(candidateRows[0]?.rank).toBe(1);
+  });
+
+  // --- Feature 13/T-1303: algorithmVersion decision + v0.2 enrichment ---
+
+  it("uses algorithmVersion v0.2, attaches semanticSimilarity + reputationSignals, and persists v0.2 when the task has a real embedding", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase());
+    const agentId = await insertActiveAgent();
+    await insertTaskEmbedding(taskId, 1);
+    await insertAgentEmbedding(agentId, 1); // same seed -> similarity close to 1
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({
+      taskId,
+      algorithmVersion: "v0.2",
+      recommendations: [{ agentId, rank: 1, slotType: "TOP_SCORE", score: 0.5, reasons: [] }],
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/match`,
+      cookies: { session_token: token },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ algorithmVersion: "v0.2" });
+
+    expect(callMatchMock).toHaveBeenCalledTimes(1);
+    const [sentRequest] = callMatchMock.mock.calls[0] as [
+      {
+        algorithmVersion: string;
+        candidates: Array<{
+          agentId: string;
+          semanticSimilarity?: number;
+          reputationSignals?: Record<string, number | null>;
+        }>;
+      },
+    ];
+    expect(sentRequest.algorithmVersion).toBe("v0.2");
+    expect(sentRequest.candidates).toHaveLength(1);
+    const candidate = sentRequest.candidates[0];
+    expect(typeof candidate?.semanticSimilarity).toBe("number");
+    // Same seed on both sides -> vectors are near-identical -> cosine
+    // similarity close to 1 (not exactly 1, since float4 storage rounds).
+    expect(candidate?.semanticSimilarity).toBeGreaterThan(0.99);
+    // No settlement history for this brand-new agent -> every signal null,
+    // but the object itself must still be present (not omitted).
+    expect(candidate?.reputationSignals).toEqual({
+      completionRate: null,
+      qualityFeedback: null,
+      communication: null,
+      disputeSignal: null,
+      historicalScale: null,
+    });
+
+    const { rows: runRows } = await pool.query<{ algorithm_version: string }>(
+      `SELECT algorithm_version FROM recommendation_runs WHERE task_id = $1`,
+      [taskId],
+    );
+    expect(runRows[0]?.algorithm_version).toBe("v0.2");
+
+    // F-1313 (Feature 13, T-1307): the persisted row must carry the RICHER
+    // digest (value + sampleSize per signal), not the flat wire shape sent
+    // to Go above — this is what AC-1307's later-replay requirement
+    // actually needs.
+    const { rows: candidateRows } = await pool.query<{
+      semantic_similarity: string;
+      reputation_signals: Record<string, { value: number | null; sampleSize: number }>;
+    }>(
+      `SELECT rc.semantic_similarity, rc.reputation_signals
+       FROM recommendation_candidates rc
+       JOIN recommendation_runs rr ON rr.id = rc.run_id
+       WHERE rr.task_id = $1`,
+      [taskId],
+    );
+    expect(candidateRows).toHaveLength(1);
+    expect(Number(candidateRows[0]?.semantic_similarity)).toBeGreaterThan(0.99);
+    // AC-1307 (N6 QA): the persisted semanticSimilarity must be the EXACT
+    // same number that was actually sent to Go for this run's real score —
+    // not just independently "close to 1" — otherwise a later replay would
+    // recompute against a different similarity than the one that actually
+    // produced the persisted score. `pg`'s NUMERIC/float8 round-trip
+    // through `Number(...)` matches the JS number `candidate.
+    // semanticSimilarity` was built from bit-for-bit (both originate from
+    // the same real `1 - (a <=> b)` pgvector computation).
+    expect(Number(candidateRows[0]?.semantic_similarity)).toBe(candidate?.semanticSimilarity);
+    // Same cross-check for reputationSignals: every persisted digest
+    // entry's `value` must equal the corresponding flat value Go actually
+    // scored against (candidate.reputationSignals, asserted above to be
+    // all-null for this brand-new agent) — proving the persisted digest,
+    // once projected through toReputationSignalsWire, reproduces exactly
+    // what ScoreV2 saw, which combined with ScoreV2's already-proven
+    // determinism (T-1305's TestScoreV2_RepeatedCallsAreIdentical) is what
+    // makes AC-1307's "sufficient to replay the same final score" true.
+    for (const signal of [
+      "completionRate",
+      "qualityFeedback",
+      "communication",
+      "disputeSignal",
+      "historicalScale",
+    ] as const) {
+      expect(candidateRows[0]?.reputation_signals[signal]?.value).toBe(
+        candidate?.reputationSignals?.[signal],
+      );
+    }
+    expect(candidateRows[0]?.reputation_signals).toEqual({
+      completionRate: { value: null, sampleSize: 0 },
+      qualityFeedback: { value: null, sampleSize: 0 },
+      communication: { value: null, sampleSize: 0 },
+      disputeSignal: { value: null, sampleSize: 0 },
+      historicalScale: { value: null, sampleSize: 0 },
+    });
+  });
+
+  it("persists NULL semantic_similarity/reputation_signals for a v0.1 recommendation_candidates row", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase());
+    const agentId = await insertActiveAgent();
+    // No insertTaskEmbedding call — this run stays v0.1.
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({
+      taskId,
+      algorithmVersion: "v0.1",
+      recommendations: [{ agentId, rank: 1, slotType: "TOP_SCORE", score: 0.5, reasons: [] }],
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/match`,
+      cookies: { session_token: token },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const { rows: candidateRows } = await pool.query<{
+      semantic_similarity: string | null;
+      reputation_signals: unknown;
+    }>(
+      `SELECT rc.semantic_similarity, rc.reputation_signals
+       FROM recommendation_candidates rc
+       JOIN recommendation_runs rr ON rr.id = rc.run_id
+       WHERE rr.task_id = $1`,
+      [taskId],
+    );
+    expect(candidateRows).toHaveLength(1);
+    expect(candidateRows[0]?.semantic_similarity).toBeNull();
+    expect(candidateRows[0]?.reputation_signals).toBeNull();
+  });
+
+  it("falls back to algorithmVersion v0.1 (candidates unmodified) when the task has no embedding", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase());
+    await insertActiveAgent();
+    // No insertTaskEmbedding call — this task has never been embedded.
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({ taskId, algorithmVersion: "v0.1", recommendations: [] });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/match`,
+      cookies: { session_token: token },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ algorithmVersion: "v0.1" });
+
+    const [sentRequest] = callMatchMock.mock.calls[0] as [
+      { algorithmVersion: string; candidates: Array<Record<string, unknown>> },
+    ];
+    expect(sentRequest.algorithmVersion).toBe("v0.1");
+    expect(sentRequest.candidates[0]?.semanticSimilarity).toBeUndefined();
+    expect(sentRequest.candidates[0]?.reputationSignals).toBeUndefined();
+  });
+
+  it("reports the existing run's real algorithmVersion on an idempotent replay (unexpired outstanding permits)", async () => {
+    const taskId = await insertOpenTask(requester.address.toLowerCase());
+    const agentId = await insertActiveAgent();
+    await insertTaskEmbedding(taskId, 2);
+    await insertAgentEmbedding(agentId, 2);
+    const token = await login(requester);
+
+    callMatchMock.mockResolvedValue({
+      taskId,
+      algorithmVersion: "v0.2",
+      recommendations: [{ agentId, rank: 1, slotType: "TOP_SCORE", score: 0.5, reasons: [] }],
+    });
+
+    const first = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/match`,
+      cookies: { session_token: token },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ algorithmVersion: "v0.2" });
+
+    // Second call: hasUnexpiredOutstandingPermits' pre-check short-circuits
+    // before ever calling callMatch again — proves this path reads the
+    // EXISTING run's real algorithm_version back from the database rather
+    // than defaulting to "v0.1" or recomputing a fresh (possibly
+    // different) decision.
+    const second = await app.inject({
+      method: "POST",
+      url: `/tasks/${taskId}/match`,
+      cookies: { session_token: token },
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({ algorithmVersion: "v0.2" });
+    expect(callMatchMock).toHaveBeenCalledTimes(1);
   });
 
   it("assembles the task's real skillTags and the ACTIVE agent's real skillTags into the match request (P1 regression: real Python-tagged task + real Python-skilled agent)", async () => {
@@ -723,8 +965,8 @@ runIfOptedIn(
       ]);
       const { rows } = await pool.query<{ id: string }>(
         `INSERT INTO tasks
-           (requester_address, category, title, description, budget, token, delivery_deadline, status)
-         VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN')
+           (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+         VALUES ($1, 'writing', 'Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'OPEN', 'AUTOMATION')
          RETURNING id`,
         [requesterAddress, TOKEN_ADDRESS],
       );

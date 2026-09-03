@@ -15,6 +15,23 @@ const (
 	ReasonCompletionRateNeutralPrior ReasonCode = "COMPLETION_RATE_NEUTRAL_PRIOR"
 	ReasonQualityScoreHistorical     ReasonCode = "QUALITY_SCORE_HISTORICAL"
 	ReasonQualityScoreNeutralPrior   ReasonCode = "QUALITY_SCORE_NEUTRAL_PRIOR"
+
+	// v0.2 signal codes (F-1306/F-1308/F-1309, Feature 13/T-1305). Distinct
+	// from the v0.1 codes above even where the underlying concept sounds
+	// similar (e.g. ReasonV2CompletionRate is a 90-day/50-task ON-TIME
+	// ratio, not the same "successCount/completedTaskCount over all time"
+	// v0.1's ReasonCompletionRateHistorical describes) — the two algorithm
+	// versions never share a sub-score formula, so they must never share a
+	// ReasonCode either. None of these five has a "neutral prior" sibling:
+	// F-1309 forbids substituting any value for a missing v0.2 signal, so a
+	// missing signal produces no Reason at all (ScoreV2 excludes it from
+	// the Reasons slice entirely) rather than a NeutralPrior-shaped one.
+	ReasonV2CompletionRate     ReasonCode = "V2_COMPLETION_RATE"
+	ReasonV2QualityFeedback    ReasonCode = "V2_QUALITY_FEEDBACK"
+	ReasonV2Communication      ReasonCode = "V2_COMMUNICATION"
+	ReasonV2DisputeSignal      ReasonCode = "V2_DISPUTE_SIGNAL"
+	ReasonV2HistoricalScale    ReasonCode = "V2_HISTORICAL_SCALE"
+	ReasonV2NoHistoricalSample ReasonCode = "V2_NO_HISTORICAL_SAMPLE"
 )
 
 // Reason carries one scoring factor's structured result — T-703's explain

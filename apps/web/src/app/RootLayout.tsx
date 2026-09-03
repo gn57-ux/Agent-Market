@@ -83,6 +83,14 @@ export function RootLayout() {
             >
               我的接单
             </NavLink>
+            <NavLink
+              to="/admin"
+              className={({ isActive }) =>
+                isActive ? `${linkClasses} ${activeLinkClasses}` : linkClasses
+              }
+            >
+              管理
+            </NavLink>
             <Link to="/" className={linkClasses}>
               首页
             </Link>

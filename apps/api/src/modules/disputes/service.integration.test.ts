@@ -38,7 +38,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE";
 
 const TASK_ESCROW_ADDRESS = "0x1234567890123456789012345678901234567890" as `0x${string}`;
 const YD_TOKEN_ADDRESS = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
@@ -151,8 +151,8 @@ runIfOptedIn("getDisputeView (integration, T-1002 human-review fix)", () => {
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO tasks
          (requester_address, category, title, description, budget, token, delivery_deadline,
-          status, accepted_agent_address, accepted_agent_id, accepted_at)
-       VALUES ($1, 'writing', 'Task', 'desc', 1000, $2, '2099-01-01T00:00:00Z', 'SUBMITTED', $3, $4, now())
+          status, accepted_agent_address, accepted_agent_id, accepted_at, expert_type)
+       VALUES ($1, 'writing', 'Task', 'desc', 1000, $2, '2099-01-01T00:00:00Z', 'SUBMITTED', $3, $4, now(), 'AUTOMATION')
        RETURNING id`,
       [requester.address.toLowerCase(), YD_TOKEN_ADDRESS, agent.address.toLowerCase(), agentId],
     );
@@ -303,8 +303,8 @@ runIfOptedIn("getDisputeView (integration, T-1002 human-review fix)", () => {
       requester.address.toLowerCase(),
     ]);
     const { rows } = await pool.query<{ id: string }>(
-      `INSERT INTO tasks (requester_address, category, title, description, budget, token, delivery_deadline, status)
-       VALUES ($1, 'writing', 'Task', 'desc', 1000, $2, '2099-01-01T00:00:00Z', 'SUBMITTED') RETURNING id`,
+      `INSERT INTO tasks (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+       VALUES ($1, 'writing', 'Task', 'desc', 1000, $2, '2099-01-01T00:00:00Z', 'SUBMITTED', 'AUTOMATION') RETURNING id`,
       [requester.address.toLowerCase(), YD_TOKEN_ADDRESS],
     );
     const taskId = rows[0]?.id;

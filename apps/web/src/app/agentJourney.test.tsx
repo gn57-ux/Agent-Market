@@ -47,6 +47,15 @@ const CHAIN_CONFIG: ChainConfig = {
 let store: Map<string, Agent>;
 let nextId: number;
 
+// T-1300: mirrors apps/api's credential.ts `computeCredentialRef` (a
+// deterministic function of the Agent's own id) closely enough for this
+// fake backend's contract purposes — not byte-identical to the real
+// implementation, but same shape/determinism, which is all this journey
+// test's own assertions ever depend on.
+function fakeComputeCredentialRef(agentId: string): string {
+  return `env://AGENT_${agentId.replace(/-/g, "").toUpperCase()}`;
+}
+
 function makeAgentRow(id: string, input: CreateAgentInput): Agent {
   const now = "2026-01-01T00:00:00.000Z";
   return {
@@ -60,14 +69,18 @@ function makeAgentRow(id: string, input: CreateAgentInput): Agent {
     invocationUrl: input.invocationUrl ?? null,
     payoutAddress: input.payoutAddress,
     pricingModel: input.pricingModel ?? null,
+    pricingType: input.pricingType,
     referencePrice: input.referencePrice ?? null,
     status: "ACTIVE",
+    reviewStatus: input.pricingType === "FREE" ? "ACTIVE" : "PENDING_REVIEW",
     completedTaskCount: 0,
     successCount: 0,
     overdueCount: 0,
     qualityScore: null,
     createdAt: now,
     updatedAt: now,
+    protocolVersion: input.protocolVersion ?? "v1",
+    credentialRef: input.credentialEnabled ? fakeComputeCredentialRef(id) : null,
   };
 }
 
@@ -82,6 +95,9 @@ function applyPatch(agent: Agent, patch: UpdateAgentInput): Agent {
   if (patch.payoutAddress !== undefined) next.payoutAddress = patch.payoutAddress;
   if (patch.pricingModel !== undefined) next.pricingModel = patch.pricingModel;
   if (patch.referencePrice !== undefined) next.referencePrice = patch.referencePrice;
+  if (patch.credentialEnabled !== undefined) {
+    next.credentialRef = patch.credentialEnabled ? fakeComputeCredentialRef(agent.agentId) : null;
+  }
   return next;
 }
 
@@ -102,6 +118,8 @@ beforeEach(async () => {
     return {
       agentId: row.agentId,
       status: row.status,
+      reviewStatus: row.reviewStatus,
+      pricingType: row.pricingType,
       createdAt: row.createdAt,
       completedTaskCount: row.completedTaskCount,
       qualityScore: row.qualityScore,
@@ -270,6 +288,7 @@ async function createAgentViaForm(fields: {
   fireEvent.change(screen.getByLabelText("收款地址"), {
     target: { value: fields.payoutAddress },
   });
+  fireEvent.change(screen.getByLabelText("计费类型"), { target: { value: "FREE" } });
   fireEvent.click(screen.getByRole("button", { name: "发布" }));
 
   // Successful creation navigates to /agents/:agentId — wait for the detail
@@ -408,6 +427,7 @@ describe("Agent registration journey (AC-501 automated substitute — see file h
         category: "writing",
         skillTags: [],
         payoutAddress: "0x9999999999999999999999999999999999999999",
+        pricingType: "FREE",
       }),
       ownerAddress: "0x9999999999999999999999999999999999999999",
     };

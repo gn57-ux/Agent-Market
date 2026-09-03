@@ -1,6 +1,13 @@
 import { apiFetch } from "../../shared/api/client.js";
 
 export type AgentStatus = "ACTIVE" | "INACTIVE";
+/** F-1605/F-1607 (Feature 16) — mirrors apps/api's `AgentReviewStatus`
+ * exactly. Orthogonal to `AgentStatus` above (design.md 决策 3). */
+export type AgentReviewStatus = "DRAFT" | "PENDING_REVIEW" | "ACTIVE" | "REJECTED" | "SUSPENDED";
+/** F-1604 (Feature 16) — mirrors apps/api's `AgentPricingType` exactly.
+ * The field that alone decides review routing at creation time (never
+ * `referencePrice`'s presence — design.md 决策 5). */
+export type AgentPricingType = "FREE" | "PER_TASK" | "SUBSCRIPTION" | "HOURLY";
 
 /** Mirrors apps/api's routes.ts `toAgentSummaryJson` — the one response
  * shape shared by POST/GET list/GET detail/PATCH/activate/deactivate. */
@@ -20,6 +27,8 @@ export interface Agent {
    * precision-preserving choice (routes.ts's doc comment). */
   referencePrice: string | null;
   status: AgentStatus;
+  reviewStatus: AgentReviewStatus;
+  pricingType: AgentPricingType;
   completedTaskCount: number;
   successCount: number;
   overdueCount: number;
@@ -29,6 +38,18 @@ export interface Agent {
   qualityScore: number | null;
   createdAt: string;
   updatedAt: string;
+  /** Feature 12: always `"v1"` in this stage. */
+  protocolVersion: string;
+  /** Feature 12/T-1300: a reference string only (`env://AGENT_<this Agent's
+   * own id>`), never a real credential value — see apps/api's
+   * repository.ts `AgentRow.credentialRef` doc comment. `null` = not
+   * configured yet. Only present in the response when the caller is this
+   * Agent's own owner (apps/api's routes.ts, T-1203 round-2 fix) — a
+   * non-owner's `Agent` object simply won't have this key, so treat its
+   * absence the same as `null` here. This is a READ-only computed value —
+   * see `CreateAgentInput`/`UpdateAgentInput`'s `credentialEnabled` for the
+   * write-side toggle that produces it. */
+  credentialRef?: string | null;
 }
 
 export interface CreateAgentInput {
@@ -40,9 +61,24 @@ export interface CreateAgentInput {
   invocationUrl?: string;
   payoutAddress: string;
   pricingModel?: string;
+  /** F-1604 (Feature 16, N4 real finding, T-1604): REQUIRED — apps/api's
+   * `createAgentSchema` now rejects a request without this field. Every
+   * new Agent must explicitly declare its pricing mode; there is no
+   * default a client is allowed to silently omit (design.md 决策 5). */
+  pricingType: AgentPricingType;
   /** Decimal text, never a JS `number` — see `Agent.referencePrice`'s doc
    * comment. AgentForm.tsx never parses this through `Number()`. */
   referencePrice?: string;
+  /** Omitted uses apps/api's own `DEFAULT 'v1'` — this stage has no other
+   * legal value, so AgentForm.tsx never sends this explicitly. */
+  protocolVersion?: "v1";
+  /** T-1300: a toggle, not a free-text reference — `true` asks the server
+   * to compute+set the one deterministic `credentialRef` this Agent's own
+   * real id can ever produce; omitted/`false` leaves it unconfigured. An
+   * owner-chosen string is no longer accepted at all (Codex finding: it let
+   * an attacker pre-claim a victim Agent's future reference before the
+   * operator provisioned it — see apps/api's migration 0013 doc comment). */
+  credentialEnabled?: boolean;
 }
 
 /**
@@ -63,6 +99,9 @@ export interface UpdateAgentInput {
   payoutAddress?: string;
   pricingModel?: string | null;
   referencePrice?: string | null;
+  /** `undefined` = don't change; `true` = enable; `false` = disable/clear —
+   * see `CreateAgentInput.credentialEnabled`'s doc comment. */
+  credentialEnabled?: boolean;
 }
 
 export interface ListAgentsParams {
@@ -102,7 +141,16 @@ export function getAgent(agentId: string): Promise<Agent> {
 export function createAgent(
   input: CreateAgentInput,
 ): Promise<
-  Pick<Agent, "agentId" | "status" | "createdAt" | "completedTaskCount" | "qualityScore">
+  Pick<
+    Agent,
+    | "agentId"
+    | "status"
+    | "reviewStatus"
+    | "pricingType"
+    | "createdAt"
+    | "completedTaskCount"
+    | "qualityScore"
+  >
 > {
   return apiFetch("/agents", { method: "POST", body: JSON.stringify(input) });
 }

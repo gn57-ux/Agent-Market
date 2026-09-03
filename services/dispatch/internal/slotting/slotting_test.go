@@ -10,7 +10,9 @@ import (
 // candidate builds a minimal ScoredCandidate fixture: agentID identifies the
 // candidate, score is its scoring.ScoreResult.Score, completedTaskCount
 // drives the newcomer judgment. Reasons are left empty since slotting never
-// inspects them (it only passes them through).
+// inspects them (it only passes them through). ExcludeFromTopScore is
+// always false — see excludedCandidate for the v0.2 "no historical sample"
+// fixture.
 func candidate(agentID string, score float64, completedTaskCount int) ScoredCandidate {
 	return ScoredCandidate{
 		Result: scoring.ScoreResult{
@@ -19,6 +21,23 @@ func candidate(agentID string, score float64, completedTaskCount int) ScoredCand
 			Reasons: []scoring.Reason{{Code: scoring.ReasonCategoryExactMatch, NormalizedValue: 1.0}},
 		},
 		CompletedTaskCount: completedTaskCount,
+	}
+}
+
+// excludedCandidate builds a ScoredCandidate with ExcludeFromTopScore set —
+// F-1309/F-1312's "no historical sample" v0.2 shape (Score 0,
+// NoHistoricalSample true, CompletedTaskCount 0, which also makes it a
+// domain.IsNewcomer newcomer-pool member).
+func excludedCandidate(agentID string) ScoredCandidate {
+	return ScoredCandidate{
+		Result: scoring.ScoreResult{
+			AgentID:            agentID,
+			Score:              0,
+			Reasons:            []scoring.Reason{{Code: scoring.ReasonV2NoHistoricalSample}},
+			NoHistoricalSample: true,
+		},
+		CompletedTaskCount:  0,
+		ExcludeFromTopScore: true,
 	}
 }
 
@@ -233,5 +252,100 @@ func TestSelect_DuplicateAgentIDInInput_KeepsOnlyHighestScoringOccurrence(t *tes
 
 	if len(slots) == 0 || slots[0].AgentID != "agent-a" || slots[0].Score != 0.95 {
 		t.Fatalf("expected rank 1 to be agent-a's higher-scoring occurrence (0.95), got %+v", slots)
+	}
+}
+
+// --- ExcludeFromTopScore (Feature 13, T-1304 round 2 fix, F-1309/F-1312) ---
+
+// TestSelect_ExcludedCandidateAlone_GetsExplorationNotTopScore is the exact
+// scenario Codex's round 2 review caught: with fewer than 3 total
+// candidates, the OLD logic (topCount = min(2, len(sorted))) would have
+// unconditionally placed this lone candidate into a TOP_SCORE slot despite
+// its Score of 0 and ExcludeFromTopScore — F-1309/F-1312 require it to be
+// routed through the exploration mechanism instead, never ranked.
+func TestSelect_ExcludedCandidateAlone_GetsExplorationNotTopScore(t *testing.T) {
+	slots := Select("task-1", "v0.2", []ScoredCandidate{excludedCandidate("agent-nosample")})
+	if len(slots) != 1 {
+		t.Fatalf("expected 1 slot, got %d", len(slots))
+	}
+	if slots[0].SlotType != SlotTypeExploration {
+		t.Fatalf("expected EXPLORATION, got %s", slots[0].SlotType)
+	}
+	if slots[0].Rank != 1 {
+		t.Fatalf("expected rank 1 (the only slot), got %d", slots[0].Rank)
+	}
+	if slots[0].AgentID != "agent-nosample" {
+		t.Fatalf("expected agent-nosample, got %s", slots[0].AgentID)
+	}
+}
+
+// TestSelect_ExcludedCandidatesFillMostOfSmallPool_TopScoreOnlyTheEligibleOne:
+// two excluded candidates plus one normal, eligible candidate (which
+// out-scores both, but that's not what's being tested — even a LOW real
+// score must still win TOP_SCORE over an excluded candidate's Score-0).
+func TestSelect_ExcludedCandidatesFillMostOfSmallPool_TopScoreOnlyTheEligibleOne(t *testing.T) {
+	slots := Select("task-1", "v0.2", []ScoredCandidate{
+		excludedCandidate("agent-nosample-1"),
+		candidate("agent-real", 0.1, 10), // low real score, but not excluded
+		excludedCandidate("agent-nosample-2"),
+	})
+	if len(slots) != 2 {
+		t.Fatalf("expected 2 slots (one TOP_SCORE, one EXPLORATION), got %d: %+v", len(slots), slots)
+	}
+	if slots[0].SlotType != SlotTypeTopScore || slots[0].AgentID != "agent-real" || slots[0].Rank != 1 {
+		t.Fatalf("expected rank 1 TOP_SCORE to be agent-real (the only non-excluded candidate), got %+v", slots[0])
+	}
+	if slots[1].SlotType != SlotTypeExploration || slots[1].Rank != 2 {
+		t.Fatalf("expected rank 2 EXPLORATION, got %+v", slots[1])
+	}
+	if slots[1].AgentID != "agent-nosample-1" && slots[1].AgentID != "agent-nosample-2" {
+		t.Fatalf("expected the exploration pick to be one of the excluded candidates, got %s", slots[1].AgentID)
+	}
+}
+
+// TestSelect_ThreePlusCandidatesWithExcluded_TopScoreSkipsExcludedByScore:
+// with enough candidates that TOP_SCORE would normally be filled by rank
+// alone, an excluded candidate that WOULD have scored into the top two
+// (equal or higher Score than a genuine candidate) must still be skipped —
+// proving exclusion is enforced independent of score comparison, not just
+// "Score 0 sorts last."
+func TestSelect_ThreePlusCandidatesWithExcluded_TopScoreSkipsExcludedByScore(t *testing.T) {
+	high := excludedCandidate("agent-excluded-high")
+	high.Result.Score = 0.99 // would rank #1 by score alone if not excluded
+	slots := Select("task-1", "v0.2", []ScoredCandidate{
+		high,
+		candidate("agent-a", 0.9, 10),
+		candidate("agent-b", 0.8, 10),
+		candidate("agent-c", 0.7, 10),
+	})
+	for _, s := range slots {
+		if s.SlotType == SlotTypeTopScore && s.AgentID == "agent-excluded-high" {
+			t.Fatalf("agent-excluded-high must never win a TOP_SCORE slot despite its high Score, got slots: %+v", slots)
+		}
+	}
+	if len(slots) < 2 || slots[0].AgentID != "agent-a" || slots[1].AgentID != "agent-b" {
+		t.Fatalf("expected TOP_SCORE ranks 1-2 to be agent-a, agent-b (the highest-scoring non-excluded candidates), got %+v", slots)
+	}
+}
+
+// TestSelect_ExcludeFromTopScore_DoesNotAffectV01Candidates: candidate()
+// never sets ExcludeFromTopScore (Go's zero value, false), so every
+// existing test above this section — all of them "v0.1" calls — already
+// proves this field changes nothing when it's never set. This test makes
+// that guarantee explicit and named, rather than leaving it merely implied.
+func TestSelect_ExcludeFromTopScore_DoesNotAffectV01Candidates(t *testing.T) {
+	build := func() []ScoredCandidate {
+		return []ScoredCandidate{
+			candidate("agent-a", 0.9, 10),
+			candidate("agent-b", 0.8, 10),
+			candidate("agent-c", 0.7, 2),
+		}
+	}
+	withoutExclusion := Select("task-1", "v0.1", build())
+	if len(withoutExclusion) != 3 {
+		t.Fatalf("expected 3 slots, got %d", len(withoutExclusion))
+	}
+	if withoutExclusion[0].AgentID != "agent-a" || withoutExclusion[1].AgentID != "agent-b" || withoutExclusion[2].AgentID != "agent-c" {
+		t.Fatalf("unexpected slot assignment: %v", agentIDs(withoutExclusion))
 	}
 }

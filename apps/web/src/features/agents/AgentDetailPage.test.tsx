@@ -27,14 +27,17 @@ function agentFixture(overrides: Partial<Agent> = {}): Agent {
     invocationUrl: null,
     payoutAddress: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3",
     pricingModel: null,
+    pricingType: "FREE",
     referencePrice: null,
     status: "ACTIVE",
+    reviewStatus: "ACTIVE",
     completedTaskCount: 3,
     successCount: 2,
     overdueCount: 1,
     qualityScore: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    protocolVersion: "v1",
     ...overrides,
   };
 }

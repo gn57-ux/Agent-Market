@@ -54,6 +54,11 @@ export interface TaskRow {
    * one column list every `tasks` read goes through. */
   submittedAt: Date | null;
   reviewDeadline: Date | null;
+  /** Feature 12 (F-1205): `tasks.expert_type` (0013_add_agent_task_
+   * credentials.sql) — a distinct axis from `category`/`skillTags`, see
+   * that migration's own doc comment for why the column still carries a
+   * DB-level DEFAULT despite this being a required API field. */
+  expertType: string;
 }
 
 interface TaskQueryRow {
@@ -75,6 +80,7 @@ interface TaskQueryRow {
   accepted_at: Date | null;
   submitted_at: Date | null;
   review_deadline: Date | null;
+  expert_type: string;
 }
 
 function toTaskRow(row: TaskQueryRow, skillTags: string[]): TaskRow {
@@ -98,13 +104,14 @@ function toTaskRow(row: TaskQueryRow, skillTags: string[]): TaskRow {
     acceptedAt: row.accepted_at,
     submittedAt: row.submitted_at,
     reviewDeadline: row.review_deadline,
+    expertType: row.expert_type,
   };
 }
 
 const TASK_COLUMNS = `id, requester_address, category, title, description, budget, token,
                       delivery_deadline, status, funding_tx_hash, idempotency_key,
                       created_at, updated_at, accepted_agent_address, accepted_agent_id, accepted_at,
-                      submitted_at, review_deadline`;
+                      submitted_at, review_deadline, expert_type`;
 
 export interface InsertTaskDraftInput {
   requesterAddress: string;
@@ -117,6 +124,10 @@ export interface InsertTaskDraftInput {
   deliveryDeadline: Date;
   idempotencyKey: string | null;
   skillTags: string[];
+  /** Feature 12 (F-1205): required at the API boundary (schema.ts's
+   * `createDraftSchema`) even though this column still carries a DB
+   * DEFAULT — see TaskRow's own doc comment. */
+  expertType: string;
 }
 
 /**
@@ -139,8 +150,8 @@ export async function insertTaskDraft(pool: Pool, input: InsertTaskDraftInput): 
     const { rows } = await client.query<TaskQueryRow>(
       `INSERT INTO tasks
          (requester_address, category, title, description, budget, token,
-          delivery_deadline, status, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'DRAFT', $8)
+          delivery_deadline, status, idempotency_key, expert_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'DRAFT', $8, $9)
        RETURNING ${TASK_COLUMNS}`,
       [
         input.requesterAddress,
@@ -151,6 +162,7 @@ export async function insertTaskDraft(pool: Pool, input: InsertTaskDraftInput): 
         input.token,
         input.deliveryDeadline,
         input.idempotencyKey,
+        input.expertType,
       ],
     );
     const row = rows[0];
@@ -229,6 +241,7 @@ export interface UpdateTaskDraftInput {
   budget?: string;
   deliveryDeadline?: Date;
   skillTags?: string[];
+  expertType?: string;
 }
 
 /**
@@ -273,6 +286,7 @@ export async function updateTaskDraft(
         description: patch.description,
         budget: patch.budget,
         delivery_deadline: patch.deliveryDeadline,
+        expert_type: patch.expertType,
       };
       const entries = Object.entries(fieldMap).filter(([, value]) => value !== undefined);
 

@@ -212,6 +212,175 @@ func TestHandleMatch_InvalidAlgorithmVersion(t *testing.T) {
 	}
 }
 
+// TestHandleMatch_V02EndToEnd (Feature 13, T-1304/T-1305): the real
+// end-to-end proof Codex's round-1 review asked for — a live "v0.2" /match
+// request must actually succeed and produce recommendations, not just pass
+// eligibility.Filter's/scoring.ScoreV2's own package-level unit tests.
+// Exercises both new capabilities in one real request:
+//  1. F-1305's OR-branch: agentEligible1Fixture's category ("engineering")
+//     does NOT match the task's ("design"), but its semanticSimilarity
+//     (0.8) clears v02SemanticSimilarityThreshold (0.64) — admitted purely
+//     via the new OR-branch, which would eliminate it under "v0.1".
+//  2. F-1306/F-1309: agentEligible1Fixture carries a full reputationSignals
+//     object (real ScoreV2 weighted-average path); agentEligible2Fixture
+//     carries none at all (omitted from the wire body entirely, decoding
+//     to a nil *matchReputationSignals) — the F-1309/F-1312 "no historical
+//     sample" path, exercised via an actually-absent wire field rather than
+//     an explicitly-all-null one.
+func TestHandleMatch_V02EndToEnd(t *testing.T) {
+	candidates := []map[string]any{
+		validCandidate(agentEligible1Fixture, map[string]any{
+			"category":           "engineering", // mismatches the task's "design" on purpose
+			"semanticSimilarity": 0.8,
+			"reputationSignals": map[string]any{
+				"completionRate":  0.9,
+				"qualityFeedback": 0.8,
+				"communication":   0.7,
+				"disputeSignal":   1.0,
+				"historicalScale": 0.5,
+			},
+		}),
+		validCandidate(agentEligible2Fixture, nil), // category matches; no reputationSignals at all
+	}
+	body := validRequestBody(candidates)
+	body["algorithmVersion"] = "v0.2"
+
+	rec := postMatch(t, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp matchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.AlgorithmVersion != "v0.2" {
+		t.Fatalf("expected algorithmVersion v0.2, got %q", resp.AlgorithmVersion)
+	}
+
+	agentIDs := make(map[string]bool, len(resp.Recommendations))
+	for _, rec := range resp.Recommendations {
+		agentIDs[rec.AgentID] = true
+	}
+	if !agentIDs[agentEligible1Fixture] {
+		t.Fatalf("expected the category-mismatched-but-semantically-similar candidate to be recommended, got: %+v", resp.Recommendations)
+	}
+	if !agentIDs[agentEligible2Fixture] {
+		t.Fatalf("expected the category-matched candidate (no reputationSignals) to be recommended, got: %+v", resp.Recommendations)
+	}
+}
+
+// TestHandleMatch_V02ReproducibleAcrossRepeatedCalls is AC-1306's direct
+// end-to-end proof for "v0.2" (Feature 13, N6 QA — the existing
+// determinism coverage was Go-unit-level only: TestScoreV2_RepeatedCallsAreIdentical
+// and slotting's TestSelect_Deterministic_SameTaskAndVersionReproduceSamePick
+// both use a "v0.1" fixture literal, never actually exercising this with
+// "v0.2" through the real HTTP pipeline). Same task + same candidates +
+// algorithmVersion="v0.2", called twice independently (not a replay of a
+// cached response) — the full eligibility -> ScoreV2 -> slotting -> explain
+// pipeline is pure/deterministic end to end, so the two raw response
+// bodies must be byte-for-byte identical, not just logically equivalent.
+func TestHandleMatch_V02ReproducibleAcrossRepeatedCalls(t *testing.T) {
+	candidates := []map[string]any{
+		validCandidate(agentEligible1Fixture, map[string]any{
+			"category":           "engineering",
+			"semanticSimilarity": 0.8,
+			"reputationSignals": map[string]any{
+				"completionRate":  0.9,
+				"qualityFeedback": 0.8,
+				"communication":   0.7,
+				"disputeSignal":   1.0,
+				"historicalScale": 0.5,
+			},
+		}),
+		validCandidate(agentEligible2Fixture, nil),
+		validCandidate(agentNewcomerFixture, map[string]any{
+			"reputationSignals": map[string]any{
+				"completionRate":  0.4,
+				"qualityFeedback": nil,
+				"communication":   0.6,
+				"disputeSignal":   nil,
+				"historicalScale": 0.1,
+			},
+		}),
+	}
+	body := validRequestBody(candidates)
+	body["algorithmVersion"] = "v0.2"
+
+	first := postMatch(t, body)
+	second := postMatch(t, body)
+
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("expected both calls to return 200, got %d and %d", first.Code, second.Code)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("expected byte-identical responses for repeated v0.2 calls with the same input, got:\nfirst:  %s\nsecond: %s", first.Body.String(), second.Body.String())
+	}
+}
+
+// TestHandleMatch_V02CategoryMismatchBelowThreshold_NotRecommended is
+// TestHandleMatch_V02EndToEnd's negative counterpart: a category mismatch
+// with semanticSimilarity BELOW the threshold must still be eliminated
+// under "v0.2", exactly as it would be under "v0.1" — the OR-branch only
+// ever widens eligibility, it doesn't relax the exact-match rule for a
+// candidate that fails both conditions.
+func TestHandleMatch_V02CategoryMismatchBelowThreshold_NotRecommended(t *testing.T) {
+	candidates := []map[string]any{
+		validCandidate(agentEligible1Fixture, map[string]any{
+			"category":           "engineering",
+			"semanticSimilarity": 0.5, // below the 0.64 threshold
+		}),
+	}
+	body := validRequestBody(candidates)
+	body["algorithmVersion"] = "v0.2"
+
+	rec := postMatch(t, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp matchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Recommendations) != 0 {
+		t.Fatalf("expected no recommendations (candidate fails both category match and the similarity threshold), got: %+v", resp.Recommendations)
+	}
+}
+
+// TestHandleMatch_V02NoHistoricalSample_SmallPool_GetsExplorationNotTopScore
+// is the direct end-to-end regression for Codex's round 2 P1 finding: a
+// lone eligible "v0.2" candidate with no reputationSignals at all (real
+// data omitted from the wire body, decoding to a zero-value
+// domain.ReputationSignals — F-1309's "no historical sample" case) must be
+// recommended with slotType EXPLORATION, never TOP_SCORE — the original
+// TestHandleMatch_V02EndToEnd only checked WHICH agents were recommended,
+// never their slotType, which is exactly why this regression slipped past
+// it.
+func TestHandleMatch_V02NoHistoricalSample_SmallPool_GetsExplorationNotTopScore(t *testing.T) {
+	candidates := []map[string]any{
+		validCandidate(agentEligible1Fixture, nil), // category matches; no reputationSignals
+	}
+	body := validRequestBody(candidates)
+	body["algorithmVersion"] = "v0.2"
+
+	rec := postMatch(t, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp matchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Recommendations) != 1 {
+		t.Fatalf("expected 1 recommendation, got %d: %+v", len(resp.Recommendations), resp.Recommendations)
+	}
+	if resp.Recommendations[0].SlotType != "EXPLORATION" {
+		t.Fatalf("expected slotType EXPLORATION for a no-historical-sample candidate, got %q (%+v)", resp.Recommendations[0].SlotType, resp.Recommendations[0])
+	}
+}
+
 // Regression for Codex round 1 P2: a request with two candidates sharing
 // one AgentID but different CompletedTaskCount must not let a map-based
 // lookup silently bind the WRONG duplicate's CompletedTaskCount to the
@@ -493,6 +662,108 @@ func TestHandleMatch_DuplicateKey_Candidate_CaseVariant(t *testing.T) {
 	}
 }
 
+// TestHandleMatch_DuplicateKey_ReputationSignals (Feature 13, T-1305,
+// direct regression for a Codex round 1 P2 finding): reputationSignals is
+// the one nested object this service's wire format defines, and it was not
+// originally covered by checkNoDuplicateKeys' two existing call sites
+// (request body top level, and each candidate) — a duplicate key inside it
+// would have silently kept only the last value instead of being rejected.
+func TestHandleMatch_DuplicateKey_ReputationSignals(t *testing.T) {
+	raw := []byte(`{
+		"taskId": "11111111-1111-1111-1111-111111111111",
+		"category": "design",
+		"skillTags": [],
+		"deliveryDeadline": "2024-06-01T00:00:00Z",
+		"requiredLevel": "BEGINNER",
+		"requesterAddress": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"algorithmVersion": "v0.2",
+		"candidates": [{
+			"agentId": "22222222-2222-2222-2222-222222222222",
+			"walletAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "ACTIVE",
+			"category": "design",
+			"skillTags": [],
+			"level": "INTERMEDIATE",
+			"maxConcurrentTasks": 5,
+			"activeTaskCount": 0,
+			"completedTaskCount": 10,
+			"successCount": 8,
+			"overdueCount": 1,
+			"qualityScore": 0.8,
+			"createdAt": "2024-01-01T00:00:00Z",
+			"isBanned": false,
+			"reputationSignals": {
+				"completionRate": 0.1,
+				"completionRate": 0.9
+			}
+		}]
+	}`)
+	rec := postMatchRaw(t, raw)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "duplicate key") {
+		t.Errorf("expected error to mention duplicate key, got: %s", rec.Body.String())
+	}
+}
+
+// TestHandleMatch_DuplicateKey_ReputationSignals_CaseVariant is the
+// reputationSignals-level counterpart of TestHandleMatch_DuplicateKey_CaseVariant.
+func TestHandleMatch_DuplicateKey_ReputationSignals_CaseVariant(t *testing.T) {
+	raw := []byte(`{
+		"taskId": "11111111-1111-1111-1111-111111111111",
+		"category": "design",
+		"skillTags": [],
+		"deliveryDeadline": "2024-06-01T00:00:00Z",
+		"requiredLevel": "BEGINNER",
+		"requesterAddress": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"algorithmVersion": "v0.2",
+		"candidates": [{
+			"agentId": "22222222-2222-2222-2222-222222222222",
+			"walletAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "ACTIVE",
+			"category": "design",
+			"skillTags": [],
+			"level": "INTERMEDIATE",
+			"maxConcurrentTasks": 5,
+			"activeTaskCount": 0,
+			"completedTaskCount": 10,
+			"successCount": 8,
+			"overdueCount": 1,
+			"qualityScore": 0.8,
+			"createdAt": "2024-01-01T00:00:00Z",
+			"isBanned": false,
+			"reputationSignals": {
+				"completionRate": 0.1,
+				"CompletionRate": 0.9
+			}
+		}]
+	}`)
+	rec := postMatchRaw(t, raw)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "duplicate key") {
+		t.Errorf("expected error to mention duplicate key, got: %s", rec.Body.String())
+	}
+}
+
+// TestHandleMatch_ReputationSignalsNull_NotTreatedAsDuplicateCheckFailure:
+// an explicit JSON null for "reputationSignals" (as opposed to omitting the
+// key, or a real object) must decode cleanly and skip the nested
+// duplicate-key check rather than erroring — checkNoDuplicateKeys requires
+// its input to be a JSON object, and null is a valid, well-formed way for
+// a v0.1-shaped caller to express "no signals."
+func TestHandleMatch_ReputationSignalsNull_NotTreatedAsDuplicateCheckFailure(t *testing.T) {
+	candidates := []map[string]any{
+		validCandidate(agent1Fixture, map[string]any{"reputationSignals": nil}),
+	}
+	rec := postMatch(t, validRequestBody(candidates))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestHandleMatch_TaskIDNotUUID covers capsule category 4 (taskId).
 func TestHandleMatch_TaskIDNotUUID(t *testing.T) {
 	body := validRequestBody(nil)
@@ -693,6 +964,57 @@ func TestHandleMatch_QualityScoreBoundaryValuesAllowed(t *testing.T) {
 				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestHandleMatch_SemanticSimilarityOutOfRange (Feature 13, T-1304): the
+// wire field is a cosine similarity, mathematically bounded to [-1, 1].
+func TestHandleMatch_SemanticSimilarityOutOfRange(t *testing.T) {
+	for _, v := range []float64{-1.01, 1.01} {
+		t.Run(fmt.Sprintf("%v", v), func(t *testing.T) {
+			candidates := []map[string]any{
+				validCandidate(agent1Fixture, map[string]any{"semanticSimilarity": v}),
+			}
+			rec := postMatch(t, validRequestBody(candidates))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "semanticSimilarity") {
+				t.Errorf("expected error to mention semanticSimilarity, got: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestHandleMatch_SemanticSimilarityBoundaryValuesAllowed: -1 and 1 (the
+// inclusive range endpoints) must both be accepted at the wire layer,
+// independent of whether eligibility.Filter's own threshold check (T-1304's
+// eligibility_test.go) would consider either value "similar enough."
+func TestHandleMatch_SemanticSimilarityBoundaryValuesAllowed(t *testing.T) {
+	for _, v := range []float64{-1.0, 1.0} {
+		t.Run(fmt.Sprintf("%v", v), func(t *testing.T) {
+			candidates := []map[string]any{
+				validCandidate(agent1Fixture, map[string]any{"semanticSimilarity": v}),
+			}
+			rec := postMatch(t, validRequestBody(candidates))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestHandleMatch_SemanticSimilarityOmittedDefaultsToZero: every "v0.1"
+// request in this whole test file omits the field entirely (validCandidate's
+// base map has no "semanticSimilarity" key) and all pass — this test names
+// that guarantee explicitly rather than leaving it merely implied by every
+// other test's success, and pins down that omission is NOT a validation
+// error (unlike an out-of-range explicit value, above).
+func TestHandleMatch_SemanticSimilarityOmittedDefaultsToZero(t *testing.T) {
+	candidates := []map[string]any{validCandidate(agent1Fixture, nil)}
+	rec := postMatch(t, validRequestBody(candidates))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

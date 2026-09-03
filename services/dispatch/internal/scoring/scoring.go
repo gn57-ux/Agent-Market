@@ -80,11 +80,161 @@ func neutralPriorFor(algorithmVersion string) (float64, error) {
 	}
 }
 
+// v02weights holds F-1311's five user-confirmed weights for "v0.2"
+// (completion 0.30 / quality 0.30 / communication 0.15 / dispute 0.20 /
+// scale 0.05, summing to 1.0). A separate type from weights (v0.1's four
+// sub-scores) — F-1306/design.md are explicit that v0.1 and v0.2 are two
+// independent, complete calculations sharing no sub-score logic, only this
+// package's "versioned constant" convention.
+type v02weights struct {
+	completionRate  float64
+	qualityFeedback float64
+	communication   float64
+	disputeSignal   float64
+	historicalScale float64
+}
+
+var v02Weights = v02weights{
+	completionRate:  0.30,
+	qualityFeedback: 0.30,
+	communication:   0.15,
+	disputeSignal:   0.20,
+	historicalScale: 0.05,
+}
+
+// ScoreV2 computes one candidate's "v0.2" score from its already-assembled
+// ReputationSignals — a wholly separate calculation from v0.1's Score
+// (CandidateSnapshot-based), matching design.md's "两条独立的、各自完整的
+// 计算路径" decision. Unlike Score, this never returns an error: every
+// ReputationSignals value, including the all-nil case, is a valid input
+// this function has a defined answer for (a brand-new Agent producing an
+// all-nil value is an expected, common shape, not a caller mistake).
+//
+// F-1309's missing-value handling: a nil field is excluded from both the
+// weighted sum and the renormalization denominator — never replaced by any
+// value (0, a prior, or otherwise) — so the final score is the weighted
+// average of only the PRESENT signals, reweighted so their weights sum to
+// 1. Reasons contains one entry per present signal, in the fixed
+// completionRate/qualityFeedback/communication/disputeSignal/
+// historicalScale order (never the input's field order, since there is
+// only one input value — this IS the canonical order), which is what makes
+// two calls with the same ReputationSignals value produce byte-identical
+// output (AC-1306).
+//
+// F-1309/F-1312's "全部五项均缺失" case: returns Score 0 with a single
+// ReasonV2NoHistoricalSample Reason and no other Reasons. This candidate is
+// never meant to WIN a slot on that Score's merit — F-1312 routes it
+// through slotting's existing, unchanged domain.IsNewcomer-based
+// exploration pool instead (a brand-new Agent has CompletedTaskCount == 0,
+// which IsNewcomer already treats as a newcomer) — Score 0 simply keeps
+// this candidate from ever outranking a candidate with real history in the
+// TOP_SCORE slots, without slotting.go needing to know anything about "no
+// sample" as a distinct concept.
+func ScoreV2(agentID string, signals domain.ReputationSignals) ScoreResult {
+	type presentSignal struct {
+		value  float64
+		weight float64
+		reason Reason
+	}
+	present := make([]presentSignal, 0, 5)
+	if signals.CompletionRate != nil {
+		present = append(present, presentSignal{
+			value:  *signals.CompletionRate,
+			weight: v02Weights.completionRate,
+			reason: Reason{Code: ReasonV2CompletionRate, NormalizedValue: *signals.CompletionRate},
+		})
+	}
+	if signals.QualityFeedback != nil {
+		present = append(present, presentSignal{
+			value:  *signals.QualityFeedback,
+			weight: v02Weights.qualityFeedback,
+			reason: Reason{Code: ReasonV2QualityFeedback, NormalizedValue: *signals.QualityFeedback},
+		})
+	}
+	if signals.Communication != nil {
+		present = append(present, presentSignal{
+			value:  *signals.Communication,
+			weight: v02Weights.communication,
+			reason: Reason{Code: ReasonV2Communication, NormalizedValue: *signals.Communication},
+		})
+	}
+	if signals.DisputeSignal != nil {
+		present = append(present, presentSignal{
+			value:  *signals.DisputeSignal,
+			weight: v02Weights.disputeSignal,
+			reason: Reason{Code: ReasonV2DisputeSignal, NormalizedValue: *signals.DisputeSignal},
+		})
+	}
+	if signals.HistoricalScale != nil {
+		present = append(present, presentSignal{
+			value:  *signals.HistoricalScale,
+			weight: v02Weights.historicalScale,
+			reason: Reason{Code: ReasonV2HistoricalScale, NormalizedValue: *signals.HistoricalScale},
+		})
+	}
+
+	if len(present) == 0 {
+		return ScoreResult{
+			AgentID:            agentID,
+			Score:              0,
+			Reasons:            []Reason{{Code: ReasonV2NoHistoricalSample}},
+			NoHistoricalSample: true,
+		}
+	}
+
+	var weightedSum, weightSum float64
+	reasons := make([]Reason, 0, len(present))
+	for _, p := range present {
+		weightedSum += p.value * p.weight
+		weightSum += p.weight
+		reasons = append(reasons, p.reason)
+	}
+
+	return ScoreResult{
+		AgentID: agentID,
+		// Same "round once, at the end" discipline as Score (F-703/design.md).
+		Score:   math.Round((weightedSum/weightSum)*1e6) / 1e6,
+		Reasons: reasons,
+	}
+}
+
+// ScoreAllV2 scores every "v0.2" candidate independently — same order-
+// preservation contract as ScoreAll (the returned slice's order matches
+// candidates'). Reads each candidate's ReputationSignals directly off the
+// CandidateSnapshot itself (T-1306's apps/api-side job fills it in before
+// this pipeline runs) — deliberately NOT a separate AgentID-keyed map
+// parameter: this project explicitly allows two candidate snapshots to
+// share one AgentID with different data (see CandidateSnapshot.
+// ReputationSignals' own doc comment for the Codex-caught bug an
+// AgentID-keyed map reintroduced here in an earlier version of this Task).
+// Reading straight off the already-filtered, index-preserved candidates
+// slice makes that class of mis-binding structurally impossible: there is
+// no second structure for this function's caller to keep in sync.
+func ScoreAllV2(candidates []domain.CandidateSnapshot) []ScoreResult {
+	results := make([]ScoreResult, 0, len(candidates))
+	for _, candidate := range candidates {
+		results = append(results, ScoreV2(candidate.AgentID, candidate.ReputationSignals))
+	}
+	return results
+}
+
 // ScoreResult is one candidate's scoring outcome.
 type ScoreResult struct {
 	AgentID string
 	Score   float64
 	Reasons []Reason
+
+	// NoHistoricalSample is true only for a ScoreV2 result produced by the
+	// all-signals-missing case (F-1309/F-1312) — always false for every
+	// v0.1 Score/ScoreAll result. slotting.Select uses this (via
+	// ScoredCandidate.ExcludeFromTopScore, httpapi's own binding) to keep
+	// a "no real history at all" candidate from ever winning a TOP_SCORE
+	// slot on its Score value alone: Score 0 is usually low enough to sort
+	// last, but with fewer than 3 total candidates (or several genuine
+	// ties at 0) it could still land in the top two purely by construction
+	// — F-1309/F-1312 require this candidate to compete ONLY through the
+	// exploration-pool mechanism, never through ranked competition.
+	NoHistoricalSample bool
 }
 
 // Score computes one candidate's score against task. candidate must already

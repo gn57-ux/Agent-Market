@@ -5,6 +5,7 @@ export interface RatingRow {
   taskId: string;
   requesterAddress: string;
   score: number;
+  communicationScore: number | null;
   createdAt: Date;
 }
 
@@ -13,6 +14,7 @@ interface RatingQueryRow {
   task_id: string;
   requester_address: string;
   score: number;
+  communication_score: number | null;
   created_at: Date;
 }
 
@@ -22,6 +24,7 @@ function toRatingRow(row: RatingQueryRow): RatingRow {
     taskId: row.task_id,
     requesterAddress: row.requester_address,
     score: row.score,
+    communicationScore: row.communication_score,
     createdAt: row.created_at,
   };
 }
@@ -44,6 +47,11 @@ export interface InsertRatingInput {
   taskId: string;
   requesterAddress: string;
   score: number;
+  /** `undefined` (field omitted from the request) and `null` are treated
+   * identically here — both mean "not submitted" — since schema.ts's
+   * `communicationScore` is `.optional()`, never `.nullable()`; the SQL
+   * parameter binds either as SQL `NULL`. */
+  communicationScore?: number;
 }
 
 /** Returns `null` (not a thrown error) when the task already has a rating
@@ -58,10 +66,10 @@ export async function insertRating(
 ): Promise<RatingRow | null> {
   try {
     const { rows } = await pool.query<RatingQueryRow>(
-      `INSERT INTO ratings (task_id, requester_address, score)
-       VALUES ($1, $2, $3)
-       RETURNING id, task_id, requester_address, score, created_at`,
-      [input.taskId, input.requesterAddress, input.score],
+      `INSERT INTO ratings (task_id, requester_address, score, communication_score)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, task_id, requester_address, score, communication_score, created_at`,
+      [input.taskId, input.requesterAddress, input.score, input.communicationScore ?? null],
     );
     const row = rows[0];
     if (!row) throw new Error("insertRating: INSERT ... RETURNING produced no row");
@@ -89,7 +97,8 @@ export async function insertRating(
  */
 export async function getRatingForTask(pool: Queryable, taskId: string): Promise<RatingRow | null> {
   const { rows } = await pool.query<RatingQueryRow>(
-    `SELECT id, task_id, requester_address, score, created_at FROM ratings WHERE task_id = $1`,
+    `SELECT id, task_id, requester_address, score, communication_score, created_at
+     FROM ratings WHERE task_id = $1`,
     [taskId],
   );
   const row = rows[0];

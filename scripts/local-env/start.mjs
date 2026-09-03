@@ -14,6 +14,11 @@
 //       接收配置，Node 的 `--env-file-if-exists` 和 Vite 的 `loadEnv` 都
 //       以真实 process.env 优先于 .env 文件，因此这里传入的值不会被
 //       任何人手上那份 .env 覆盖。
+//       （T-1611 的唯一例外，窄到只读两个键：Privy 凭据不是链上部署值、
+//       不是数据库派生值，本工具没有别的来源能生成它——`readPrivyConfigFromEnvFile`
+//       只精确读取 `PRIVY_APP_ID`/`PRIVY_APP_SECRET` 这两行，从不把整份
+//       `.env` 载入 `process.env`，不违反"清单是唯一配置来源"这条原则本身
+//       想避免的"陈旧/错误 .env 污染其他键"的风险——见该文件顶部注释。）
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, openSync } from "node:fs";
 import path from "node:path";
@@ -36,6 +41,8 @@ import {
   processesInGroup,
 } from "./process-check.mjs";
 import { terminateProcessGroup } from "./process-terminate.mjs";
+import { checkOllamaEmbedding, formatOllamaPreflightLines } from "./ollama-preflight.mjs";
+import { readPrivyConfigFromEnvFile, formatPrivyConfigStatusLine } from "./privy-config.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -105,6 +112,49 @@ async function runMigrations() {
   } finally {
     await pool.end();
   }
+}
+
+/**
+ * T-1611 (Codex review, round 1, P2): "configured" is all-or-nothing, not
+ * per-field. `PrivyIdentityProvider`'s factory (`createPrivyIdentityProvider`)
+ * needs BOTH `PRIVY_APP_ID`/`PRIVY_APP_SECRET` to construct a real Privy SDK
+ * client — with only one set, `app.ts`'s composition root still never
+ * registers `/auth/verify/privy` (same as having neither set; see T-1602's
+ * `privy-routes.integration.test.ts` precedent). The first version of this
+ * fix let `buildWebPrivyEnv` react to `appId` alone, so a partial config
+ * (App ID present, Secret missing) would mount a working-LOOKING Privy
+ * button on a Web process whose paired API process never registers the
+ * route it posts to — directly contradicting `formatPrivyConfigStatusLine`'s
+ * own "配置不完整...Privy 登录入口不会启用" promise. Both env-builders below
+ * now gate on this single shared predicate so that promise is structurally
+ * true, not just documented.
+ */
+function isPrivyFullyConfigured(privyConfig) {
+  return Boolean(privyConfig.appId && privyConfig.appSecret);
+}
+
+/**
+ * T-1611: pure, independently testable — the only place that decides
+ * which of `PRIVY_APP_ID`/`PRIVY_APP_SECRET` reach the API child process.
+ * Extracted specifically so a test can assert this shape without spinning
+ * up the full Hardhat/DB/API/Go/Vite stack `runStartupSequence` drives.
+ */
+function buildApiPrivyEnv(privyConfig) {
+  if (!isPrivyFullyConfigured(privyConfig)) return {};
+  return { PRIVY_APP_ID: privyConfig.appId, PRIVY_APP_SECRET: privyConfig.appSecret };
+}
+
+/**
+ * T-1611: mirrors `buildApiPrivyEnv` above for the Web child process —
+ * gated on the SAME full-configuration check (round 1 P2 fix: previously
+ * gated on `appId` alone), and structurally incapable of including
+ * `PRIVY_APP_SECRET` regardless — the fix's hard requirement ("PRIVY_APP_SECRET
+ * 绝不能进入 Web 环境") stays a property of this function's own body, not
+ * just something callers must remember to uphold.
+ */
+function buildWebPrivyEnv(privyConfig) {
+  if (!isPrivyFullyConfigured(privyConfig)) return {};
+  return { VITE_PRIVY_APP_ID: privyConfig.appId };
 }
 
 /** 端口就绪之后，问操作系统"到底是谁在监听这个端口"，而不是信任
@@ -333,6 +383,11 @@ async function runStartupSequence(startedServices) {
   log("运行数据库迁移…");
   await runMigrations();
 
+  // T-1611: narrow, explicit, read-only — see this file's header comment
+  // (principle 3's documented exception) and privy-config.mjs's own doc
+  // comment for why this is safe and why it stays this narrow.
+  const privyConfig = readPrivyConfigFromEnvFile(path.join(REPO_ROOT, ".env"));
+
   const apiEnv = {
     API_PORT: String(PORTS.api),
     DATABASE_URL,
@@ -347,6 +402,7 @@ async function runStartupSequence(startedServices) {
     COOKIE_INSECURE_LOCAL_DEV: "1",
     DISPATCH_SERVICE_URL: `http://127.0.0.1:${PORTS.dispatch}`,
     DELIVERABLE_STORAGE_DIR: path.join(LOCAL_ENV_DIR, "deliverables"),
+    ...buildApiPrivyEnv(privyConfig),
   };
   log("启动 API 服务…");
   const apiProc = spawnTracked("api", "node", ["dist/server.js"], {
@@ -383,6 +439,7 @@ async function runStartupSequence(startedServices) {
     VITE_TASK_ESCROW_ADDRESS: contracts.taskEscrow.address,
     VITE_YD_TOKEN_ADDRESS: contracts.ydToken.address,
     VITE_YD_FAUCET_ADDRESS: contracts.ydFaucet.address,
+    ...buildWebPrivyEnv(privyConfig),
   };
   log("启动 Web 开发服务器…");
   const webProc = spawnTracked(
@@ -429,6 +486,20 @@ async function runStartupSequence(startedServices) {
   console.log(`API：       http://localhost:${PORTS.api}`);
   console.log(`Hardhat RPC：${rpcUrl}（chainId 31337）`);
   console.log(`Go dispatch：http://127.0.0.1:${PORTS.dispatch}`);
+
+  // F-1317: read-only, informational only — never affects this script's
+  // exit code (see ollama-preflight.mjs's own header comment for why).
+  console.log("");
+  const ollamaResult = await checkOllamaEmbedding();
+  for (const line of formatOllamaPreflightLines(ollamaResult)) {
+    console.log(line);
+  }
+
+  // T-1611: same "informational only, never fails startup" contract as
+  // the Ollama preflight above — SIWE/MetaMask must start normally
+  // regardless of Privy configuration state (fix requirement 6).
+  console.log(formatPrivyConfigStatusLine(privyConfig));
+
   console.log("\nMetaMask 添加/切换网络指引：");
   console.log(`  网络名称：Agent Market Local`);
   console.log(`  RPC URL：${rpcUrl}`);
@@ -455,6 +526,8 @@ export {
   ensureDatabase,
   runMigrations,
   runStartupSequence,
+  buildApiPrivyEnv,
+  buildWebPrivyEnv,
   main,
   PORTS,
   DATABASE_URL,

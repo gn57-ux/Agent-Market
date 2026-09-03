@@ -103,6 +103,7 @@ function taskFixture(overrides: Partial<TaskRecord> = {}): TaskRecord {
     token: CHAIN_CONFIG.addresses.ydToken,
     deliveryDeadline: "2033-01-01T00:00:00.000Z",
     skillTags: [],
+    expertType: "AUTOMATION",
     status: "DRAFT",
     fundingTxHash: null,
     createdAt: "2026-01-01T00:00:00.000Z",
@@ -141,6 +142,7 @@ function renderPageResuming(taskId: string) {
 function fillForm() {
   fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
   fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+  fireEvent.change(screen.getByLabelText("专家类型"), { target: { value: "CONTENT_GENERATION" } });
   fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
   fireEvent.click(screen.getByRole("button", { name: "下一步：匹配要求" }));
 
@@ -217,6 +219,51 @@ describe("TaskCreatePage", () => {
     expect(createDraftSpy).toHaveBeenCalledWith(
       expect.objectContaining({ budget: "12500000000000000000" }),
       expect.any(String),
+    );
+  });
+
+  // Feature 12 (F-1205), T-1204: apps/api's createDraftSchema now rejects a
+  // draft creation that omits expertType — this proves the wizard still
+  // sends a value (the T-1204 placeholder, replaced by T-1206's real
+  // selector) rather than regressing every draft creation to a 400 (N4
+  // round 2 finding).
+  // Feature 12 (F-1205), T-1206: proves the wizard's own selector step
+  // (not the T-1204 placeholder it replaces) is what's actually sent.
+  it("sends the wizard's own selected expertType with the draft creation request (F-1205/AC-1205)", async () => {
+    const createDraftSpy = vi
+      .spyOn(tasksApi, "createDraft")
+      .mockResolvedValue({ taskId: "task-1", status: "DRAFT" });
+    vi.spyOn(tasksApi, "getTask").mockResolvedValue(taskFixture());
+
+    renderPage();
+    fillForm();
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+    await screen.findByRole("button", { name: "发起资金锁定" });
+
+    expect(createDraftSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ expertType: "CONTENT_GENERATION" }),
+      expect.any(String),
+    );
+  });
+
+  // F-1205/AC-1207: "未选择专家类型时'下一步'按钮保持禁用" — the acceptance
+  // criterion's own wording, verified directly rather than only indirectly
+  // through fillForm() always selecting one.
+  it("keeps step 1's 下一步 button disabled until expertType is selected, and enables it once chosen", () => {
+    renderPage();
+    fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
+    fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
+
+    expect(screen.getByRole("button", { name: "下一步：匹配要求" }).hasAttribute("disabled")).toBe(
+      true,
+    );
+
+    fireEvent.change(screen.getByLabelText("专家类型"), { target: { value: "RESEARCH" } });
+
+    expect(screen.getByRole("button", { name: "下一步：匹配要求" }).hasAttribute("disabled")).toBe(
+      false,
     );
   });
 
@@ -418,6 +465,9 @@ describe("TaskCreatePage", () => {
     renderPage();
     fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
     fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("专家类型"), {
+      target: { value: "CONTENT_GENERATION" },
+    });
     fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
     fireEvent.click(screen.getByRole("button", { name: "下一步：匹配要求" }));
     fireEvent.click(screen.getByRole("button", { name: "下一步：预算与期限" }));
@@ -437,6 +487,9 @@ describe("TaskCreatePage", () => {
     renderPage();
     fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
     fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("专家类型"), {
+      target: { value: "CONTENT_GENERATION" },
+    });
     fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
     fireEvent.click(screen.getByRole("button", { name: "下一步：匹配要求" }));
     fireEvent.click(screen.getByRole("button", { name: "下一步：预算与期限" }));
@@ -456,6 +509,9 @@ describe("TaskCreatePage", () => {
     renderPage();
     fireEvent.change(screen.getByLabelText("标题"), { target: { value: "Test task" } });
     fireEvent.change(screen.getByLabelText("分类"), { target: { value: "writing" } });
+    fireEvent.change(screen.getByLabelText("专家类型"), {
+      target: { value: "CONTENT_GENERATION" },
+    });
     fireEvent.change(screen.getByLabelText("描述"), { target: { value: "A task description" } });
     fireEvent.click(screen.getByRole("button", { name: "下一步：匹配要求" }));
     fireEvent.click(screen.getByRole("button", { name: "下一步：预算与期限" }));

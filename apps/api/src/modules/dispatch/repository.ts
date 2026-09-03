@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import type { Queryable } from "../../db/pool.js";
 import { countActiveTasksByAgentIds } from "../tasks/repository.js";
+import type { ReputationSignalsDigest, ReputationSignalsInput } from "./reputation-signals.js";
 
 /**
  * Wire-format candidate snapshot POST /match (services/dispatch, T-704)
@@ -9,6 +10,14 @@ import { countActiveTasksByAgentIds } from "../tasks/repository.js";
  * deliberately absent: T-704's Go service computes newcomer status itself
  * from `completedTaskCount` (`domain.IsNewcomer`) and does not accept it as
  * an external input (capsule: "不要发送 isNewcomer 字段").
+ *
+ * `semanticSimilarity`/`reputationSignals` (Feature 13, T-1303) are
+ * `undefined` for a "v0.1" request — `JSON.stringify` omits an `undefined`
+ * property entirely, so the wire body simply doesn't carry the key, which
+ * Go's decoder treats identically to an explicit absence (design.md's
+ * "v0.1 请求中...恒为 0"/"v0.1 请求...不发送这个字段" contract). `matchTask`
+ * (routes.ts) is the only place that ever sets them, and only for a
+ * "v0.2" request.
  */
 export interface CandidateSnapshot {
   agentId: string;
@@ -25,6 +34,8 @@ export interface CandidateSnapshot {
   qualityScore: number | null;
   createdAt: string;
   isBanned: boolean;
+  semanticSimilarity?: number;
+  reputationSignals?: ReputationSignalsInput;
 }
 
 interface CandidateAgentRow {
@@ -54,6 +65,20 @@ interface CandidateAgentRow {
  * T-705 capsule's reasoning for why this is the one narrow exception to
  * "eligibility logic lives only in Go."
  *
+ * `AND review_status = 'ACTIVE'` (Codex review, T-1605 round 1 P1): `status`
+ * (this Agent's own on/off market toggle) and `review_status` (Feature 16's
+ * platform review lifecycle) are orthogonal columns (design.md 决策 3) — a
+ * paid Agent awaiting review, rejected, or suspended by an admin still has
+ * `status = 'ACTIVE'` (nothing in T-1604/T-1605 ever touches that column),
+ * so without this second condition it would still be assembled as a
+ * dispatch candidate and could be matched to real tasks, completely
+ * bypassing the review gate this Feature exists to enforce. Go's
+ * `eligibility.Filter` has no independent `review_status` check of its own
+ * (unlike `status`, which it deliberately re-checks per this function's own
+ * doc comment above) — this query is the ONLY place that enforces it, so it
+ * cannot be treated as merely a read optimization the way the `status`
+ * filter is.
+ *
  * Deliberately does NOT filter by `taskCategory` — category-compatibility
  * matching is eligibility's job alone (T-701 already fixed this as an exact
  * match rule); this function only fetches raw data and hands it over.
@@ -72,7 +97,7 @@ export async function assembleCandidateSnapshots(
     `SELECT id, owner_address, status, category, level, max_concurrent_tasks,
             completed_task_count, success_count, overdue_count, quality_score, created_at
      FROM agents
-     WHERE status = 'ACTIVE'`,
+     WHERE status = 'ACTIVE' AND review_status = 'ACTIVE'`,
   );
 
   if (agentRows.length === 0) {
@@ -147,14 +172,82 @@ export async function getRequiredAgentLevel(
   return rows[0]?.required_agent_level ?? null;
 }
 
+/**
+ * F-1304/F-1305 (Feature 13, T-1303): reads `taskId`'s own embedding and,
+ * from that SAME read, computes every requested candidate's cosine
+ * similarity against it — one batched pgvector `<=>` query, never one
+ * query per candidate. Returns `null` when the task has no embedding
+ * (`matchTask`'s signal to fall back to "v0.1").
+ *
+ * Fused into one function on purpose (Codex review round 1, P2): an
+ * earlier version checked "does a task_embeddings row exist" via one
+ * query, then computed similarities via a SECOND, independent query that
+ * re-referenced `task_embeddings` by `task_id` again. If `embed-on-save.
+ * ts`'s regenerate-then-delete cycle (T-1302's round-2 fix: an update
+ * deletes the task's existing embedding before attempting to regenerate
+ * it) raced between those two queries, the second one would silently
+ * return zero rows/an empty map instead of signaling "the embedding is
+ * gone now" — the caller would then select "v0.2" and default every
+ * candidate's similarity to 0, silently defeating F-1305's OR-branch for
+ * that request instead of correctly falling back to "v0.1". Reading the
+ * task's embedding ONCE as a real vector value and reusing that value
+ * directly in the similarity query closes the gap: the "does it exist"
+ * answer and the "compute with" value come from the exact same read, so
+ * they can never disagree with each other.
+ *
+ * Agents without their OWN `agent_embeddings` row simply have no entry in
+ * the returned map (the caller treats that as similarity 0 — "doesn't
+ * clear the OR-branch threshold," not an error and not a reason to drop
+ * that candidate, which can still qualify via exact category match).
+ */
+export async function getTaskSimilarityByAgentId(
+  client: Queryable,
+  taskId: string,
+  agentIds: string[],
+): Promise<Map<string, number> | null> {
+  const { rows: taskRows } = await client.query<{ embedding: string }>(
+    `SELECT embedding::text AS embedding FROM task_embeddings WHERE task_id = $1`,
+    [taskId],
+  );
+  const taskEmbedding = taskRows[0]?.embedding;
+  if (taskEmbedding === undefined) {
+    return null;
+  }
+
+  const result = new Map<string, number>();
+  if (agentIds.length === 0) {
+    return result;
+  }
+  const { rows } = await client.query<{ agent_id: string; similarity: number }>(
+    `SELECT agent_id, 1 - (embedding <=> $1::vector) AS similarity
+     FROM agent_embeddings
+     WHERE agent_id = ANY($2)`,
+    [taskEmbedding, agentIds],
+  );
+  for (const row of rows) {
+    result.set(row.agent_id, row.similarity);
+  }
+  return result;
+}
+
 /** One recommended slot, as returned by the Go dispatch service and about
- * to be persisted. */
+ * to be persisted. `semanticSimilarity`/`reputationSignals` (Feature 13,
+ * T-1307/F-1313) are `undefined` for a "v0.1" run — the columns they map
+ * to (`recommendation_candidates.semantic_similarity`/`.reputation_signals`,
+ * T-1300's migration) stay `NULL`, matching the migration's own
+ * nullable-by-default design for exactly this case. `reputationSignals`
+ * is the full `ReputationSignalsDigest` (value + sampleSize per signal),
+ * not the flat wire shape sent to Go — this is the "输入特征摘要" AC-1307
+ * requires be persisted for later replay, a strictly richer record than
+ * what the match request itself carried. */
 export interface RecommendationCandidateInput {
   agentId: string;
   rank: number;
   slotType: string;
   score: number;
   reasons: string[];
+  semanticSimilarity?: number;
+  reputationSignals?: ReputationSignalsDigest;
 }
 
 export interface InsertRecommendationRunInput {
@@ -565,24 +658,55 @@ export interface LatestRecommendationCandidate {
 }
 
 /**
- * Reads back the most recent `recommendation_run`'s candidates for
- * `taskId`, ordered by rank ascending (T-706 capsule: "查询最新一次
- * recommendation_run 的候选列表"). Both T-706 routes need exactly this — "the
- * latest run's full candidate list" — so it's the one query both call
- * rather than each assembling its own join.
+ * `getLatestRecommendationCandidates`'s return shape (Feature 13, T-1303
+ * widened this from a bare array). `algorithmVersion` is the run's own
+ * PERSISTED value — never recomputed fresh — because a caller reading this
+ * back (`matchTask`'s two early-return paths, routes.ts) must report
+ * whatever algorithm that EXISTING run actually used, which can disagree
+ * with what a fresh decision would produce right now (e.g. the task's
+ * embedding was generated or deleted after that run was created).
+ */
+export interface LatestRecommendationRunCandidates {
+  /** `null` only when no run exists yet for this task (F-709's legitimate
+   * "never matched" state) — distinct from a real run that recommended
+   * zero candidates, where this is still that run's true algorithm_version
+   * and `candidates` is simply `[]`. */
+  algorithmVersion: string | null;
+  candidates: LatestRecommendationCandidate[];
+}
+
+/**
+ * Reads back the most recent `recommendation_run`'s algorithm version and
+ * candidates for `taskId`, candidates ordered by rank ascending (T-706
+ * capsule: "查询最新一次 recommendation_run 的候选列表"). Both T-706 routes
+ * need exactly this — "the latest run's full candidate list" — so it's the
+ * one query both call rather than each assembling its own join.
  *
- * Returns `[]` when no run exists yet for this task (nobody has called
- * `POST /tasks/:taskId/match`) — a legitimate state (F-709), not an error;
- * callers decide what that means for their own response (200 empty array
- * for GET /recommendations, 400 for POST /acceptance-permits).
+ * Returns `{ algorithmVersion: null, candidates: [] }` when no run exists
+ * yet for this task (nobody has called `POST /tasks/:taskId/match`) — a
+ * legitimate state (F-709), not an error; callers decide what that means
+ * for their own response (200 empty array for GET /recommendations, 400
+ * for POST /acceptance-permits).
  *
- * The subquery scopes directly to `run_id = (... ORDER BY requested_at DESC,
- * sequence_no DESC LIMIT 1)` rather than a `MAX(requested_at)` aggregate —
- * one round trip. `sequence_no` (a `BIGSERIAL`) is the deterministic
- * tiebreaker: `requested_at` alone can tie when two `POST /match` calls for
- * the same task land in the same DB-clock instant, which would otherwise
- * make "the latest run" pick either row nondeterministically (Codex review,
- * T-706 round 1, P2).
+ * Resolves the latest run's id ONCE (via `getLatestRecommendationRunId`)
+ * and scopes both the `algorithm_version` lookup and the candidates query
+ * to that exact, fixed `run_id` (Codex review round 1, P2: an earlier
+ * version re-evaluated "the latest run for taskId" independently in TWO
+ * separate queries — if a concurrent `POST /match` committed a newer run
+ * in the gap between them, `algorithmVersion` could come back from the
+ * OLDER run while `candidates` came from the NEWER one, reporting a
+ * version/count pair that never actually coexisted). A `recommendation_
+ * runs`/`recommendation_candidates` row is never updated after insert
+ * (same immutability this file's other doc comments already establish),
+ * so once a concrete `run_id` is pinned down, both follow-up reads are
+ * safe from any further concurrent write — there is no remaining window
+ * for them to disagree.
+ *
+ * `sequence_no` (a `BIGSERIAL`) is `getLatestRecommendationRunId`'s own
+ * deterministic tiebreaker: `requested_at` alone can tie when two
+ * `POST /match` calls for the same task land in the same DB-clock instant,
+ * which would otherwise make "the latest run" pick either row
+ * nondeterministically (Codex review, T-706 round 1, P2).
  *
  * `rc.score` is `NUMERIC` in Postgres, which `pg` returns as a string (no
  * custom type parser is registered in this codebase) — explicitly
@@ -592,7 +716,18 @@ export interface LatestRecommendationCandidate {
 export async function getLatestRecommendationCandidates(
   client: Queryable,
   taskId: string,
-): Promise<LatestRecommendationCandidate[]> {
+): Promise<LatestRecommendationRunCandidates> {
+  const runId = await getLatestRecommendationRunId(client, taskId);
+  if (runId === null) {
+    return { algorithmVersion: null, candidates: [] };
+  }
+
+  const { rows: runRows } = await client.query<{ algorithm_version: string }>(
+    `SELECT algorithm_version FROM recommendation_runs WHERE id = $1`,
+    [runId],
+  );
+  const algorithmVersion = runRows[0]?.algorithm_version ?? null;
+
   const { rows } = await client.query<{
     agent_id: string;
     owner_address: string;
@@ -604,24 +739,22 @@ export async function getLatestRecommendationCandidates(
     `SELECT rc.agent_id, a.owner_address, rc.rank, rc.slot_type, rc.score, rc.reasons
      FROM recommendation_candidates rc
      JOIN agents a ON a.id = rc.agent_id
-     WHERE rc.run_id = (
-       SELECT id FROM recommendation_runs
-       WHERE task_id = $1
-       ORDER BY requested_at DESC, sequence_no DESC
-       LIMIT 1
-     )
+     WHERE rc.run_id = $1
      ORDER BY rc.rank ASC`,
-    [taskId],
+    [runId],
   );
 
-  return rows.map((row) => ({
-    agentId: row.agent_id,
-    agentWalletAddress: row.owner_address,
-    rank: row.rank,
-    slotType: row.slot_type,
-    score: Number(row.score),
-    reasons: row.reasons,
-  }));
+  return {
+    algorithmVersion,
+    candidates: rows.map((row) => ({
+      agentId: row.agent_id,
+      agentWalletAddress: row.owner_address,
+      rank: row.rank,
+      slotType: row.slot_type,
+      score: Number(row.score),
+      reasons: row.reasons,
+    })),
+  };
 }
 
 /**
@@ -677,8 +810,9 @@ async function insertRecommendationCandidate(
   candidate: RecommendationCandidateInput,
 ): Promise<void> {
   await client.query(
-    `INSERT INTO recommendation_candidates (run_id, agent_id, rank, slot_type, score, reasons)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
+    `INSERT INTO recommendation_candidates
+       (run_id, agent_id, rank, slot_type, score, reasons, semantic_similarity, reputation_signals)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       runId,
       candidate.agentId,
@@ -686,6 +820,8 @@ async function insertRecommendationCandidate(
       candidate.slotType,
       candidate.score,
       JSON.stringify(candidate.reasons),
+      candidate.semanticSimilarity ?? null,
+      candidate.reputationSignals ? JSON.stringify(candidate.reputationSignals) : null,
     ],
   );
 }

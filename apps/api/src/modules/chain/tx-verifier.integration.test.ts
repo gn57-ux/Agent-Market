@@ -26,8 +26,8 @@ const CHAIN_ID = 31337;
 async function insertTask(pool: Pool): Promise<string> {
   const { rows } = await pool.query<{ id: string }>(
     `INSERT INTO tasks
-       (requester_address, category, title, description, budget, token, delivery_deadline, status)
-     VALUES ($1, 'writing', 'Test Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'AWAITING_FUNDING')
+       (requester_address, category, title, description, budget, token, delivery_deadline, status, expert_type)
+     VALUES ($1, 'writing', 'Test Task', 'desc', '1000', $2, '2030-01-01T00:00:00Z', 'AWAITING_FUNDING', 'AUTOMATION')
      RETURNING id`,
     [REQUESTER_ADDRESS, TOKEN_ADDRESS],
   );
@@ -59,7 +59,7 @@ runIfOptedIn("checkTransactionNotUsed (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE",
     );
     await pool.end();
   });
