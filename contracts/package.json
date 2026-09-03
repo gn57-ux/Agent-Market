@@ -5,6 +5,8 @@
   "type": "commonjs",
   "scripts": {
     "compile": "hardhat compile",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy-local.ts --network localhost",
     "test": "hardhat test"
   },
   "devDependencies": {

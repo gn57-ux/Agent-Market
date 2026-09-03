@@ -20,6 +20,8 @@ import { registerDispatchRoutes } from "./modules/dispatch/routes.js";
 import { registerFundsRoutes } from "./modules/funds/routes.js";
 import { registerRatingsRoutes } from "./modules/ratings/routes.js";
 import { registerTasksRoutes } from "./modules/tasks/routes.js";
+import { registerOfficeRoutes } from "./modules/office/routes.js";
+import type { OfficeFundsReader } from "./modules/office/funds-reader.js";
 
 export interface BuildAppOptions {
   /** Test seam: pass a Pool bound to a throwaway test database instead of
@@ -32,6 +34,7 @@ export interface BuildAppOptions {
    * only reasoning about it. Production callers omit this and get the
    * default `true`. */
   logger?: FastifyServerOptions["logger"];
+  officeFundsReader?: OfficeFundsReader;
   /** F-1601 (Feature 16, T-1600) composition-root seam: which
    * `IdentityProvider` implementation `/auth/verify` verifies logins
    * against. Production callers omit this and get
@@ -155,6 +158,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // uses `app.requireSession` as a preHandler (T-1003).
   void app.register(async (instance) => {
     registerRatingsRoutes(instance, pool);
+  });
+
+  void app.register(async (instance) => {
+    registerOfficeRoutes(instance, pool, options.officeFundsReader);
   });
 
   // Same reasoning as the registrations above: POST /admin/roles and

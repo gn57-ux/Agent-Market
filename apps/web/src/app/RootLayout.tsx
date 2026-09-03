@@ -94,6 +94,14 @@ export function RootLayout() {
             <Link to="/" className={linkClasses}>
               首页
             </Link>
+            <NavLink
+              to="/office"
+              className={({ isActive }) =>
+                isActive ? `${linkClasses} ${activeLinkClasses}` : linkClasses
+              }
+            >
+              虚拟工作室
+            </NavLink>
           </>
         }
         walletControls={

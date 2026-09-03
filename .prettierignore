@@ -5,6 +5,22 @@ contracts/cache
 contracts/artifacts
 contracts/typechain-types
 
+# Pre-built Cocos Creator runtime bundle (Feature 15) — build output, not
+# authored source. Same reasoning as contracts/artifacts above.
+apps/web/public/office-cocos/
+
+# Cocos Creator editor-generated directories under apps/office-cocos/ —
+# library/temp/local/build/profiles all mirror apps/office-cocos/.gitignore
+# exactly; none of these are authored, all regenerate on open/build.
+apps/office-cocos/library/
+apps/office-cocos/temp/
+apps/office-cocos/local/
+apps/office-cocos/build/
+apps/office-cocos/profiles/
+
+# Playwright's own test-run output.
+test-results/
+
 # Non-code content: not part of the build/lint quality gate
 docs/
 specs/

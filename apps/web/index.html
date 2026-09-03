@@ -39,10 +39,18 @@
         every other apps/web-to-apps/api call project-wide, Privy-unrelated
         entirely — caught only because the probe watched real console
         errors instead of just checking the page rendered.
+
+      Feature 15/16 merge fix (2026-09-03): `frame-src`/`child-src` also need
+      `'self'` — OfficePage.tsx embeds `/office-cocos/index.html` as a
+      same-origin iframe (Feature 15, predates this CSP), and without
+      `'self'` here the browser silently blocks that embed too (caught the
+      same way as the two fixes above: a real headless run showed the office
+      iframe resolving to `chrome-error://chromewebdata/` with a CSP
+      violation in the console, not by re-reading the policy text).
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; worker-src 'self'; manifest-src 'self'; child-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; frame-src https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; connect-src 'self' http://localhost:3001 %VITE_API_BASE_URL% https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; worker-src 'self'; manifest-src 'self'; child-src 'self' https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; frame-src 'self' https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; connect-src 'self' http://localhost:3001 %VITE_API_BASE_URL% https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com"
     />
     <title>Agent Market</title>
   </head>
