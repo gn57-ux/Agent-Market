@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import type { AgentMutationResult } from "./service.js";
 import type { AgentRow } from "./repository.js";
 import {
+  changeAgentPricingType,
   createAgent,
   getAgentDetail,
   listAgentsForMarket,
@@ -10,14 +11,17 @@ import {
   testAgentInvocation,
   updateAgent,
 } from "./service.js";
+import { appealAgentReview, submitAgentForReview } from "./review.js";
 import {
   agentIdParamSchema,
+  changeAgentPricingTypeSchema,
   createAgentSchema,
   invocationTestSchema,
   listAgentsQuerySchema,
   updateAgentSchema,
 } from "./schema.js";
 import { formatZodError } from "../../shared/zod-error.js";
+import { isAdminAddress } from "../admin/repository.js";
 import { normalizeAddress } from "../auth/nonce.store.js";
 import { verifySession } from "../auth/session.service.js";
 import { SESSION_COOKIE_NAME } from "../auth/session.middleware.js";
@@ -57,6 +61,8 @@ function toAgentSummaryJson(agent: AgentRow, viewerIsOwner: boolean) {
     // configured".
     credentialRef: viewerIsOwner ? agent.credentialRef : undefined,
     status: agent.status,
+    reviewStatus: agent.reviewStatus,
+    pricingType: agent.pricingType,
     completedTaskCount: agent.completedTaskCount,
     successCount: agent.successCount,
     overdueCount: agent.overdueCount,
@@ -170,6 +176,8 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
     return reply.status(201).send({
       agentId: result.agent.id,
       status: result.agent.status,
+      reviewStatus: result.agent.reviewStatus,
+      pricingType: result.agent.pricingType,
       createdAt: result.agent.createdAt.toISOString(),
       completedTaskCount: result.agent.completedTaskCount,
       qualityScore: result.agent.qualityScore,
@@ -201,11 +209,22 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
       return reply.status(400).send({ error: { message: formatZodError(parsed.error) } });
     }
 
-    const agent = await getAgentDetail(pool, parsed.data.agentId);
+    const viewerAddress = await getOptionalSessionAddress(request, pool);
+    // Codex review (T-1605 round 1 P1): must resolve BEFORE fetching the
+    // Agent — getAgentDetail's visibility rule (only the owner or an admin
+    // may see a non-ACTIVE reviewStatus Agent) needs both facts about the
+    // viewer up front, not just their address.
+    const viewerIsAdmin =
+      viewerAddress !== undefined
+        ? await isAdminAddress(pool, normalizeAddress(viewerAddress))
+        : false;
+    const agent = await getAgentDetail(pool, parsed.data.agentId, {
+      address: viewerAddress,
+      isAdmin: viewerIsAdmin,
+    });
     if (!agent) {
       return reply.status(404).send({ error: { message: "未找到该 Agent。" } });
     }
-    const viewerAddress = await getOptionalSessionAddress(request, pool);
     const viewerIsOwner =
       viewerAddress !== undefined && agent.ownerAddress === normalizeAddress(viewerAddress);
     return reply.send(toAgentSummaryJson(agent, viewerIsOwner));
@@ -279,6 +298,111 @@ export function registerAgentsRoutes(app: FastifyInstance, pool: Pool): void {
           ? { ok: true, statusCode: result.result.statusCode }
           : { ok: false, reason: result.result.reason, message: result.result.message },
       );
+    },
+  );
+
+  // F-1604 (design.md 决策 5, T-1604): a dedicated action route, not a
+  // field on the general PATCH — see schema.ts's
+  // changeAgentPricingTypeSchema doc comment for why this can't be a
+  // silent side effect of an unrelated PATCH request.
+  app.post(
+    "/agents/:agentId/pricing-type",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = agentIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
+      }
+      const bodyParsed = changeAgentPricingTypeSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const result = await changeAgentPricingType(
+        pool,
+        sessionAddress,
+        paramsParsed.data.agentId,
+        bodyParsed.data,
+      );
+      if (!result.ok) {
+        return sendMutationFailure(reply, result);
+      }
+      // Always the Agent's own owner here — changeAgentPricingType already
+      // enforced ownership above.
+      return reply.send(toAgentSummaryJson(result.agent, true));
+    },
+  );
+
+  // F-1605 (T-1605, design.md 决策 3): DRAFT → PENDING_REVIEW, owner-only.
+  app.post(
+    "/agents/:agentId/submit-review",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = agentIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const result = await submitAgentForReview(pool, sessionAddress, paramsParsed.data.agentId);
+      if (!result.ok) {
+        if (result.reason === "not_found") {
+          return reply.status(404).send({ error: { message: "未找到该 Agent。" } });
+        }
+        if (result.reason === "forbidden") {
+          return reply
+            .status(403)
+            .send({ error: { message: "只有 Agent 归属地址可以执行此操作。" } });
+        }
+        return reply.status(409).send({
+          error: { message: "该 Agent 当前状态不允许提交审核。" },
+        });
+      }
+      // Always the Agent's own owner here — submitAgentForReview already
+      // enforced ownership above.
+      return reply.send(toAgentSummaryJson(result.agent, true));
+    },
+  );
+
+  // F-1606 (T-1606, design.md 决策 3): REJECTED|SUSPENDED → PENDING_REVIEW,
+  // owner-only.
+  app.post(
+    "/agents/:agentId/appeal",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = agentIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      const result = await appealAgentReview(pool, sessionAddress, paramsParsed.data.agentId);
+      if (!result.ok) {
+        if (result.reason === "not_found") {
+          return reply.status(404).send({ error: { message: "未找到该 Agent。" } });
+        }
+        if (result.reason === "forbidden") {
+          return reply
+            .status(403)
+            .send({ error: { message: "只有 Agent 归属地址可以执行此操作。" } });
+        }
+        return reply.status(409).send({
+          error: { message: "该 Agent 当前状态不允许申诉。" },
+        });
+      }
+      // Always the Agent's own owner here — appealAgentReview already
+      // enforced ownership above.
+      return reply.send(toAgentSummaryJson(result.agent, true));
     },
   );
 

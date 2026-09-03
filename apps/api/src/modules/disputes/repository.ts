@@ -135,6 +135,23 @@ export async function getOpenDisputeForTask(
   return row ? toDisputeRow(row) : null;
 }
 
+/** F-1609 (T-1608b): every currently-`OPEN` dispute across the whole
+ * platform, newest first — the admin Dashboard's "争议事项列表". A single
+ * shared implementation (this function) rather than a duplicate query
+ * inside admin/dashboard.ts (CLAUDE.md 原则 6: 复用既有 disputes 模块，不重复
+ * 实现 — this Feature's own T-1608b task description). `limit` bounds the
+ * result the same way every other listing in this codebase does (never an
+ * unbounded `SELECT *`); the Dashboard is a summary view, not a paginated
+ * disputes browser (no `GET /tasks/:taskId/disputes`-style detail is lost —
+ * a full dispute already links back to its own task). */
+export async function listOpenDisputes(pool: Queryable, limit: number): Promise<DisputeRow[]> {
+  const { rows } = await pool.query<DisputeQueryRow>(
+    `SELECT ${DISPUTE_COLUMNS} FROM disputes WHERE status = 'OPEN' ORDER BY created_at DESC LIMIT $1`,
+    [limit],
+  );
+  return rows.map(toDisputeRow);
+}
+
 /**
  * Resolves the task's currently-`OPEN` dispute — called from inside
  * `verifyDisputeResolution`'s (tasks/service.ts) `transitionTaskStatus`

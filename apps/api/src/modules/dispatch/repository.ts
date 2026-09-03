@@ -65,6 +65,20 @@ interface CandidateAgentRow {
  * T-705 capsule's reasoning for why this is the one narrow exception to
  * "eligibility logic lives only in Go."
  *
+ * `AND review_status = 'ACTIVE'` (Codex review, T-1605 round 1 P1): `status`
+ * (this Agent's own on/off market toggle) and `review_status` (Feature 16's
+ * platform review lifecycle) are orthogonal columns (design.md 决策 3) — a
+ * paid Agent awaiting review, rejected, or suspended by an admin still has
+ * `status = 'ACTIVE'` (nothing in T-1604/T-1605 ever touches that column),
+ * so without this second condition it would still be assembled as a
+ * dispatch candidate and could be matched to real tasks, completely
+ * bypassing the review gate this Feature exists to enforce. Go's
+ * `eligibility.Filter` has no independent `review_status` check of its own
+ * (unlike `status`, which it deliberately re-checks per this function's own
+ * doc comment above) — this query is the ONLY place that enforces it, so it
+ * cannot be treated as merely a read optimization the way the `status`
+ * filter is.
+ *
  * Deliberately does NOT filter by `taskCategory` — category-compatibility
  * matching is eligibility's job alone (T-701 already fixed this as an exact
  * match rule); this function only fetches raw data and hands it over.
@@ -83,7 +97,7 @@ export async function assembleCandidateSnapshots(
     `SELECT id, owner_address, status, category, level, max_concurrent_tasks,
             completed_task_count, success_count, overdue_count, quality_score, created_at
      FROM agents
-     WHERE status = 'ACTIVE'`,
+     WHERE status = 'ACTIVE' AND review_status = 'ACTIVE'`,
   );
 
   if (agentRows.length === 0) {

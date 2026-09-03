@@ -1,6 +1,13 @@
 import { apiFetch } from "../../shared/api/client.js";
 
 export type AgentStatus = "ACTIVE" | "INACTIVE";
+/** F-1605/F-1607 (Feature 16) — mirrors apps/api's `AgentReviewStatus`
+ * exactly. Orthogonal to `AgentStatus` above (design.md 决策 3). */
+export type AgentReviewStatus = "DRAFT" | "PENDING_REVIEW" | "ACTIVE" | "REJECTED" | "SUSPENDED";
+/** F-1604 (Feature 16) — mirrors apps/api's `AgentPricingType` exactly.
+ * The field that alone decides review routing at creation time (never
+ * `referencePrice`'s presence — design.md 决策 5). */
+export type AgentPricingType = "FREE" | "PER_TASK" | "SUBSCRIPTION" | "HOURLY";
 
 /** Mirrors apps/api's routes.ts `toAgentSummaryJson` — the one response
  * shape shared by POST/GET list/GET detail/PATCH/activate/deactivate. */
@@ -20,6 +27,8 @@ export interface Agent {
    * precision-preserving choice (routes.ts's doc comment). */
   referencePrice: string | null;
   status: AgentStatus;
+  reviewStatus: AgentReviewStatus;
+  pricingType: AgentPricingType;
   completedTaskCount: number;
   successCount: number;
   overdueCount: number;
@@ -52,6 +61,11 @@ export interface CreateAgentInput {
   invocationUrl?: string;
   payoutAddress: string;
   pricingModel?: string;
+  /** F-1604 (Feature 16, N4 real finding, T-1604): REQUIRED — apps/api's
+   * `createAgentSchema` now rejects a request without this field. Every
+   * new Agent must explicitly declare its pricing mode; there is no
+   * default a client is allowed to silently omit (design.md 决策 5). */
+  pricingType: AgentPricingType;
   /** Decimal text, never a JS `number` — see `Agent.referencePrice`'s doc
    * comment. AgentForm.tsx never parses this through `Number()`. */
   referencePrice?: string;
@@ -127,7 +141,16 @@ export function getAgent(agentId: string): Promise<Agent> {
 export function createAgent(
   input: CreateAgentInput,
 ): Promise<
-  Pick<Agent, "agentId" | "status" | "createdAt" | "completedTaskCount" | "qualityScore">
+  Pick<
+    Agent,
+    | "agentId"
+    | "status"
+    | "reviewStatus"
+    | "pricingType"
+    | "createdAt"
+    | "completedTaskCount"
+    | "qualityScore"
+  >
 > {
   return apiFetch("/agents", { method: "POST", body: JSON.stringify(input) });
 }

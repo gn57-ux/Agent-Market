@@ -3,12 +3,21 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import type { Pool } from "pg";
 import { getPool } from "./db/pool.js";
+import { registerAdminDashboardRoutes } from "./modules/admin/dashboard-routes.js";
+import { registerAdminMiddleware } from "./modules/admin/middleware.js";
+import { registerAdminRoutes } from "./modules/admin/routes.js";
+import { registerAdminAgentReviewRoutes } from "./modules/agents/admin-review-routes.js";
 import { registerAgentsRoutes } from "./modules/agents/routes.js";
+import type { IdentityProvider } from "./modules/auth/identity-provider.js";
+import { createPrivyIdentityProvider } from "./modules/auth/privy-identity-provider.js";
+import { registerPrivyAuthRoutes } from "./modules/auth/privy-routes.js";
 import { registerAuthRoutes } from "./modules/auth/routes.js";
 import { registerSessionMiddleware } from "./modules/auth/session.middleware.js";
+import { createSiweIdentityProvider } from "./modules/auth/siwe-identity-provider.js";
 import { registerDeliverablesRoutes } from "./modules/deliverables/routes.js";
 import { registerDisputesRoutes } from "./modules/disputes/routes.js";
 import { registerDispatchRoutes } from "./modules/dispatch/routes.js";
+import { registerFundsRoutes } from "./modules/funds/routes.js";
 import { registerRatingsRoutes } from "./modules/ratings/routes.js";
 import { registerTasksRoutes } from "./modules/tasks/routes.js";
 import { registerOfficeRoutes } from "./modules/office/routes.js";
@@ -26,6 +35,27 @@ export interface BuildAppOptions {
    * default `true`. */
   logger?: FastifyServerOptions["logger"];
   officeFundsReader?: OfficeFundsReader;
+  /** F-1601 (Feature 16, T-1600) composition-root seam: which
+   * `IdentityProvider` implementation `/auth/verify` verifies logins
+   * against. Production callers omit this and get
+   * `createSiweIdentityProvider()` (today's only real implementation);
+   * F-1603's rollback capability is exactly "pass a different
+   * implementation here," and tests can inject a fake to exercise
+   * `completeLogin`'s own transaction-atomicity logic without a real
+   * signature. */
+  identityProvider?: IdentityProvider;
+  /** F-1601 (Feature 16, T-1601) composition-root seam: which
+   * `IdentityProvider` implementation `/auth/verify/privy` verifies
+   * logins against. Production callers omit this and get
+   * `createPrivyIdentityProvider()`, which itself returns `undefined`
+   * when `PRIVY_APP_ID`/`PRIVY_APP_SECRET` aren't set — in that case this
+   * route simply isn't registered (decision 4: missing Privy credentials
+   * must degrade gracefully, not crash startup or block the still
+   * fully-independent SIWE path). Separate from `identityProvider` above
+   * (SIWE stays the default for `/auth/verify`; the two providers/routes
+   * coexist, this is not a single either/or switch) — see design decision
+   * 5. */
+  privyIdentityProvider?: IdentityProvider;
 }
 
 /** The frontend origin allowed to call this API with credentials
@@ -49,6 +79,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   void app.register(cors, { origin: webOrigin(), credentials: true });
   void app.register(cookie);
   void app.register(registerSessionMiddleware, { pool });
+  // F-1606 (T-1607): registered right after session middleware — like
+  // `app.requireSession`, `app.requireAdmin` must exist before any route
+  // below references it as a `preHandler` (same ordering reasoning as
+  // registerSessionMiddleware's own comment on the line above).
+  void app.register(registerAdminMiddleware, { pool });
 
   app.get("/health", async () => {
     return { status: "ok" };
@@ -64,8 +99,26 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // at the point this function runs synchronously, silently registering an
   // unprotected route.
   void app.register(async (instance) => {
-    registerAuthRoutes(instance, pool);
+    registerAuthRoutes(instance, pool, options.identityProvider ?? createSiweIdentityProvider());
   });
+
+  // F-1601 (T-1601): registers POST /auth/verify/privy alongside (not
+  // instead of) the SIWE routes above — decision 5, both providers must be
+  // simultaneously available, not a single default swapped out. Skipped
+  // entirely (not a startup failure) when no Privy provider was injected
+  // and none can be constructed from env (missing PRIVY_APP_ID/
+  // PRIVY_APP_SECRET) — decision 4's graceful-degradation requirement.
+  const privyProvider = options.privyIdentityProvider ?? createPrivyIdentityProvider();
+  if (privyProvider) {
+    void app.register(async (instance) => {
+      registerPrivyAuthRoutes(instance, pool, privyProvider);
+    });
+  } else {
+    app.log.info(
+      "Privy identity provider not configured (PRIVY_APP_ID/PRIVY_APP_SECRET unset) — " +
+        "/auth/verify/privy not registered; SIWE login remains available.",
+    );
+  }
 
   // Same reasoning as the auth registration above: POST /agents uses
   // `app.requireSession` as a preHandler, and that decorator is only
@@ -109,6 +162,34 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   void app.register(async (instance) => {
     registerOfficeRoutes(instance, pool, options.officeFundsReader);
+  });
+
+  // Same reasoning as the registrations above: POST /admin/roles and
+  // DELETE /admin/roles/:address use `app.requireAdmin` (itself only
+  // guaranteed to exist once registerAdminMiddleware's own registration
+  // above has finished — see admin/middleware.ts's doc comment) (T-1607).
+  void app.register(async (instance) => {
+    registerAdminRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: GET /admin/agents/review-queue
+  // and POST /admin/agents/:agentId/{approve,reject,suspend} use
+  // `app.requireAdmin` as a preHandler (T-1605).
+  void app.register(async (instance) => {
+    registerAdminAgentReviewRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: GET /funds/requester/...
+  // and GET /funds/agent/... use `app.requireSession`, GET /funds/platform
+  // uses `app.requireAdmin` (T-1608).
+  void app.register(async (instance) => {
+    registerFundsRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: GET /admin/dashboard uses
+  // `app.requireAdmin` (T-1608b).
+  void app.register(async (instance) => {
+    registerAdminDashboardRoutes(instance, pool);
   });
 
   return app;

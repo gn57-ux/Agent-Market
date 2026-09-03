@@ -100,6 +100,8 @@ describe("AgentCreatePage", () => {
     vi.spyOn(agentsApi, "createAgent").mockResolvedValue({
       agentId: "agent-123",
       status: "ACTIVE",
+      reviewStatus: "ACTIVE",
+      pricingType: "FREE",
       createdAt: "2026-01-01T00:00:00.000Z",
       completedTaskCount: 0,
       qualityScore: null,
@@ -113,6 +115,7 @@ describe("AgentCreatePage", () => {
     fireEvent.change(screen.getByLabelText("收款地址"), {
       target: { value: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3" },
     });
+    fireEvent.change(screen.getByLabelText("计费类型"), { target: { value: "FREE" } });
     fireEvent.click(screen.getByRole("button", { name: "发布" }));
 
     await waitFor(() => expect(screen.getByTestId("navigated-detail")).toBeTruthy());
@@ -141,6 +144,8 @@ describe("AgentCreatePage", () => {
     vi.spyOn(agentsApi, "createAgent").mockResolvedValue({
       agentId: "agent-123",
       status: "ACTIVE",
+      reviewStatus: "ACTIVE",
+      pricingType: "FREE",
       createdAt: "2026-01-01T00:00:00.000Z",
       completedTaskCount: 0,
       qualityScore: null,
@@ -157,6 +162,7 @@ describe("AgentCreatePage", () => {
     fireEvent.change(screen.getByLabelText("收款地址"), {
       target: { value: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3" },
     });
+    fireEvent.change(screen.getByLabelText("计费类型"), { target: { value: "FREE" } });
     fireEvent.click(screen.getByRole("button", { name: "发布" }));
 
     await waitFor(() => expect(screen.getByTestId("navigated-detail")).toBeTruthy());
@@ -169,6 +175,8 @@ describe("AgentCreatePage", () => {
     vi.spyOn(agentsApi, "createAgent").mockResolvedValue({
       agentId: "agent-123",
       status: "ACTIVE",
+      reviewStatus: "ACTIVE",
+      pricingType: "FREE",
       createdAt: "2026-01-01T00:00:00.000Z",
       completedTaskCount: 0,
       qualityScore: null,
@@ -183,6 +191,7 @@ describe("AgentCreatePage", () => {
       target: { value: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3" },
     });
     fireEvent.click(screen.getByLabelText("启用调用凭据引用"));
+    fireEvent.change(screen.getByLabelText("计费类型"), { target: { value: "FREE" } });
     fireEvent.click(screen.getByRole("button", { name: "发布" }));
 
     await waitFor(() => expect(screen.getByTestId("navigated-detail")).toBeTruthy());
@@ -202,6 +211,7 @@ describe("AgentCreatePage", () => {
     fireEvent.change(screen.getByLabelText("收款地址"), {
       target: { value: "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3" },
     });
+    fireEvent.change(screen.getByLabelText("计费类型"), { target: { value: "FREE" } });
     fireEvent.click(screen.getByRole("button", { name: "发布" }));
 
     expect(await screen.findByText("创建失败，请重试。")).toBeTruthy();

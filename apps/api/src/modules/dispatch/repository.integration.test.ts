@@ -54,7 +54,7 @@ const migrationsDir = path.resolve(
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
   "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, " +
-  "sessions, auth_nonces, users, schema_migrations CASCADE";
+  "sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE";
 
 const OWNER_ADDRESS = "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3";
 const BANNED_OWNER_ADDRESS = "0x5583fefc63f0cd0e873a0000c6d07ef7b77e90d4";
@@ -68,18 +68,24 @@ async function insertAgent(
     status: string;
     category: string;
     level: string;
+    /** T-1605 round-1 P1 fix's own test seam: `status` and `review_status`
+     * are orthogonal columns (design.md 决策 3) — defaults to `ACTIVE` so
+     * every existing call site (all written before Feature 16) keeps
+     * inserting a candidate-eligible row exactly as before. */
+    reviewStatus: string;
   }> = {},
 ): Promise<string> {
   const ownerAddress = overrides.ownerAddress ?? OWNER_ADDRESS;
   const { rows } = await pool.query<{ id: string }>(
-    `INSERT INTO agents (owner_address, name, description, category, payout_address, status, level)
-     VALUES ($1, 'Agent', 'desc', $2, $1, $3, $4)
+    `INSERT INTO agents (owner_address, name, description, category, payout_address, status, level, review_status)
+     VALUES ($1, 'Agent', 'desc', $2, $1, $3, $4, $5)
      RETURNING id`,
     [
       ownerAddress,
       overrides.category ?? "writing",
       overrides.status ?? "ACTIVE",
       overrides.level ?? "BEGINNER",
+      overrides.reviewStatus ?? "ACTIVE",
     ],
   );
   const id = rows[0]?.id;
@@ -162,6 +168,28 @@ runIfOptedIn(
       expect(banned?.activeTaskCount).toBe(0);
       expect(banned?.skillTags).toEqual([]);
     });
+
+    it(
+      "excludes an Agent whose status is ACTIVE but review_status is not " +
+        "(PENDING_REVIEW/REJECTED/SUSPENDED) — Codex review, T-1605 round 1 P1: " +
+        "these two columns are orthogonal, and a paid Agent awaiting/denied review " +
+        "keeps status='ACTIVE' the whole time, so without this check it would still " +
+        "be assembled as a dispatch candidate and bypass the review gate entirely",
+      async () => {
+        const activeAgentId = await insertAgent(pool, { reviewStatus: "ACTIVE" });
+        const pendingAgentId = await insertAgent(pool, { reviewStatus: "PENDING_REVIEW" });
+        const rejectedAgentId = await insertAgent(pool, { reviewStatus: "REJECTED" });
+        const suspendedAgentId = await insertAgent(pool, { reviewStatus: "SUSPENDED" });
+
+        const snapshots = await assembleCandidateSnapshots(pool, "writing");
+        const candidateIds = snapshots.map((s) => s.agentId);
+
+        expect(candidateIds).toEqual([activeAgentId]);
+        expect(candidateIds).not.toContain(pendingAgentId);
+        expect(candidateIds).not.toContain(rejectedAgentId);
+        expect(candidateIds).not.toContain(suspendedAgentId);
+      },
+    );
 
     it("returns an empty array when there are no ACTIVE agents", async () => {
       await insertAgent(pool, { status: "INACTIVE" });

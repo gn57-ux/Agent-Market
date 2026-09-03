@@ -1,5 +1,19 @@
 import { useState, type FormEvent } from "react";
-import type { CreateAgentInput, UpdateAgentInput } from "./api.js";
+import type { AgentPricingType, CreateAgentInput, UpdateAgentInput } from "./api.js";
+
+const PRICING_TYPES: readonly AgentPricingType[] = ["FREE", "PER_TASK", "SUBSCRIPTION", "HOURLY"];
+
+/** A real runtime type guard for the `<select>`'s `onChange` below —
+ * `event.target.value` is always typed as plain `string` by the DOM API,
+ * so narrowing it to `AgentPricingType` needs an actual check, not an
+ * assertion (this project's own rule against careless `as` casts). The
+ * check is genuinely meaningful here (not just satisfying the linter):
+ * this form only ever renders the four `<option>` values below, but
+ * nothing stops that invariant from drifting if a future edit adds an
+ * option without updating this list. */
+function isAgentPricingType(value: string): value is AgentPricingType {
+  return (PRICING_TYPES as readonly string[]).includes(value);
+}
 
 export interface AgentFormValues {
   name: string;
@@ -10,6 +24,15 @@ export interface AgentFormValues {
   invocationUrl: string;
   payoutAddress: string;
   pricingModel: string;
+  /** F-1604 (Feature 16, T-1604) — "" is the not-yet-selected sentinel for
+   * the required `<select>` (matches how `name`/`category` use an empty
+   * string + HTML `required`); a real value is always one of
+   * `AgentPricingType`. Only EDITABLE on the create form — AgentEditPage
+   * renders this read-only (design.md 决策 5: changing it after creation
+   * must go through the dedicated `POST .../pricing-type` confirmation
+   * endpoint, never a silent PATCH field, so this form never sends it on
+   * edit at all). */
+  pricingType: AgentPricingType | "";
   referencePriceText: string;
   /** T-1300: a toggle, not owner-chosen free text — see
    * api.ts's `CreateAgentInput.credentialEnabled` doc comment for why
@@ -35,6 +58,7 @@ export function emptyAgentFormValues(): AgentFormValues {
     invocationUrl: "",
     payoutAddress: "",
     pricingModel: "",
+    pricingType: "",
     referencePriceText: "",
     credentialEnabled: false,
     credentialRefDisplay: undefined,
@@ -50,6 +74,7 @@ export function agentFormValuesFromAgent(agent: {
   invocationUrl: string | null;
   payoutAddress: string;
   pricingModel: string | null;
+  pricingType: AgentPricingType;
   referencePrice: string | null;
   /** Absent (non-owner viewer, T-1203 round-2 fix) is treated the same as
    * `null` — see api.ts's `Agent.credentialRef` doc comment. AgentEditPage
@@ -67,6 +92,7 @@ export function agentFormValuesFromAgent(agent: {
     invocationUrl: agent.invocationUrl ?? "",
     payoutAddress: agent.payoutAddress,
     pricingModel: agent.pricingModel ?? "",
+    pricingType: agent.pricingType,
     referencePriceText: agent.referencePrice ?? "",
     credentialEnabled: Boolean(agent.credentialRef),
     credentialRefDisplay: agent.credentialRef ?? null,
@@ -152,7 +178,20 @@ export function agentFormValuesToInput(
  * see `agentFormValuesToInput`'s doc comment), but this keeps that
  * invariant from being load-bearing at the type level.
  */
-export function toCreateAgentInput(input: UpdateAgentInput): CreateAgentInput {
+/**
+ * `pricingType` is a separate parameter, not a field on `UpdateAgentInput`
+ * (F-1604, N4 real finding, T-1604): apps/api's PATCH endpoint doesn't
+ * accept this field at all (design.md 决策 5 — changing it after creation
+ * requires the dedicated confirmation endpoint, never a silent PATCH), so
+ * it can't live on the type `agentFormValuesToInput` already returns for
+ * BOTH create and edit — only `AgentCreatePage` ever has a real value to
+ * pass here (a fresh `AgentFormValues.pricingType`, validated non-blank
+ * by the form's `required` select before `onSubmit` is even reachable).
+ */
+export function toCreateAgentInput(
+  input: UpdateAgentInput,
+  pricingType: AgentPricingType,
+): CreateAgentInput {
   return {
     name: input.name ?? "",
     description: input.description ?? "",
@@ -162,6 +201,7 @@ export function toCreateAgentInput(input: UpdateAgentInput): CreateAgentInput {
     invocationUrl: input.invocationUrl ?? undefined,
     payoutAddress: input.payoutAddress ?? "",
     pricingModel: input.pricingModel ?? undefined,
+    pricingType,
     referencePrice: input.referencePrice ?? undefined,
     credentialEnabled: input.credentialEnabled ?? undefined,
   };
@@ -177,7 +217,11 @@ export interface AgentFormProps {
   submitLabel: string;
   pending: boolean;
   errorMessage: string | undefined;
-  onSubmit: (input: UpdateAgentInput) => void;
+  /** `pricingType` is always a real `AgentPricingType` here (never `""`) —
+   * the form's `required` select prevents submission otherwise. Ignored
+   * by `AgentEditPage` (PATCH never accepts it); consumed by
+   * `AgentCreatePage` via `toCreateAgentInput`. */
+  onSubmit: (input: UpdateAgentInput, pricingType: AgentPricingType) => void;
 }
 
 /** Shared field set for AgentCreatePage and AgentEditPage. */
@@ -203,7 +247,19 @@ export function AgentForm({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onSubmit(agentFormValuesToInput(values, originalValues ?? emptyAgentFormValues()));
+    // `required` on the pricingType <select> below already blocks a real
+    // browser submit with "" — this re-checks at runtime (narrowing the
+    // type naturally, no assertion needed) rather than trusting that
+    // invariant blindly, since `onSubmit` genuinely cannot express "no
+    // value" to its callers (its signature requires a real
+    // `AgentPricingType`).
+    if (values.pricingType === "") {
+      return;
+    }
+    onSubmit(
+      agentFormValuesToInput(values, originalValues ?? emptyAgentFormValues()),
+      values.pricingType,
+    );
   }
 
   const inputClasses =
@@ -281,6 +337,57 @@ export function AgentForm({
           onChange={handleChange("pricingModel")}
           className={inputClasses}
         />
+      </label>
+      <label className={labelClasses}>
+        计费类型
+        {/* F-1604 (Feature 16, T-1604): the field that ALONE decides
+            whether this Agent needs review (免费上架 vs 需审核) — required
+            on create, since apps/api now rejects a request without it.
+            Read-only on edit (originalValues present): design.md 决策 5
+            requires changing this after creation to go through an
+            explicit confirmation, never a silent field save alongside
+            unrelated edits — that confirmation flow isn't built into
+            this form (no dedicated UI for
+            POST /agents/:agentId/pricing-type yet), so the safest
+            correct behavior here is "show it, don't let this form change
+            it," not fabricate a change path this Task didn't build. */}
+        {originalValues ? (
+          <input
+            value={
+              values.pricingType === "FREE"
+                ? "免费（FREE）"
+                : values.pricingType === "PER_TASK"
+                  ? "按任务计费（PER_TASK）"
+                  : values.pricingType === "SUBSCRIPTION"
+                    ? "订阅制（SUBSCRIPTION）"
+                    : values.pricingType === "HOURLY"
+                      ? "按小时计费（HOURLY）"
+                      : ""
+            }
+            disabled
+            readOnly
+            className={`${inputClasses} cursor-not-allowed opacity-70`}
+          />
+        ) : (
+          <select
+            value={values.pricingType}
+            onChange={(event) => {
+              const next = event.target.value;
+              if (!isAgentPricingType(next)) return;
+              setValues((current) => ({ ...current, pricingType: next }));
+            }}
+            required
+            className={inputClasses}
+          >
+            <option value="" disabled>
+              请选择计费类型
+            </option>
+            <option value="FREE">免费（FREE，直接上架，无需审核）</option>
+            <option value="PER_TASK">按任务计费（PER_TASK，需审核）</option>
+            <option value="SUBSCRIPTION">订阅制（SUBSCRIPTION，需审核）</option>
+            <option value="HOURLY">按小时计费（HOURLY，需审核）</option>
+          </select>
+        )}
       </label>
       <label className={labelClasses}>
         协议版本

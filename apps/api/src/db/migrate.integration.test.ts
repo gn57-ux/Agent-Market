@@ -36,7 +36,7 @@ runIfOptedIn("runMigrations (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -61,6 +61,9 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0015_create_vector_recall_scoring.sql",
       "0016_create_embedding_budget.sql",
       "0017_ollama_embedding_dimension.sql",
+      "0018_create_consumed_privy_tokens.sql",
+      "0019_add_agent_review_status.sql",
+      "0020_create_admin_roles.sql",
     ]);
     expect(result.alreadyApplied).toEqual([]);
 
@@ -71,11 +74,15 @@ runIfOptedIn("runMigrations (integration)", () => {
          'tasks', 'task_skills', 'chain_transactions', 'chain_events', 'task_state_history',
          'blocked_wallets', 'recommendation_runs', 'recommendation_candidates',
          'acceptance_permits', 'deliverables', 'pending_result_submissions', 'disputes',
-         'audit_logs', 'ratings', 'agent_embeddings', 'task_embeddings', 'embedding_budget_usage')`,
+         'audit_logs', 'ratings', 'agent_embeddings', 'task_embeddings', 'embedding_budget_usage',
+         'consumed_privy_tokens', 'agent_review_audit_logs', 'admin_roles', 'admin_role_audit_logs')`,
     );
     expect(rows.map((row) => row.table_name).sort()).toEqual([
       "acceptance_permits",
+      "admin_role_audit_logs",
+      "admin_roles",
       "agent_embeddings",
+      "agent_review_audit_logs",
       "agent_skills",
       "agents",
       "audit_logs",
@@ -83,6 +90,7 @@ runIfOptedIn("runMigrations (integration)", () => {
       "blocked_wallets",
       "chain_events",
       "chain_transactions",
+      "consumed_privy_tokens",
       "deliverables",
       "disputes",
       "embedding_budget_usage",
@@ -120,6 +128,9 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0015_create_vector_recall_scoring.sql",
       "0016_create_embedding_budget.sql",
       "0017_ollama_embedding_dimension.sql",
+      "0018_create_consumed_privy_tokens.sql",
+      "0019_add_agent_review_status.sql",
+      "0020_create_admin_roles.sql",
     ]);
   });
 });

@@ -3,6 +3,55 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      T-1601 (ADR-0002 threat model, 风险清单 row 1: 前端被攻破/XSS 是 Privy
+      embedded wallet 相对 MetaMask 真实新增的攻击面). `script-src 'self'`
+      only — no inline scripts, no third-party script domains, per this
+      task's explicit instruction, even though Privy's own published CSP
+      guide (docs.privy.io/security/implementation-guide/content-security-policy,
+      2026-09-01) additionally lists `https://challenges.cloudflare.com` in
+      script-src for its optional CAPTCHA feature — this app does not
+      enable that feature (see PrivyAppProvider.tsx's config), so it is
+      deliberately left out rather than pre-emptively widening script-src.
+      `connect-src`/`frame-src`/`child-src` below list every domain Privy's
+      guide documents for the login/embedded-wallet flow this app actually
+      uses (base auth + WalletConnect account-linking + Privy's own signer
+      RPC), verified against the installed @privy-io/react-auth 3.39.0
+      bundle (apps/web/node_modules — grepped for literal domain strings)
+      rather than assumed from the docs alone.
+
+      Two real fixes found only by an actual headless-browser run against a
+      built `pnpm preview` (a paper CSP review would have missed both):
+      - No `frame-ancestors` here — Chrome logs (and this project's own
+        probe caught) "the Content Security Policy directive
+        'frame-ancestors' is ignored when delivered via a <meta> element";
+        it can only be enforced via a real HTTP response header, which is
+        this project's deployment layer's responsibility, not this file's.
+      - `connect-src` includes apps/api's own origin via Vite's `%VITE_...%`
+        HTML env replacement (falls back to `apiBaseUrl()`'s own hardcoded
+        default in shared/api/client.ts when unset, so this still works in
+        an environment with no `.env` at all) — apps/web and apps/api run
+        on different ports in every environment this repo documents
+        (`.env.example`'s `VITE_API_BASE_URL=http://localhost:3001` next to
+        Vite's own dev port 5173), so `'self'` alone does NOT cover it: the
+        very first probe run against this CSP broke `GET /auth/session`
+        (SessionProvider's own mount-time restore) and would have broken
+        every other apps/web-to-apps/api call project-wide, Privy-unrelated
+        entirely — caught only because the probe watched real console
+        errors instead of just checking the page rendered.
+
+      Feature 15/16 merge fix (2026-09-03): `frame-src`/`child-src` also need
+      `'self'` — OfficePage.tsx embeds `/office-cocos/index.html` as a
+      same-origin iframe (Feature 15, predates this CSP), and without
+      `'self'` here the browser silently blocks that embed too (caught the
+      same way as the two fixes above: a real headless run showed the office
+      iframe resolving to `chrome-error://chromewebdata/` with a CSP
+      violation in the console, not by re-reading the policy text).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; worker-src 'self'; manifest-src 'self'; child-src 'self' https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; frame-src 'self' https://auth.privy.io https://verify.walletconnect.com https://verify.walletconnect.org; connect-src 'self' http://localhost:3001 %VITE_API_BASE_URL% https://auth.privy.io wss://relay.walletconnect.com wss://relay.walletconnect.org wss://www.walletlink.org https://*.rpc.privy.systems https://explorer-api.walletconnect.com"
+    />
     <title>Agent Market</title>
   </head>
   <body>

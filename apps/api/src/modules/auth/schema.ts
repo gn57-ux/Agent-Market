@@ -14,3 +14,16 @@ export const verifyRequestSchema = z.object({
     .transform((value) => value as `0x${string}`),
   nonce: z.string().min(1, "nonce 不能为空"),
 });
+
+// F-1601 (T-1601, design decision 2) — POST /auth/verify/privy's request
+// shape. Deliberately a separate schema (and separate route, see
+// privy-routes.ts) rather than folding into `verifyRequestSchema`: unlike
+// SIWE's nonce+signature challenge-response, Privy's proof is an
+// already-issued opaque access token — there is no `signature`/`nonce` to
+// validate here, `PrivyIdentityProvider.completeAuth` does its own
+// deeper validation of `accessToken`'s contents (schema-level, this only
+// enforces "some non-empty string was submitted").
+export const privyVerifyRequestSchema = z.object({
+  address: ETH_ADDRESS_SCHEMA,
+  accessToken: z.string().min(1, "accessToken 不能为空"),
+});
