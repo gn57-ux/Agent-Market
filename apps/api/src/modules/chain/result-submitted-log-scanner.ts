@@ -1,5 +1,5 @@
 import { createPublicClient, http } from "viem";
-import { RESULT_SUBMITTED_EVENT_ABI } from "./result-submitted-event.js";
+import { RESULT_SUBMITTED_EVENT_ABI } from "@agent-market/domain";
 
 /**
  * One `ResultSubmitted` log found by a block-range scan. Widened (T-905,

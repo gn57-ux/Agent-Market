@@ -10,7 +10,7 @@ import { createPublicClient, createWalletClient, http, type Hex, type PublicClie
 import { privateKeyToAccount } from "viem/accounts";
 import { buildApp } from "../../app.js";
 import { runMigrations } from "../../db/migrate.js";
-import { requireTestDatabaseUrl } from "../../db/test-support.js";
+import { requireTestDatabaseUrl } from "@agent-market/domain";
 import { buildSignInMessage } from "../auth/signInMessage.js";
 import { deriveOnChainTaskId } from "../tasks/onchain-task-id.js";
 
@@ -47,7 +47,7 @@ const contractsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE";
 
 // Same well-known deterministic Hardhat Network default accounts T-1007
 // already uses — publicly documented, hold no real value.

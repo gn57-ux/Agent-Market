@@ -5,12 +5,12 @@ import { Pool } from "pg";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { encodeAbiParameters, encodeEventTopics, getAddress } from "viem";
 import { runMigrations } from "../../db/migrate.js";
-import { requireTestDatabaseUrl } from "../../db/test-support.js";
+import { requireTestDatabaseUrl } from "@agent-market/domain";
 import type { BlockResult, ChainRpcClient, TransactionReceiptResult } from "../chain/rpc.client.js";
-import { RESULT_APPROVED_EVENT_ABI } from "../chain/result-approved-event.js";
-import { DELIVERY_TIMEOUT_CLAIMED_EVENT_ABI } from "../chain/delivery-timeout-claimed-event.js";
-import { REVIEW_TIMEOUT_FINALIZED_EVENT_ABI } from "../chain/review-timeout-finalized-event.js";
-import type { RawEventLog } from "../chain/task-funded-event.js";
+import { RESULT_APPROVED_EVENT_ABI } from "@agent-market/domain";
+import { DELIVERY_TIMEOUT_CLAIMED_EVENT_ABI } from "@agent-market/domain";
+import { REVIEW_TIMEOUT_FINALIZED_EVENT_ABI } from "@agent-market/domain";
+import type { RawEventLog } from "@agent-market/domain";
 import { deriveOnChainTaskId } from "./onchain-task-id.js";
 import { verifySettlement } from "./service.js";
 
@@ -34,7 +34,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE";
 
 const TASK_ESCROW_ADDRESS = "0x1234567890123456789012345678901234567890" as `0x${string}`;
 const YD_TOKEN_ADDRESS = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";

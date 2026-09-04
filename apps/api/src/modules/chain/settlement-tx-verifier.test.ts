@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { encodeAbiParameters, encodeEventTopics, getAddress } from "viem";
 import type { BlockResult, ChainRpcClient, TransactionReceiptResult } from "./rpc.client.js";
-import { RESULT_APPROVED_EVENT_ABI } from "./result-approved-event.js";
-import { DELIVERY_TIMEOUT_CLAIMED_EVENT_ABI } from "./delivery-timeout-claimed-event.js";
-import { REVIEW_TIMEOUT_FINALIZED_EVENT_ABI } from "./review-timeout-finalized-event.js";
-import type { RawEventLog } from "./task-funded-event.js";
+import { RESULT_APPROVED_EVENT_ABI } from "@agent-market/domain";
+import { DELIVERY_TIMEOUT_CLAIMED_EVENT_ABI } from "@agent-market/domain";
+import { REVIEW_TIMEOUT_FINALIZED_EVENT_ABI } from "@agent-market/domain";
+import type { RawEventLog } from "@agent-market/domain";
 import {
   verifySettlementTransaction,
   type VerifySettlementTransactionParams,

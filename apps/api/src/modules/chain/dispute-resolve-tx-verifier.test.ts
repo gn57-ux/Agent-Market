@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { encodeAbiParameters, encodeEventTopics } from "viem";
 import type { BlockResult, ChainRpcClient, TransactionReceiptResult } from "./rpc.client.js";
-import { DISPUTE_RESOLVED_EVENT_ABI } from "./dispute-resolved-event.js";
-import type { RawEventLog } from "./task-funded-event.js";
+import { DISPUTE_RESOLVED_EVENT_ABI } from "@agent-market/domain";
+import type { RawEventLog } from "@agent-market/domain";
 import {
   verifyDisputeResolveTransaction,
   type VerifyDisputeResolveTransactionParams,

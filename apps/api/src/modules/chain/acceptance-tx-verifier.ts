@@ -1,7 +1,7 @@
 import type { ErrorCode } from "@agent-market/domain";
 import { decodeFunctionData } from "viem";
 import type { ChainRpcClient } from "./rpc.client.js";
-import { findTaskAcceptedLog } from "./task-accepted-event.js";
+import { findTaskAcceptedLog } from "@agent-market/domain";
 import { TASK_ESCROW_ACCEPT_TASK_ABI } from "./task-escrow-accept-abi.js";
 
 /**

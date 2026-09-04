@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { runMigrations } from "../src/db/migrate.js";
-import { requireTestDatabaseUrl } from "../src/db/test-support.js";
+import { requireTestDatabaseUrl } from "@agent-market/domain";
 import { computeEmbeddingVersion } from "../src/modules/embeddings/embed-on-save.js";
 import { OllamaEmbeddingProvider } from "../src/modules/embeddings/ollama-provider.js";
 import { runBackfill } from "./backfill-embeddings.js";
@@ -74,7 +74,7 @@ runIfOptedIn("backfill-embeddings runBackfill (integration, T-1310)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE",
     );
     await pool.end();
   });

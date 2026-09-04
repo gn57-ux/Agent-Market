@@ -1,15 +1,15 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { ChainRpcClient } from "./rpc.client.js";
-import type { RawEventLog } from "./task-funded-event.js";
-import { findResultApprovedLog, type DecodedResultApprovedEvent } from "./result-approved-event.js";
+import type { RawEventLog } from "@agent-market/domain";
+import { findResultApprovedLog, type DecodedResultApprovedEvent } from "@agent-market/domain";
 import {
   findDeliveryTimeoutClaimedLog,
   type DecodedDeliveryTimeoutClaimedEvent,
-} from "./delivery-timeout-claimed-event.js";
+} from "@agent-market/domain";
 import {
   findReviewTimeoutFinalizedLog,
   type DecodedReviewTimeoutFinalizedEvent,
-} from "./review-timeout-finalized-event.js";
+} from "@agent-market/domain";
 
 // Same bind-every-code-to-a-const discipline as tx-verifier.ts/
 // acceptance-tx-verifier.ts/result-submission-tx-verifier.ts.

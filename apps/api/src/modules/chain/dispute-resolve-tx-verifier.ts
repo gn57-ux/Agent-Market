@@ -1,6 +1,6 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { ChainRpcClient } from "./rpc.client.js";
-import { findDisputeResolvedLog } from "./dispute-resolved-event.js";
+import { findDisputeResolvedLog } from "@agent-market/domain";
 
 const CHAIN_UNSUPPORTED: ErrorCode = "CHAIN_UNSUPPORTED";
 const TRANSACTION_NOT_FOUND: ErrorCode = "TRANSACTION_NOT_FOUND";

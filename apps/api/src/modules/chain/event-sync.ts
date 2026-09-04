@@ -2,31 +2,24 @@ import type { ChainRpcClient } from "./rpc.client.js";
 import {
   decodeDeliveryTimeoutClaimedLog,
   type DecodedDeliveryTimeoutClaimedEvent,
-} from "./delivery-timeout-claimed-event.js";
-import { decodeDisputeOpenedLog, type DecodedDisputeOpenedEvent } from "./dispute-opened-event.js";
-import {
+  decodeDisputeOpenedLog,
+  type DecodedDisputeOpenedEvent,
   decodeDisputeResolvedLog,
   type DecodedDisputeResolvedEvent,
-} from "./dispute-resolved-event.js";
-import {
   decodeResultApprovedLog,
   type DecodedResultApprovedEvent,
-} from "./result-approved-event.js";
-import {
   decodeResultSubmittedLog,
   type DecodedResultSubmittedEvent,
-} from "./result-submitted-event.js";
-import {
   decodeReviewTimeoutFinalizedLog,
   type DecodedReviewTimeoutFinalizedEvent,
-} from "./review-timeout-finalized-event.js";
-import { decodeTaskAcceptedLog, type DecodedTaskAcceptedEvent } from "./task-accepted-event.js";
-import { decodeTaskCancelledLog, type DecodedTaskCancelledEvent } from "./task-cancelled-event.js";
-import {
+  decodeTaskAcceptedLog,
+  type DecodedTaskAcceptedEvent,
+  decodeTaskCancelledLog,
+  type DecodedTaskCancelledEvent,
   decodeTaskFundedLog,
   type DecodedTaskFundedEvent,
   type RawEventLog,
-} from "./task-funded-event.js";
+} from "@agent-market/domain";
 
 /**
  * F-606's fallback path ("复核逻辑幂等" / requirements.md's non-functional

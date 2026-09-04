@@ -5,7 +5,7 @@ import {
   TransactionNotFoundError,
   TransactionReceiptNotFoundError,
 } from "viem";
-import type { RawEventLog } from "./task-funded-event.js";
+import type { RawEventLog } from "@agent-market/domain";
 import { TASK_ESCROW_STAKE_RATE_BPS_ABI } from "./task-escrow-accept-abi.js";
 
 /**

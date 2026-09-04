@@ -6,8 +6,8 @@ import type {
   TransactionReceiptResult,
   TransactionResult,
 } from "./rpc.client.js";
-import { TASK_ACCEPTED_EVENT_ABI } from "./task-accepted-event.js";
-import type { RawEventLog } from "./task-funded-event.js";
+import { TASK_ACCEPTED_EVENT_ABI } from "@agent-market/domain";
+import type { RawEventLog } from "@agent-market/domain";
 import { TASK_ESCROW_ACCEPT_TASK_ABI } from "./task-escrow-accept-abi.js";
 import {
   decodeAcceptTaskCalldata,

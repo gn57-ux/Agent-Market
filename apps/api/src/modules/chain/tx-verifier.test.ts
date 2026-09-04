@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { encodeAbiParameters, encodeEventTopics, getAddress, keccak256, toHex } from "viem";
 import type { BlockResult, ChainRpcClient, TransactionReceiptResult } from "./rpc.client.js";
-import { TASK_FUNDED_EVENT_ABI, type RawEventLog } from "./task-funded-event.js";
+import { TASK_FUNDED_EVENT_ABI, type RawEventLog } from "@agent-market/domain";
 import {
   verifyFundingTransaction,
   type FundingVerificationExpectation,

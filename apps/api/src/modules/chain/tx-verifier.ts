@@ -1,7 +1,7 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { Queryable } from "../../db/pool.js";
 import type { ChainRpcClient } from "./rpc.client.js";
-import { findTaskFundedLog } from "./task-funded-event.js";
+import { findTaskFundedLog } from "@agent-market/domain";
 
 // Every ErrorCode this module can return is bound to a `const` up front
 // (matching apps/api/src/modules/auth/routes.ts's `WALLET_SIGNATURE_INVALID`

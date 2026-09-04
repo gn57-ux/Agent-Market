@@ -1,6 +1,6 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { ChainRpcClient } from "./rpc.client.js";
-import { findDisputeOpenedLog } from "./dispute-opened-event.js";
+import { findDisputeOpenedLog } from "@agent-market/domain";
 
 // Same bind-every-code-to-a-const discipline as every other verifier in
 // this codebase.
