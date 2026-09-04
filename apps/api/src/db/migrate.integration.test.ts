@@ -36,7 +36,7 @@ runIfOptedIn("runMigrations (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -64,6 +64,12 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0018_create_consumed_privy_tokens.sql",
       "0019_add_agent_review_status.sql",
       "0020_create_admin_roles.sql",
+      "0021_create_task_dags.sql",
+      "0022_add_task_dag_node_expert_fields.sql",
+      "0023_add_task_dag_category_and_node_description.sql",
+      "0024_add_task_dag_node_title_and_deadline.sql",
+      "0025_make_task_dag_node_description_nullable.sql",
+      "0026_add_task_dag_node_selected_predecessors.sql",
     ]);
     expect(result.alreadyApplied).toEqual([]);
 
@@ -75,7 +81,7 @@ runIfOptedIn("runMigrations (integration)", () => {
          'blocked_wallets', 'recommendation_runs', 'recommendation_candidates',
          'acceptance_permits', 'deliverables', 'pending_result_submissions', 'disputes',
          'audit_logs', 'ratings', 'agent_embeddings', 'task_embeddings', 'embedding_budget_usage',
-         'consumed_privy_tokens', 'agent_review_audit_logs', 'admin_roles', 'admin_role_audit_logs')`,
+         'consumed_privy_tokens', 'agent_review_audit_logs', 'admin_roles', 'admin_role_audit_logs', 'task_dags', 'task_dag_nodes', 'task_dag_edges', 'task_dag_node_skills')`,
     );
     expect(rows.map((row) => row.table_name).sort()).toEqual([
       "acceptance_permits",
@@ -99,6 +105,10 @@ runIfOptedIn("runMigrations (integration)", () => {
       "recommendation_candidates",
       "recommendation_runs",
       "sessions",
+      "task_dag_edges",
+      "task_dag_node_skills",
+      "task_dag_nodes",
+      "task_dags",
       "task_embeddings",
       "task_skills",
       "task_state_history",
@@ -131,6 +141,12 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0018_create_consumed_privy_tokens.sql",
       "0019_add_agent_review_status.sql",
       "0020_create_admin_roles.sql",
+      "0021_create_task_dags.sql",
+      "0022_add_task_dag_node_expert_fields.sql",
+      "0023_add_task_dag_category_and_node_description.sql",
+      "0024_add_task_dag_node_title_and_deadline.sql",
+      "0025_make_task_dag_node_description_nullable.sql",
+      "0026_add_task_dag_node_selected_predecessors.sql",
     ]);
   });
 });

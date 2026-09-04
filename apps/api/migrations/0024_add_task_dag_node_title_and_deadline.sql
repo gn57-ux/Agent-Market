@@ -1,0 +1,46 @@
+-- Feature 17 (multi-agent-dag-orchestration), T-1702.
+-- `POST /dags/:dagId/activate` (this Task) creates a real `tasks` row per
+-- ready node by calling the existing `createDraft` service shape
+-- unchanged — that requires `title` and `deliveryDeadline`, neither of
+-- which 0021/0022/0023 gave `task_dag_nodes` a column for. Same "不篡改已
+-- 执行的" convention as 0022/0023 following up on 0021 — this is a
+-- follow-up migration, not an edit to any of the three already-reviewed
+-- files.
+--
+-- N4 real finding (round 2): the first version of this migration used the
+-- same ADD-DEFAULT-then-DROP-DEFAULT two-step 0022/0023 use for
+-- expert_type/category/description ('(untitled node)' / migration-time +
+-- 7 days). Correctly caught as a real bug: unlike expert_type's
+-- 'AUTOMATION' default (a genuinely valid, safe fallback value) or
+-- category's 'general', a placeholder TITLE and a FABRICATED DEADLINE are
+-- not safe stand-ins for real business data — if any task_dag_nodes rows
+-- already existed when this migration runs (a real deployment window
+-- between 0021 and this migration, same reasoning 0022/0023's own headers
+-- already give), activating one of those legacy nodes would create a real
+-- `tasks` row with a nonsense title, and — worse — a deadline that can
+-- already be in the past by the time anyone gets around to activating it
+-- (permanently blocked by T-1702's own deadline-freshness check, unable to
+-- ever activate). `DROP DEFAULT` only closes the window for FUTURE
+-- inserts; it does nothing for rows the ADD COLUMN step itself already
+-- backfilled.
+--
+-- Fixed by making both columns NULLABLE instead, with no DEFAULT at all:
+-- - Every row created through `POST /dags` (T-1701's `createDagSchema`)
+--   already requires both fields as non-optional at the Zod boundary, so
+--   every row this application ever inserts has real values — NULL can
+--   only occur on a row that predates this migration.
+-- - `POST /dags/:dagId/activate` (repository.ts's `activateDag`) now
+--   explicitly checks both are non-null for every ready node BEFORE
+--   creating any real task, and refuses activation with a distinct,
+--   named outcome (`node_missing_activation_fields`) if not — a legacy
+--   node with no title/deadline is surfaced as "cannot activate, missing
+--   data" rather than silently activating with fabricated values.
+-- - CLAUDE.md 原则"尽量让非法状态无法表示": NULL is the structurally correct
+--   representation of "this node predates title/deadline existing" —
+--   preferred over a magic sentinel string this code would then have to
+--   remember to compare against everywhere it matters.
+--
+-- Deliberately no IF NOT EXISTS anywhere in this file (see
+-- 0001_create_users.sql's header comment for the rationale).
+ALTER TABLE task_dag_nodes ADD COLUMN title TEXT;
+ALTER TABLE task_dag_nodes ADD COLUMN delivery_deadline TIMESTAMPTZ;

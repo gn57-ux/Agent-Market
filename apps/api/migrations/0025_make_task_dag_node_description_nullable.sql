@@ -1,0 +1,40 @@
+-- Feature 17 (multi-agent-dag-orchestration), T-1704.
+-- N4 real finding (round 2, P2): 0023_add_task_dag_category_and_node_
+-- description.sql (T-1701) backfilled any pre-existing task_dag_nodes row
+-- with `description = ''` (an ADD-DEFAULT-then-DROP-DEFAULT two-step, same
+-- shape as this repo's other follow-up migrations) — but unlike
+-- expert_type's `'AUTOMATION'` default (a genuinely valid, safe fallback
+-- value), an empty description is not a safe stand-in for real business
+-- data: activation only ever checked title/delivery_deadline for
+-- missingness (0024's own "N4 round 2" fix), so a legacy node with
+-- description = '' would sail through that check and produce a real
+-- `tasks` row with an empty description — bypassing the exact same
+-- non-empty invariant `POST /dags`' own `createDagSchema`
+-- (NODE_DESCRIPTION_SCHEMA, T-1701) and every other task-creation path in
+-- this codebase already enforces at the boundary. Same root cause 0024's
+-- own header comment already documents for title/delivery_deadline; this
+-- migration applies the identical fix to the one field that fix missed.
+--
+-- Follow-up migration, not an edit to 0023 (already N4-reviewed and its
+-- Task marked complete) — same "不篡改已执行的" convention as every other
+-- follow-up in this Feature.
+--
+-- Two steps, mirroring 0024's own "make it NULLABLE instead of a magic
+-- placeholder" fix exactly (CLAUDE.md 原则"尽量让非法状态无法表示" — NULL is
+-- the structurally correct representation of "this node predates a real
+-- description ever being required," not a sentinel string every reader
+-- has to remember to compare against):
+-- 1. Convert any row 0023's own backfill left at the literal placeholder
+--    ('') back to NULL — this is a real, bounded data correction (the
+--    only rows this can ever match are pre-0023 legacy rows; every row
+--    created through `POST /dags` since T-1701 shipped already has a
+--    real, non-empty description enforced by `createDagSchema`, so this
+--    UPDATE is a no-op against them).
+-- 2. Drop the NOT NULL constraint 0023 added, so a legacy row (if any)
+--    stays honestly NULL going forward instead of being forced back to a
+--    placeholder by any future INSERT that omits it.
+--
+-- Deliberately no IF NOT EXISTS anywhere in this file (see
+-- 0001_create_users.sql's header comment for the rationale).
+UPDATE task_dag_nodes SET description = NULL WHERE description = '';
+ALTER TABLE task_dag_nodes ALTER COLUMN description DROP NOT NULL;
