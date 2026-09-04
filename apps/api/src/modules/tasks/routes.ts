@@ -9,6 +9,7 @@ import type {
   FundingIntentResult,
   FundingVerificationServiceResult,
   TaskAcceptanceVerificationServiceResult,
+  TaskCancellationVerificationServiceResult,
   TaskDisputeOpenVerificationServiceResult,
   TaskDisputeResolveVerificationServiceResult,
   TaskDraftMutationResult,
@@ -24,6 +25,7 @@ import {
   listTasksForMarket,
   updateDraft,
   verifyAcceptance,
+  verifyCancellation,
   verifyDisputeOpen,
   verifyDisputeResolution,
   verifyFunding,
@@ -254,6 +256,35 @@ function sendFundingVerificationFailure(
       error: {
         code: TASK_STATE_CONFLICT,
         message: `任务当前状态为 ${result.currentStatus}，无法复核资金交易。`,
+      },
+    });
+  }
+  return reply
+    .status(fundingErrorStatus(result.code))
+    .send({ error: { code: result.code, message: result.message } });
+}
+
+/** T-1705: `POST /tasks/:taskId/cancel-verifications` failure handling —
+ * reuses `fundingErrorStatus`'s exact ErrorCode→HTTP mapping (same
+ * reasoning as `acceptance-verifications` below), with its own `forbidden`
+ * branch (mirroring `sendFundingVerificationFailure`'s, not
+ * `acceptance-verifications`' — `verifyCancellation` is requester-only,
+ * same as `verifyFunding`). */
+function sendCancellationVerificationFailure(
+  reply: FastifyReply,
+  result: Extract<TaskCancellationVerificationServiceResult, { ok: false }>,
+) {
+  if (result.reason === "not_found") {
+    return reply.status(404).send({ error: { message: "未找到该任务。" } });
+  }
+  if (result.reason === "forbidden") {
+    return reply.status(403).send({ error: { message: "只有任务归属地址可以取消任务。" } });
+  }
+  if (result.reason === "conflict") {
+    return reply.status(409).send({
+      error: {
+        code: TASK_STATE_CONFLICT,
+        message: `任务当前状态为 ${result.currentStatus}，无法取消。`,
       },
     });
   }
@@ -594,6 +625,49 @@ export function registerTasksRoutes(app: FastifyInstance, pool: Pool): void {
       );
       if (!result.ok) {
         return sendFundingVerificationFailure(reply, result);
+      }
+      return reply.send({ status: result.status, confirmations: result.confirmations });
+    },
+  );
+
+  // T-1705 (Feature 17's own补建 of a Feature-6 gap): mirrors
+  // `funding-verifications` above exactly — same body schema (`txHash`
+  // only, `fundingVerificationSchema` reused as-is), same session
+  // requirement, same RPC-client construction pattern. This is the first
+  // real HTTP entry point for `TaskEscrow.cancelTask`/`TaskCancelled` in
+  // this codebase; `CANCELLED` itself was already a defined `tasks.status`
+  // value (Feature 6) but had no verification path until this route.
+  app.post(
+    "/tasks/:taskId/cancel-verifications",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: formatZodError(paramsParsed.error) } });
+      }
+      const bodyParsed = fundingVerificationSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: formatZodError(bodyParsed.error) } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) {
+        return reply;
+      }
+
+      // A real, independent RPC client (BACKEND_RPC_URL) — same reasoning
+      // as funding-verifications above: never the frontend wallet's
+      // provider.
+      const rpc = createChainRpcClient();
+
+      const result = await verifyCancellation(
+        pool,
+        rpc,
+        sessionAddress,
+        paramsParsed.data.taskId,
+        bodyParsed.data.txHash,
+      );
+      if (!result.ok) {
+        return sendCancellationVerificationFailure(reply, result);
       }
       return reply.send({ status: result.status, confirmations: result.confirmations });
     },

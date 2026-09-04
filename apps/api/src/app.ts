@@ -21,6 +21,7 @@ import { registerFundsRoutes } from "./modules/funds/routes.js";
 import { registerRatingsRoutes } from "./modules/ratings/routes.js";
 import { registerTasksRoutes } from "./modules/tasks/routes.js";
 import { registerOfficeRoutes } from "./modules/office/routes.js";
+import { registerDagRoutes } from "./modules/dag/routes.js";
 import type { OfficeFundsReader } from "./modules/office/funds-reader.js";
 
 export interface BuildAppOptions {
@@ -162,6 +163,12 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   void app.register(async (instance) => {
     registerOfficeRoutes(instance, pool, options.officeFundsReader);
+  });
+
+  // Same reasoning as the registrations above: POST /dags uses
+  // `app.requireSession` as a preHandler (T-1701).
+  void app.register(async (instance) => {
+    registerDagRoutes(instance, pool);
   });
 
   // Same reasoning as the registrations above: POST /admin/roles and

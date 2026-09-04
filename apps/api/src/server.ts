@@ -8,10 +8,13 @@ import {
   startResultSubmissionPoller,
   type ResultSubmissionPollerHandle,
 } from "./modules/tasks/result-submission-poller.js";
+import { startDagPoller, type DagPollerHandle } from "./modules/dag/dag-poller.js";
+import { LangGraphDagExecutor } from "./modules/dag/langgraph-executor.js";
 
 const app = buildApp();
 const port = Number(process.env.API_PORT ?? 3001);
 let resultSubmissionPollerHandle: ResultSubmissionPollerHandle | undefined;
+let dagPollerHandle: DagPollerHandle | undefined;
 
 /**
  * Startup gate (Feature 7 sync, T-709, P1): confirms
@@ -66,6 +69,40 @@ function startBackgroundPollers(): void {
       app.log.error({ err: error }, "result-submission poller tick failed");
     },
   });
+
+  // T-1703 (N4 real finding: the DAG state-advancement logic existed but
+  // was never actually invoked anywhere outside tests — see
+  // dag-poller.ts's own doc comment for the full "临时同步轮询" rationale
+  // and why this mirrors startResultSubmissionPoller's shape exactly).
+  // Doesn't need `resolveChainConfig`/an RPC client of its own —
+  // `advanceDag` only reads `tasks.status` from Postgres (already updated
+  // by Feature 10's own settlement paths) and `YD_TOKEN_ADDRESS` from env,
+  // same as `POST /dags/:dagId/activate` itself.
+  dagPollerHandle = startDagPoller({
+    pool: getPool(),
+    // T-1709/Q-1701 (v1.1, 用户定稿): the DagExecutor to use is an
+    // environment-gated choice, not a code branch — `DAG_EXECUTOR=langgraph`
+    // opts a running deployment into `LangGraphDagExecutor` (which itself
+    // does nothing but call the exact same `advanceDag` this default calls
+    // — see that class's own doc comment); any other value (including
+    // unset) keeps the default `SimpleDagExecutor` this poller has always
+    // used, so this change cannot alter production behavior unless someone
+    // deliberately sets the env var.
+    executor: process.env.DAG_EXECUTOR === "langgraph" ? new LangGraphDagExecutor() : undefined,
+    onTick: (summary) => {
+      if (
+        summary.activatedNodeCount > 0 ||
+        summary.completedDagIds.length > 0 ||
+        summary.blockedDagIds.length > 0 ||
+        summary.errors.length > 0
+      ) {
+        app.log.info({ summary }, "dag poller tick");
+      }
+    },
+    onError: (error) => {
+      app.log.error({ err: error }, "dag poller tick failed");
+    },
+  });
 }
 
 async function stopBackgroundPollers(): Promise<void> {
@@ -73,9 +110,11 @@ async function stopBackgroundPollers(): Promise<void> {
   // before resolving — see `ResultSubmissionPollerHandle.stop()`'s own doc
   // comment for why a fire-and-forget call here was unsafe (an in-flight
   // tick could still touch `pool`/`rpc` after `shutdown` proceeds to
-  // `app.close()` below).
+  // `app.close()` below). Same reasoning applies to `dagPollerHandle`.
   await resultSubmissionPollerHandle?.stop();
   resultSubmissionPollerHandle = undefined;
+  await dagPollerHandle?.stop();
+  dagPollerHandle = undefined;
 }
 
 async function start(): Promise<void> {

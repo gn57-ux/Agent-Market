@@ -21,6 +21,7 @@ import {
   type DecodedReviewTimeoutFinalizedEvent,
 } from "./review-timeout-finalized-event.js";
 import { decodeTaskAcceptedLog, type DecodedTaskAcceptedEvent } from "./task-accepted-event.js";
+import { decodeTaskCancelledLog, type DecodedTaskCancelledEvent } from "./task-cancelled-event.js";
 import {
   decodeTaskFundedLog,
   type DecodedTaskFundedEvent,
@@ -274,6 +275,34 @@ export function decodeDisputeResolvedEventsFromLogs(
       continue;
     }
     const decoded = decodeDisputeResolvedLog(log);
+    if (decoded) {
+      results.push({ event: decoded, logIndex: log.logIndex });
+    }
+  }
+  return results;
+}
+
+export interface TaskCancelledEventLogDecodeResult {
+  event: DecodedTaskCancelledEvent;
+  logIndex: number;
+}
+
+/**
+ * Decodes every `TaskCancelled` log emitted by `trustedContractAddress` in
+ * a set of receipt logs — T-1705's mirror of
+ * `decodeResultSubmittedEventsFromLogs` above.
+ */
+export function decodeTaskCancelledEventsFromLogs(
+  logs: readonly RawEventLog[],
+  trustedContractAddress: string,
+): TaskCancelledEventLogDecodeResult[] {
+  const normalizedTrusted = trustedContractAddress.toLowerCase();
+  const results: TaskCancelledEventLogDecodeResult[] = [];
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== normalizedTrusted) {
+      continue;
+    }
+    const decoded = decodeTaskCancelledLog(log);
     if (decoded) {
       results.push({ event: decoded, logIndex: log.logIndex });
     }

@@ -530,17 +530,21 @@ export interface InsertChainTransactionInput {
    * `"RESULT_SUBMISSION"` (T-905), `"SETTLEMENT"` (T-1001 — covers all
    * three of `ResultApproved`/`DeliveryTimeoutClaimed`/
    * `ReviewTimeoutFinalized`, distinguished by `chain_events.event_name`
-   * instead of a separate purpose per event), and `"DISPUTE_OPEN"`/
-   * `"DISPUTE_RESOLVE"` (T-1002) here needed no migration — only widening
-   * this call-site type to the purposes this codebase actually issues
-   * today. */
+   * instead of a separate purpose per event), `"DISPUTE_OPEN"`/
+   * `"DISPUTE_RESOLVE"` (T-1002), and `"CANCELLATION"` (Feature 17,
+   * T-1705 — the first real caller of `TaskEscrow.cancelTask`/
+   * `TaskCancelled` in this codebase; Feature 6 defined the `CANCELLED`
+   * status/event name but never built a verification path for it) here
+   * needed no migration — only widening this call-site type to the
+   * purposes this codebase actually issues today. */
   purpose:
     | "FUNDING"
     | "ACCEPTANCE"
     | "RESULT_SUBMISSION"
     | "SETTLEMENT"
     | "DISPUTE_OPEN"
-    | "DISPUTE_RESOLVE";
+    | "DISPUTE_RESOLVE"
+    | "CANCELLATION";
   status: "confirmed";
   confirmations: number;
 }

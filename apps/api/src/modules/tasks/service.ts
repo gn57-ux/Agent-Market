@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import type { Queryable } from "../../db/pool.js";
 import { normalizeAddress } from "../auth/nonce.store.js";
 import { verifyAcceptanceTransaction } from "../chain/acceptance-tx-verifier.js";
+import { verifyCancellationTransaction } from "../chain/cancellation-tx-verifier.js";
 import { verifyDisputeOpenTransaction } from "../chain/dispute-open-tx-verifier.js";
 import { verifyDisputeResolveTransaction } from "../chain/dispute-resolve-tx-verifier.js";
 import {
@@ -14,6 +15,7 @@ import {
   decodeResultApprovedEventsFromLogs,
   decodeResultSubmittedEventsFromLogs,
   decodeReviewTimeoutFinalizedEventsFromLogs,
+  decodeTaskCancelledEventsFromLogs,
 } from "../chain/event-sync.js";
 import type { ChainRpcClient } from "../chain/rpc.client.js";
 import { verifyResultSubmissionTransaction } from "../chain/result-submission-tx-verifier.js";
@@ -2207,4 +2209,210 @@ export async function verifyDisputeResolution(
   }
 
   return { ok: true, status: toStatus, confirmations: verification.confirmations };
+}
+
+/**
+ * T-1705's idempotent-replay lookup for `cancelTask` — mirrors
+ * `findExistingDisputeOpenForTask`/`findExistingSettlementForTask`, scoped
+ * to `purpose: "CANCELLATION"`.
+ */
+async function findExistingCancellationForTask(
+  pool: Pool,
+  chainId: number,
+  taskId: string,
+  txHash: string,
+): Promise<{ confirmations: number } | null> {
+  const existing = await getChainTransactionByHash(pool, chainId, txHash, "CANCELLATION");
+  if (existing && existing.taskId === taskId) {
+    return { confirmations: existing.confirmations };
+  }
+  return null;
+}
+
+export type TaskCancellationVerificationServiceResult =
+  | { ok: true; status: "CANCELLED"; confirmations: number }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "forbidden" }
+  | { ok: false; reason: "conflict"; currentStatus: TaskStatusValue }
+  | { ok: false; reason: "chain_error"; code: ErrorCode; message: string };
+
+/**
+ * T-1705: verifies a real, confirmed `cancelTask` transaction and
+ * atomically transitions `OPEN`→`CANCELLED`. Requester-only (mirrors
+ * `verifyFunding`'s `task.requesterAddress !== normalizeAddress(sessionAddress)`
+ * check) — matches `TaskEscrow.cancelTask`'s own `require(msg.sender ==
+ * task.requester)` guard (`contracts/src/TaskEscrow.sol:138`'s surrounding
+ * function), and `allowedFromStatuses: ["OPEN"]` matches the contract's own
+ * `require(task.status == TaskStatus.Open)` — cancellation is only possible
+ * before any agent has accepted the task, so unlike `verifySettlement`/
+ * `verifyDisputeResolution` there is no `acceptedAgentId` and therefore no
+ * `applySettlementStats` call in this transition.
+ */
+export async function verifyCancellation(
+  pool: Pool,
+  rpc: ChainRpcClient,
+  sessionAddress: string,
+  taskId: string,
+  txHash: string,
+): Promise<TaskCancellationVerificationServiceResult> {
+  const task = await getTaskById(pool, taskId);
+  if (!task) {
+    return { ok: false, reason: "not_found" };
+  }
+  if (task.requesterAddress !== normalizeAddress(sessionAddress)) {
+    return { ok: false, reason: "forbidden" };
+  }
+
+  const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
+  const chainConfig = resolveFundingChainConfig();
+
+  if (task.status === "CANCELLED") {
+    const existing = await findExistingCancellationForTask(
+      pool,
+      chainConfig.chainId,
+      taskId,
+      normalizedTxHash,
+    );
+    if (existing) {
+      return { ok: true, status: "CANCELLED", confirmations: existing.confirmations };
+    }
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+  if (task.status !== "OPEN") {
+    return { ok: false, reason: "conflict", currentStatus: task.status };
+  }
+
+  const taskIdOnChain = deriveOnChainTaskId(task.id);
+  const requiredConfirmations = resolveRequiredConfirmations();
+
+  const verification = await verifyCancellationTransaction({
+    rpc,
+    txHash: normalizedTxHash,
+    expectedChainId: chainConfig.chainId,
+    trustedContractAddress: chainConfig.addresses.taskEscrow,
+    requiredConfirmations,
+    expectedTaskIdOnChain: taskIdOnChain,
+  });
+  if (!verification.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: verification.code,
+      message: verification.message,
+    };
+  }
+
+  const usage = await checkTransactionNotUsed(pool, chainConfig.chainId, normalizedTxHash, taskId);
+  if (!usage.ok) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: usage.code ?? "TRANSACTION_ALREADY_USED",
+      message: usage.message ?? "transaction already bound to another task",
+    };
+  }
+
+  let receipt: Awaited<ReturnType<ChainRpcClient["getTransactionReceipt"]>>;
+  try {
+    receipt = await rpc.getTransactionReceipt(normalizedTxHash);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: error instanceof Error ? error.message : "unexpected RPC client error",
+    };
+  }
+  if (!receipt || receipt.blockHash.toLowerCase() !== verification.blockHash.toLowerCase()) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt snapshot changed between verification and event recording (possible reorg)",
+    };
+  }
+  const matchingEvent = decodeTaskCancelledEventsFromLogs(
+    receipt.logs,
+    chainConfig.addresses.taskEscrow,
+  ).find((candidate) => candidate.event.taskId.toLowerCase() === taskIdOnChain.toLowerCase());
+  if (!matchingEvent) {
+    return {
+      ok: false,
+      reason: "chain_error",
+      code: "RPC_TEMPORARILY_UNAVAILABLE",
+      message: "receipt logs were not available when recording the TaskCancelled event",
+    };
+  }
+
+  let transition;
+  try {
+    transition = await transitionTaskStatus(pool, {
+      taskId,
+      allowedFromStatuses: ["OPEN"],
+      toStatus: "CANCELLED",
+      actor: "system:cancellation-verification",
+      reason: "TaskCancelled transaction verified",
+      withinTransaction: async (client) => {
+        const inserted = await insertChainTransaction(client, {
+          txHash: normalizedTxHash,
+          chainId: chainConfig.chainId,
+          taskId,
+          purpose: "CANCELLATION",
+          status: "confirmed",
+          confirmations: verification.confirmations,
+        });
+        if (!inserted) {
+          const occupantTaskId = await findChainTransactionOwner(
+            client,
+            chainConfig.chainId,
+            normalizedTxHash,
+          );
+          if (occupantTaskId !== taskId) {
+            throw new TransactionAlreadyUsedByAnotherTaskError(occupantTaskId ?? "unknown");
+          }
+        }
+        await insertChainEvent(client, {
+          chainId: chainConfig.chainId,
+          blockHash: verification.blockHash.toLowerCase(),
+          transactionHash: normalizedTxHash,
+          logIndex: matchingEvent.logIndex,
+          eventName: "TaskCancelled",
+          taskId,
+          payload: {
+            taskId: matchingEvent.event.taskId,
+          },
+        });
+      },
+    });
+  } catch (error) {
+    if (error instanceof TransactionAlreadyUsedByAnotherTaskError) {
+      return {
+        ok: false,
+        reason: "chain_error",
+        code: "TRANSACTION_ALREADY_USED",
+        message: `tx ${normalizedTxHash} on chain ${chainConfig.chainId} is already bound to task ${error.occupantTaskId}`,
+      };
+    }
+    throw error;
+  }
+
+  if (transition.outcome === "not_found") {
+    return { ok: false, reason: "not_found" };
+  }
+  if (transition.outcome === "conflict") {
+    if (transition.currentStatus === "CANCELLED") {
+      const existing = await findExistingCancellationForTask(
+        pool,
+        chainConfig.chainId,
+        taskId,
+        normalizedTxHash,
+      );
+      if (existing) {
+        return { ok: true, status: "CANCELLED", confirmations: existing.confirmations };
+      }
+    }
+    return { ok: false, reason: "conflict", currentStatus: transition.currentStatus };
+  }
+
+  return { ok: true, status: "CANCELLED", confirmations: verification.confirmations };
 }

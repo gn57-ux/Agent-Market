@@ -1,0 +1,30 @@
+-- Feature 17 (multi-agent-dag-orchestration), T-1706.
+--
+-- F-1706 "多结果择优/聚合": an AGGREGATE node's own real chain task is
+-- created once ALL of its parallel predecessors reach DONE (T-1703's own
+-- readiness rule) -- but which predecessor's deliverable the requester
+-- actually wants adopted (or, for "聚合", which subset) is a separate,
+-- purely bookkeeping decision this column records.
+--
+-- Design comparison (CLAUDE.md 规则 3, "重要设计必须至少比较两个方案"):
+--   A. A `UUID[]` array column directly on `task_dag_nodes` (chosen).
+--   B. A separate join table `task_dag_node_selections(node_id,
+--      predecessor_node_id)`.
+-- An AGGREGATE node's predecessor count is small and bounded by the DAG
+-- itself (already capped at 50 nodes total, `createDagSchema`), so a
+-- normalized join table's only real advantage (per-row FK enforcement)
+-- buys little here, at the cost of a second table + join for every read of
+-- this one small piece of node-owned metadata. Option A keeps "what did
+-- this node select" a single-row, single-column fact -- the same
+-- reasoning `task_dag_node_skills` (0022) did NOT apply to skill tags
+-- (skills there are genuinely many-valued facts other queries join
+-- against independently; a node's own selection is not).
+--
+-- `DEFAULT '{}'` here is NOT the same class of problem 0024/0025's
+-- placeholder-vs-NULL fixes addressed: an empty array is a real, correct,
+-- non-ambiguous representation of "nothing selected yet" (never silently
+-- misread as a real selection), unlike a placeholder title/deadline/
+-- description string that could be mistaken for genuine content -- so no
+-- two-step NULLABLE dance is needed here.
+ALTER TABLE task_dag_nodes
+  ADD COLUMN selected_predecessor_ids UUID[] NOT NULL DEFAULT '{}';
