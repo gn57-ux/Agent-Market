@@ -200,7 +200,20 @@ runIfOptedIn("POST /agents/:agentId/invocation-test (integration, F-1204/T-1203)
 
   it("returns a clean credential_unresolved result when the Agent has no credentialRef configured", async () => {
     const token = await login(owner);
-    const agentId = await createAgent(token, { invocationUrl: "https://example.invalid" });
+    // Deliberately `example.com`, not `example.invalid`: `callAgent`'s own
+    // `assertSafeInvocationDestination` does a REAL DNS lookup for its
+    // SSRF guard, checked BEFORE credential resolution — and RFC 2606
+    // reserves `.invalid` to NEVER resolve, so a standards-compliant
+    // resolver (confirmed: GitHub Actions' CI runner) makes that lookup
+    // fail and short-circuits to `network_error` before this test's own
+    // target code path (credential resolution) is ever reached. A local
+    // machine whose resolver happens to hijack NXDOMAIN responses (some
+    // ISP/VPN configurations do) can mask this and let the test "pass"
+    // for the wrong reason. `example.com` is IANA's own reserved-and-
+    // guaranteed-resolvable documentation domain — real, stable public
+    // IPs everywhere — so the SSRF check deterministically passes and
+    // this test actually reaches the credential check it's named for.
+    const agentId = await createAgent(token, { invocationUrl: "https://example.com" });
 
     const response = await app.inject({
       method: "POST",
