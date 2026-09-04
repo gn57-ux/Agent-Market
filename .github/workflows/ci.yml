@@ -71,7 +71,17 @@ jobs:
     # This job gives those tests a real Postgres service to opt into.
     services:
       postgres:
-        image: postgres:16
+        # Real CI run (this job's own first execution in GitHub Actions,
+        # not just a local replay) caught a real gap: plain `postgres:16`
+        # has no `vector` extension, but migration 0015
+        # (vector-recall-scoring, a pre-existing Feature this job's own
+        # migration run always applies) needs `CREATE EXTENSION vector` —
+        # every DB-backed test in this job failed at migration time.
+        # `pgvector/pgvector:pg16` is the standard drop-in Postgres 16
+        # image with pgvector already installed; local development had
+        # been masking this because the local Postgres install already
+        # has the extension available.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: agent_market
           POSTGRES_PASSWORD: changeme
