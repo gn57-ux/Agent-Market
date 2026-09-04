@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { encodeEventTopics } from "viem";
 import type { BlockResult, ChainRpcClient, TransactionReceiptResult } from "./rpc.client.js";
-import { TASK_CANCELLED_EVENT_ABI } from "./task-cancelled-event.js";
-import type { RawEventLog } from "./task-funded-event.js";
+import { TASK_CANCELLED_EVENT_ABI } from "@agent-market/domain";
+import type { RawEventLog } from "@agent-market/domain";
 import {
   verifyCancellationTransaction,
   type VerifyCancellationTransactionParams,

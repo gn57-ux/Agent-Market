@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { runMigrations } from "../../db/migrate.js";
-import { requireTestDatabaseUrl } from "../../db/test-support.js";
+import { requireTestDatabaseUrl } from "@agent-market/domain";
 import { countActiveTasksByAgentIds } from "./repository.js";
 
 // See db/migrate.integration.test.ts's header comment: skipped unless a
@@ -23,7 +23,7 @@ const migrationsDir = path.resolve(
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
   "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, " +
-  "sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, schema_migrations CASCADE";
+  "sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE";
 
 const OWNER_ADDRESS = "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3";
 const REQUESTER_ADDRESS = "0x5583fefc63f0cd0e873a0000c6d07ef7b77e90d4";

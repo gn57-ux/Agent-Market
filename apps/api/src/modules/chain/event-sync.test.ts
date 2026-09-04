@@ -1,11 +1,11 @@
 import { encodeAbiParameters, encodeEventTopics, getAddress, keccak256, toHex } from "viem";
 import { describe, expect, it } from "vitest";
-import { TASK_FUNDED_EVENT_ABI, type RawEventLog } from "./task-funded-event.js";
-import { RESULT_APPROVED_EVENT_ABI } from "./result-approved-event.js";
-import { DELIVERY_TIMEOUT_CLAIMED_EVENT_ABI } from "./delivery-timeout-claimed-event.js";
-import { REVIEW_TIMEOUT_FINALIZED_EVENT_ABI } from "./review-timeout-finalized-event.js";
-import { DISPUTE_OPENED_EVENT_ABI } from "./dispute-opened-event.js";
-import { DISPUTE_RESOLVED_EVENT_ABI } from "./dispute-resolved-event.js";
+import { TASK_FUNDED_EVENT_ABI, type RawEventLog } from "@agent-market/domain";
+import { RESULT_APPROVED_EVENT_ABI } from "@agent-market/domain";
+import { DELIVERY_TIMEOUT_CLAIMED_EVENT_ABI } from "@agent-market/domain";
+import { REVIEW_TIMEOUT_FINALIZED_EVENT_ABI } from "@agent-market/domain";
+import { DISPUTE_OPENED_EVENT_ABI } from "@agent-market/domain";
+import { DISPUTE_RESOLVED_EVENT_ABI } from "@agent-market/domain";
 import {
   decodeDeliveryTimeoutClaimedEventsFromLogs,
   decodeDisputeOpenedEventsFromLogs,

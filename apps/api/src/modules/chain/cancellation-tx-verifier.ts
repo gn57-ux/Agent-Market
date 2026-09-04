@@ -1,6 +1,6 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { ChainRpcClient } from "./rpc.client.js";
-import { findTaskCancelledLog } from "./task-cancelled-event.js";
+import { findTaskCancelledLog } from "@agent-market/domain";
 
 // Same bind-every-code-to-a-const discipline as every other verifier in
 // this codebase.

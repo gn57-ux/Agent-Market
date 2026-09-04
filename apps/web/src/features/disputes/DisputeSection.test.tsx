@@ -127,8 +127,12 @@ describe("DisputeSection — SUBMITTED", () => {
       new disputesApi.ApiError(404, "该任务尚无争议记录。"),
     );
     const { container } = render(<DisputeSection taskId="task-1" />);
-    await waitFor(() => expect(tasksApi.getTask).toHaveBeenCalled());
-    expect(container.textContent).toBe("");
+    // Waiting only for the mock to have been CALLED (not for the
+    // resulting state update to have actually rendered) raced against the
+    // component's own loading state on a slower CI runner — matches the
+    // already-correct pattern used a few tests down: poll the real DOM
+    // outcome directly, not an intermediate signal.
+    await waitFor(() => expect(container.textContent).toBe(""));
   });
 
   it("renders nothing when signed out (identity cannot be determined without a session)", async () => {
@@ -328,8 +332,10 @@ describe("DisputeSection — DISPUTED, requester view", () => {
       new disputesApi.ApiError(404, "该任务尚无争议记录。"),
     );
     const { container } = render(<DisputeSection taskId="task-1" />);
-    await waitFor(() => expect(disputesApi.getDispute).toHaveBeenCalled());
-    expect(container.textContent).toBe("");
+    // Same real race as the "non-requester" test above (fixed there for
+    // the identical reason): poll the actual rendered outcome, not just
+    // "the mock was called".
+    await waitFor(() => expect(container.textContent).toBe(""));
   });
 
   // Codex review (T-1007 round 1, P2 — routed to T-1005's own lineage): a

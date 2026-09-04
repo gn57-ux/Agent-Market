@@ -30,8 +30,22 @@ jobs:
         run: pnpm --filter @agent-market/domain test
       - name: Build packages/domain
         run: pnpm --filter @agent-market/domain build
+      - name: Typecheck packages/queue
+        run: pnpm --filter @agent-market/queue typecheck
+      - name: Test packages/queue
+        run: pnpm --filter @agent-market/queue test
+      - name: Build packages/queue
+        run: pnpm --filter @agent-market/queue build
       - name: Typecheck apps/api
         run: pnpm --filter @agent-market/api typecheck
+      - name: Typecheck apps/worker
+        run: pnpm --filter @agent-market/worker typecheck
+      - name: Build apps/worker
+        run: pnpm --filter @agent-market/worker build
+      - name: Typecheck apps/indexer
+        run: pnpm --filter @agent-market/indexer typecheck
+      - name: Test apps/indexer
+        run: pnpm --filter @agent-market/indexer test
       - name: Typecheck apps/web
         run: pnpm --filter @agent-market/web typecheck
       - name: Test apps/web
@@ -40,6 +54,74 @@ jobs:
         run: pnpm --filter @agent-market/web build
       - name: Build apps/api
         run: pnpm --filter @agent-market/api build
+      - name: Build apps/indexer
+        run: pnpm --filter @agent-market/indexer build
+
+  db-integration-quality-gates:
+    name: DB Integration Tests (real Postgres)
+    runs-on: ubuntu-latest
+    # N4 real finding (T-1804, P2): the node-quality-gates job above runs
+    # `vitest run` for packages/queue and apps/api WITHOUT
+    # RUN_DB_INTEGRATION_TESTS=1/TEST_DATABASE_URL — every real-Postgres
+    # integration test (this project's own established "opt-in, needs a
+    # confirmed-safe throwaway database" pattern — see
+    # `requireTestDatabaseUrl`'s own doc comment) was silently SKIPPED, so
+    # the retry/DLQ/crash-recovery/process-independence behavior those
+    # tests exist to verify could regress with CI staying green throughout.
+    # This job gives those tests a real Postgres service to opt into.
+    services:
+      postgres:
+        # Real CI run (this job's own first execution in GitHub Actions,
+        # not just a local replay) caught a real gap: plain `postgres:16`
+        # has no `vector` extension, but migration 0015
+        # (vector-recall-scoring, a pre-existing Feature this job's own
+        # migration run always applies) needs `CREATE EXTENSION vector` —
+        # every DB-backed test in this job failed at migration time.
+        # `pgvector/pgvector:pg16` is the standard drop-in Postgres 16
+        # image with pgvector already installed; local development had
+        # been masking this because the local Postgres install already
+        # has the extension available.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: agent_market
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: agent_market_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      RUN_DB_INTEGRATION_TESTS: "1"
+      TEST_DATABASE_URL: postgres://agent_market:changeme@localhost:5432/agent_market_test
+      DATABASE_URL: postgres://agent_market:changeme@localhost:5432/agent_market_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build packages/domain
+        run: pnpm --filter @agent-market/domain build
+      - name: Build packages/queue
+        run: pnpm --filter @agent-market/queue build
+      - name: Test packages/queue (real Postgres)
+        run: pnpm --filter @agent-market/queue test
+      - name: Test apps/api (real Postgres, includes T-1804's worker-independence e2e)
+        # The two Privy-credential-gated suites are excluded here, not
+        # silenced permanently: they need real PRIVY_APP_ID/PRIVY_APP_SECRET
+        # test credentials this CI job does not have (Feature 17's N6 review
+        # already proved these are pre-existing failures via a real
+        # baseline-commit comparison, unrelated to Feature 18) — leaving
+        # them in a REQUIRED job with no real credentials to satisfy them
+        # would make this gate permanently red for reasons unrelated to any
+        # real regression, defeating the point of adding it.
+        run: pnpm --filter @agent-market/api test -- --exclude "**/privy-identity-provider.integration.test.ts" --exclude "**/privy-routes.integration.test.ts"
 
   go-quality-gates:
     name: Go build / vet / test

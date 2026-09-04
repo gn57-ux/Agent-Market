@@ -22,7 +22,7 @@ import {
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { buildApp } from "../app.js";
 import { runMigrations } from "../db/migrate.js";
-import { requireTestDatabaseUrl } from "../db/test-support.js";
+import { requireTestDatabaseUrl } from "@agent-market/domain";
 import { buildSignInMessage } from "../modules/auth/signInMessage.js";
 import { callAgent } from "../modules/agents/invocation-client.js";
 
@@ -105,7 +105,7 @@ const execFileAsync = promisify(execFile);
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE";
 
 // Same well-known deterministic Hardhat Network default accounts
 // `full-lifecycle.hardhat.e2e.test.ts` (T-1007) already uses — publicly

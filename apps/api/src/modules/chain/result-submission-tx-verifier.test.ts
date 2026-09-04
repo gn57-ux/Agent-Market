@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { encodeAbiParameters, encodeEventTopics, getAddress } from "viem";
 import type { BlockResult, ChainRpcClient, TransactionReceiptResult } from "./rpc.client.js";
-import { RESULT_SUBMITTED_EVENT_ABI } from "./result-submitted-event.js";
-import type { RawEventLog } from "./task-funded-event.js";
+import { RESULT_SUBMITTED_EVENT_ABI } from "@agent-market/domain";
+import type { RawEventLog } from "@agent-market/domain";
 import {
   verifyResultSubmissionTransaction,
   type ResultSubmissionVerificationExpectation,

@@ -1,6 +1,6 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { ChainRpcClient } from "./rpc.client.js";
-import { findResultSubmittedLog } from "./result-submitted-event.js";
+import { findResultSubmittedLog } from "@agent-market/domain";
 
 // Same bind-every-code-to-a-const discipline as tx-verifier.ts/
 // acceptance-tx-verifier.ts. No new ErrorCode is introduced for a decoded

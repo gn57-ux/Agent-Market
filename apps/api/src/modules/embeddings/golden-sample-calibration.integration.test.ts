@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { runMigrations } from "../../db/migrate.js";
-import { requireTestDatabaseUrl } from "../../db/test-support.js";
+import { requireTestDatabaseUrl } from "@agent-market/domain";
 import { buildAgentEmbeddingText, buildTaskEmbeddingText } from "./embed-on-save.js";
 import { OllamaEmbeddingProvider } from "./ollama-provider.js";
 

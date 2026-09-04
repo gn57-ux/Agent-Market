@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { buildApp } from "../../app.js";
 import { runMigrations } from "../../db/migrate.js";
-import { requireTestDatabaseUrl } from "../../db/test-support.js";
+import { requireTestDatabaseUrl } from "@agent-market/domain";
 import { buildSignInMessage } from "../auth/signInMessage.js";
 
 // See db/migrate.integration.test.ts's header comment: skipped unless a
@@ -41,7 +41,7 @@ runIfOptedIn("POST /agents/:agentId/invocation-test (integration, F-1204/T-1203)
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -200,7 +200,20 @@ runIfOptedIn("POST /agents/:agentId/invocation-test (integration, F-1204/T-1203)
 
   it("returns a clean credential_unresolved result when the Agent has no credentialRef configured", async () => {
     const token = await login(owner);
-    const agentId = await createAgent(token, { invocationUrl: "https://example.invalid" });
+    // Deliberately `example.com`, not `example.invalid`: `callAgent`'s own
+    // `assertSafeInvocationDestination` does a REAL DNS lookup for its
+    // SSRF guard, checked BEFORE credential resolution — and RFC 2606
+    // reserves `.invalid` to NEVER resolve, so a standards-compliant
+    // resolver (confirmed: GitHub Actions' CI runner) makes that lookup
+    // fail and short-circuits to `network_error` before this test's own
+    // target code path (credential resolution) is ever reached. A local
+    // machine whose resolver happens to hijack NXDOMAIN responses (some
+    // ISP/VPN configurations do) can mask this and let the test "pass"
+    // for the wrong reason. `example.com` is IANA's own reserved-and-
+    // guaranteed-resolvable documentation domain — real, stable public
+    // IPs everywhere — so the SSRF check deterministically passes and
+    // this test actually reaches the credential check it's named for.
+    const agentId = await createAgent(token, { invocationUrl: "https://example.com" });
 
     const response = await app.inject({
       method: "POST",

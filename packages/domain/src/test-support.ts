@@ -1,11 +1,16 @@
 /**
- * Shared guard for the two `*.integration.test.ts` suites, which run real
- * DDL/DML (including dropping tables in `afterAll`) against a real
- * PostgreSQL database. Both suites must call this — not construct
- * `pg.Pool` directly from an env var themselves — so "refuse to run
- * destructively without an explicit, confirmed-safe target database" is
- * single-sourced here rather than reimplemented per suite (CLAUDE.md 原则
- * 6).
+ * Shared guard for every `*.integration.test.ts`/`*.hardhat.e2e.test.ts`
+ * suite across this monorepo's TS apps (`apps/api`, and — Feature 18,
+ * T-1805 — `apps/indexer`), which run real DDL/DML (including dropping
+ * tables in `afterAll`) against a real PostgreSQL database. Every such
+ * suite must call this — not construct `pg.Pool` directly from an env var
+ * itself — so "refuse to run destructively without an explicit,
+ * confirmed-safe target database" is single-sourced here rather than
+ * reimplemented per app (CLAUDE.md 原则 6). Originally lived in
+ * `apps/api/src/db/test-support.ts`; moved into `packages/domain` once
+ * `apps/indexer` became a second real, independently-deployable consumer
+ * needing the exact same guard (same reasoning as this package's
+ * `chain-events/` move).
  *
  * Codex review (T-403 round 1, P1): the original version let
  * `RUN_DB_INTEGRATION_TESTS=1` opt in without also requiring an explicit
@@ -13,14 +18,14 @@
  * a local Unix socket default.
  *
  * Codex review (T-403 round 2, P1, still unresolved after round 1's fix):
- * requiring `DATABASE_URL` specifically isn't enough either — this
- * package's `vitest.config.ts` sets `envDir: "../../"`, which auto-loads
- * the repo root `.env`. That file's whole purpose is to hold the app's
- * normal, real `DATABASE_URL` (per `.env.example`'s documented convention)
- * — so on any machine where a developer has that configured for actually
- * running the API, opting into these tests via `RUN_DB_INTEGRATION_TESTS=1`
- * alone would point the destructive `afterAll` DROP TABLE at that same
- * real database, not a throwaway one.
+ * requiring `DATABASE_URL` specifically isn't enough either — every
+ * consuming package's own `vitest.config.ts` sets `envDir: "../../"`,
+ * which auto-loads the repo root `.env`. That file's whole purpose is to
+ * hold the app's normal, real `DATABASE_URL` (per `.env.example`'s
+ * documented convention) — so on any machine where a developer has that
+ * configured for actually running the API, opting into these tests via
+ * `RUN_DB_INTEGRATION_TESTS=1` alone would point the destructive
+ * `afterAll` DROP TABLE at that same real database, not a throwaway one.
  *
  * Fixed by requiring a SEPARATE `TEST_DATABASE_URL` env var, which nothing
  * else in this project ever auto-populates — an operator has to set it
