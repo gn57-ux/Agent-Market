@@ -19,15 +19,15 @@ import type { Queryable } from "../../db/pool.js";
  * threshold for a BRAND NEW candidate model that had never actually run a
  * single real shadow request itself. Fixed: filtered to `ctr_model_id =
  * modelId` — this candidate's OWN real shadow evidence, and nothing else.
- * A direct, honest consequence (not a bug to work around): until Python
- * actually tags a `/rerank` response's `rankingPolicyVersion` with a real
- * candidate model id (no writer does this yet — see `dispatch_rerank_runs`
- * .doc comment), THIS FILTER MEANS EVERY CANDIDATE MODEL REPORTS ZERO
- * shadow samples, and promotion can never pass the shadow gate — matching
- * tasks.md's own documented resolution exactly ("T-1905 首次运行只做离线
- * 评估，晋升判断待 T-1906/T-1912 上线后才能真正执行"). Wiring a candidate
- * model's weights into a live, tagged shadow `/rerank` call is real future
- * work, not invented here to force a pass.
+ * T-1907 (用户 2026-09-06 决策) closed the gap this filter's own honest
+ * consequence used to name here: `shadow-rerank.ts` now looks up the real
+ * active `ctr_models` row on every call and sends its actual weights (not
+ * just an opaque id) to Python, which genuinely uses them for
+ * `fuse_signals` and echoes the SAME version back only when it truly did
+ * so (`services/dispatch-rerank`'s `RankingPolicy`/`run_rerank_pipeline`)
+ * — real shadow samples now accumulate against a real candidate model id
+ * once one exists and real traffic flows, closing what this comment
+ * previously described as a structural zero.
  *
  * N4 real finding (P1, round 1): `sufficientData` alone doesn't check
  * whether the real shadow evidence is actually GOOD — 30 samples that all

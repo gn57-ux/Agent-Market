@@ -40,3 +40,23 @@ def test_fuse_signals_is_deterministic_across_repeated_calls():
     first = fuse_signals(signals)
     second = fuse_signals(signals)
     assert first == second
+
+
+def test_fuse_signals_returns_zero_instead_of_dividing_by_zero_when_a_real_policy_only_weights_a_signal_this_candidate_lacks():
+    # N4 real finding (P1, round 2, T-1907): a real, legitimate policy that
+    # weights ONLY communication (weight 1.0, everything else 0 — exactly
+    # `COMMUNICATION_ONLY_WEIGHTS` used elsewhere in this codebase's own
+    # release-gate tests) combined with a real candidate that genuinely has
+    # no communication signal yet (F-1309 allows any single signal to be
+    # missing) leaves `present` holding only zero-weighted signals — the
+    # weight-sum denominator is 0 even though the REQUEST-level weights
+    # summed to a positive value overall. Must return 0.0, never raise.
+    communication_only_weights = {
+        "completion_rate": 0.0,
+        "quality_feedback": 0.0,
+        "communication": 1.0,
+        "dispute_signal": 0.0,
+        "historical_scale": 0.0,
+    }
+    signals = CandidateSignals(completionRate=0.9, disputeSignal=0.8, historicalScale=0.5)
+    assert fuse_signals(signals, communication_only_weights) == 0.0

@@ -62,15 +62,65 @@ export interface components {
             /** V0Score */
             v0Score: number;
         };
+        /**
+         * FusionWeights
+         * @description Mirrors `apps/api`'s `FusionWeights` (`ctr-training/fusion-weights.ts`)
+         *     field-for-field — the same five coefficients `fusion.py`'s
+         *     `fuse_signals` already uses, just supplied by the caller instead of
+         *     this service's own `DEFAULT_WEIGHTS` constant. This service has no
+         *     database connection of its own (F-1914/F-1915's own architectural
+         *     boundary) — Node is the only side that knows which `ranking_policy_
+         *     version` is currently active, so it must supply the actual weight
+         *     values, not just an opaque id this service would have no way to
+         *     resolve.
+         */
+        FusionWeights: {
+            /** Communication */
+            communication: number;
+            /** Completionrate */
+            completionRate: number;
+            /** Disputesignal */
+            disputeSignal: number;
+            /** Historicalscale */
+            historicalScale: number;
+            /** Qualityfeedback */
+            qualityFeedback: number;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /**
+         * RankingPolicy
+         * @description T-1907 real finding (round 3, 用户 2026-09-06 决策): a single,
+         *     atomic object rather than two independent optional fields
+         *     (`rankingPolicyVersion`/`fusionWeights` sent separately) — CLAUDE.md
+         *     原则 8 ("尽可能让非法状态无法表示"): `version` naming a real
+         *     `ctr_models.id` while `weights` is missing (or vice versa) is not a
+         *     real, meaningful state this contract should be able to express at
+         *     all. A request with a `RankingPolicy` genuinely commits to "use THESE
+         *     weights, under THIS version id"; omitting the whole object is the only
+         *     way to ask for the always-safe default (Go's fixed `v0.2` weights,
+         *     `ranking_policy_version: null` in the response — today's existing
+         *     honest behavior, unchanged).
+         *
+         *     `version` deliberately has no format constraint here (Node's
+         *     `ctr_models.id` is a UUID today, but this service has no reason to
+         *     know or enforce that shape — it only ever echoes back verbatim
+         *     whatever string Node sent, once it has confirmed the accompanying
+         *     weights were real enough to actually use for this computation).
+         */
+        RankingPolicy: {
+            /** Version */
+            version: string;
+            weights: components["schemas"]["FusionWeights"];
+        };
         /** RerankRequest */
         RerankRequest: {
             /** Candidates */
             candidates: components["schemas"]["CandidateSnapshot"][];
+            rankingPolicy?: components["schemas"]["RankingPolicy"] | null;
             /**
              * Stage
              * @enum {string}

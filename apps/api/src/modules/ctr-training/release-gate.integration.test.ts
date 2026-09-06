@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Pool } from "pg";
 import { runMigrations } from "../../db/migrate.js";
 import { requireTestDatabaseUrl } from "@agent-market/domain";
@@ -15,12 +15,26 @@ import { DEFAULT_FUSION_WEIGHTS, type FusionWeights } from "./fusion-weights.js"
 
 /**
  * Real-Postgres integration test for T-1907's release-stage gate
- * (F-1910/F-1916, 用户 2026-09-06 Q-1902 决策). Covers all four numeric
- * gates against real data (real `shadow_ranking_results`/
- * `recommendation_runs` for the sample/agreement gates, real
- * `interaction_events` for the effect gate, real `dispatch_rerank_runs`
- * for the stability gate), the fail-closed readiness check, one-step-only
- * stage advancement with human approval, and automatic rollback.
+ * (F-1910/F-1916, 用户 2026-09-06 Q-1902 决策，round 3 追加决策).
+ *
+ * 用户 2026-09-06 round-3 决策明确要求："不得用手工 SQL 或合成字段直接写库
+ * 冒充链路验证"——本文件的每一条 `dispatch_rerank_runs`/`shadow_ranking_
+ * results` 记录，均通过真实调用 `runShadowRerank`（`dispatch/shadow-
+ * rerank.ts`，本项目唯一真实写这两张表的代码）产生，只在最外层的 Python
+ * HTTP 边界打桩（`callRerankService`，同 `shadow-rerank-stage.integration
+ * .test.ts` 已建立的惯例），从未在任何地方对这两张表执行手写 INSERT/
+ * UPDATE 业务字段。唯一的例外是"30 天窗口之外"这一个场景需要模拟时间流
+ * 逝——真实调用产生真实的一行后，只回填 `created_at`/`computed_at`
+ * 这两个时间戳列（不是业务字段本身：候选、排序、policy 归属全部来自真实
+ * 调用），标注在该测试自己的注释里。
+ *
+ * 效果门槛依赖的 `interaction_events`/`recommendation_candidates`/
+ * `ratings` 数据是另一个真实子系统（T-1900-1904，任务生命周期事件）的真
+ * 实数据形态，与本文件真正要验证的"rerank 调用链→shadow 比较样本"是完全
+ * 不同的问题——沿用 `dataset-builder.integration.test.ts` 自己已建立的直
+ * 接 SQL 播种惯例（该测试文件本身也是这样做的，因为 `interaction_events`
+ * 在真实系统里由 outbox relay 异步写入，直接播种是这个子系统自己测试的
+ * 既定方式），不在本次范围内重新设计。
  */
 const runIfOptedIn = process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
 
@@ -63,6 +77,18 @@ function signalsFor(favored: boolean) {
   };
 }
 
+const callRerankServiceMock = vi.fn();
+vi.mock("../dispatch/rerank-client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../dispatch/rerank-client.js")>();
+  return {
+    ...actual,
+    callRerankService: (...args: Parameters<typeof actual.callRerankService>) =>
+      callRerankServiceMock(...args),
+  };
+});
+
+const { runShadowRerank } = await import("../dispatch/shadow-rerank.js");
+
 runIfOptedIn("release-gate (integration, T-1907)", () => {
   let pool: Pool;
 
@@ -77,6 +103,10 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
   afterAll(async () => {
     await pool.query(DROP_ALL_TABLES_SQL);
     await pool.end();
+  });
+
+  beforeEach(() => {
+    callRerankServiceMock.mockReset();
   });
 
   afterEach(async () => {
@@ -126,37 +156,98 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
     return { taskId, runId: run?.id ?? "" };
   }
 
-  /** Seeds `count` real, DISTINCT-task shadow comparisons, all tagged with
-   * `modelId`, backdated `daysAgo` days into `computed_at` (default: well
-   * inside the trailing-30-day window). `agreementRate` controls what
-   * fraction agree with Go's real top-1 pick. */
-  async function seedDistinctShadowResults(
+  /**
+   * Real `runShadowRerank` call chain — the ONE function this whole file
+   * uses to produce every `dispatch_rerank_runs`/`shadow_ranking_results`
+   * row (see this file's own module doc comment). `modelId` (if provided)
+   * is echoed back as the mock's `rankingPolicyVersion`, simulating a
+   * real, well-behaved Python service confirming it genuinely used the
+   * REAL active model's weights `runShadowRerank` itself looked up and
+   * sent — never a value this test invents independently of what a real
+   * response would say.
+   */
+  async function realShadowCall(input: {
+    modelId?: string;
+    agree: boolean;
+    latencyMs?: number;
+    outcome?: "SUCCESS" | "TIMEOUT" | "ERROR";
+    traceId: string;
+  }): Promise<string> {
+    const { runId } = await seedTaskWithRun();
+    const outcome = input.outcome ?? "SUCCESS";
+    callRerankServiceMock.mockResolvedValueOnce(
+      outcome === "SUCCESS"
+        ? {
+            outcome: "SUCCESS",
+            response: {
+              rankedAgentIds: input.agree ? ["agent-a", "agent-b"] : ["agent-b", "agent-a"],
+              rationales: [
+                { agentId: "agent-a", reason: "x" },
+                { agentId: "agent-b", reason: "y" },
+              ],
+              rerankServiceVersion: "test",
+              rankingPolicyVersion: input.modelId ?? null,
+              llmAdopted: true,
+            },
+            latencyMs: input.latencyMs ?? 100,
+            traceId: input.traceId,
+          }
+        : {
+            outcome,
+            response: null,
+            latencyMs: input.latencyMs ?? 100,
+            traceId: input.traceId,
+          },
+    );
+
+    await runShadowRerank(pool, {
+      runId,
+      taskDescription: "test",
+      recommendations: [
+        { agentId: "agent-a", rank: 1, score: 0.9 },
+        { agentId: "agent-b", rank: 2, score: 0.5 },
+      ],
+      reputationSignalsDigestByAgentId: new Map(),
+      semanticSimilarityByAgentId: new Map(),
+      traceId: input.traceId,
+    });
+
+    return runId;
+  }
+
+  /** `count` real, distinct-task shadow comparisons, all genuinely
+   * attributed to `modelId` (the REAL active model at call time —
+   * `runShadowRerank` looks it up itself; this helper doesn't set it,
+   * the caller must already have called `seedActiveModel`). */
+  async function realDistinctShadowResults(
     modelId: string,
     count: number,
     agreementRate: number,
-    options: { daysAgo?: number; latencyMs?: number } = {},
-  ): Promise<void> {
-    const daysAgo = options.daysAgo ?? 1;
-    const latencyMs = options.latencyMs ?? 100;
+  ): Promise<string[]> {
+    const runIds: string[] = [];
     for (let i = 0; i < count; i += 1) {
-      const { runId } = await seedTaskWithRun();
-      const {
-        rows: [rerankRun],
-      } = await pool.query<{ id: string }>(
-        `INSERT INTO dispatch_rerank_runs (run_id, stage, rerank_service_version, outcome, latency_ms, adopted, trace_id, created_at)
-         VALUES ($1, 'SHADOW', 'test-version', 'SUCCESS', $2, false, $3, now() - ($4::int * interval '1 day'))
-         RETURNING id`,
-        [runId, latencyMs, `trace-${modelId}-${i}`, daysAgo],
-      );
-      const agrees = i < Math.round(count * agreementRate);
-      const real = ["agent-a", "agent-b"];
-      const shadow = agrees ? ["agent-a", "agent-b"] : ["agent-b", "agent-a"];
-      await pool.query(
-        `INSERT INTO shadow_ranking_results (run_id, rerank_run_id, ctr_model_id, shadow_ranked_agent_ids, real_ranked_agent_ids, computed_at)
-         VALUES ($1, $2, $3, $4, $5, now() - ($6::int * interval '1 day'))`,
-        [runId, rerankRun?.id, modelId, JSON.stringify(shadow), JSON.stringify(real), daysAgo],
-      );
+      const agree = i < Math.round(count * agreementRate);
+      runIds.push(await realShadowCall({ modelId, agree, traceId: `trace-${modelId}-${i}` }));
     }
+    return runIds;
+  }
+
+  /** Backdates a real, already-inserted shadow comparison's timestamps —
+   * simulates the passage of time (impossible to do by actually waiting
+   * 45 real days in a test), NOT fabrication of the row's substance: the
+   * candidates, ranking, and policy attribution above were all produced
+   * by the real `runShadowRerank` call this function's caller already
+   * made. */
+  async function backdateShadowEvidence(runId: string, daysAgo: number): Promise<void> {
+    await pool.query(
+      `UPDATE dispatch_rerank_runs SET created_at = now() - ($1::int * interval '1 day') WHERE run_id = $2`,
+      [daysAgo, runId],
+    );
+    await pool.query(
+      `UPDATE shadow_ranking_results SET computed_at = now() - ($1::int * interval '1 day')
+       WHERE run_id = $2`,
+      [daysAgo, runId],
+    );
   }
 
   /** Seeds `count` real, distinct tasks each with one accepted candidate
@@ -164,7 +255,11 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
    * `communication` — Go's real baseline weights this signal poorly
    * relative to the (deliberately zeroed) `completionRate`, so this real
    * data lets `COMMUNICATION_ONLY_WEIGHTS` demonstrably out-rank Go's
-   * fixed weights on real historical pairs. */
+   * fixed weights on real historical pairs. This is a DIFFERENT real
+   * subsystem's data (T-1900-1904's `interaction_events`, not the rerank
+   * call chain this file's module doc comment addresses) — direct SQL
+   * seeding here matches `dataset-builder.integration.test.ts`'s own
+   * established convention for that subsystem. */
   async function seedRewardDrivenTasks(count: number): Promise<void> {
     for (let i = 0; i < count; i += 1) {
       const {
@@ -226,18 +321,13 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
     }
   }
 
-  async function seedStableRerankRuns(
+  async function realStableRerankCalls(
     count: number,
     latencyMs: number,
-    outcome: string,
+    outcome: "SUCCESS" | "TIMEOUT" | "ERROR" = "SUCCESS",
   ): Promise<void> {
     for (let i = 0; i < count; i += 1) {
-      const { runId } = await seedTaskWithRun();
-      await pool.query(
-        `INSERT INTO dispatch_rerank_runs (run_id, stage, rerank_service_version, outcome, latency_ms, adopted, trace_id)
-         VALUES ($1, 'SHADOW', 'test-version', $2, $3, false, $4)`,
-        [runId, outcome, latencyMs, `trace-stability-${i}`],
-      );
+      await realShadowCall({ agree: true, latencyMs, outcome, traceId: `trace-stability-${i}` });
     }
   }
 
@@ -251,7 +341,7 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
 
     it("blocks on the sample-size gate when fewer than 200 distinct tasks have real shadow evidence in the window", async () => {
       const modelId = await seedActiveModel(DEFAULT_FUSION_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 5, 1);
+      await realDistinctShadowResults(modelId, 5, 1);
 
       const gate = await evaluateReleaseGate(pool);
       expect(gate.readiness.ready).toBe(true);
@@ -264,18 +354,32 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
       const modelId = await seedActiveModel(DEFAULT_FUSION_WEIGHTS);
       const { runId } = await seedTaskWithRun();
       for (let i = 0; i < 10; i += 1) {
-        const {
-          rows: [rerankRun],
-        } = await pool.query<{ id: string }>(
-          `INSERT INTO dispatch_rerank_runs (run_id, stage, rerank_service_version, outcome, latency_ms, adopted, trace_id)
-           VALUES ($1, 'SHADOW', 'test-version', 'SUCCESS', 100, false, $2) RETURNING id`,
-          [runId, `trace-dup-${i}`],
-        );
-        await pool.query(
-          `INSERT INTO shadow_ranking_results (run_id, rerank_run_id, ctr_model_id, shadow_ranked_agent_ids, real_ranked_agent_ids)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [runId, rerankRun?.id, modelId, JSON.stringify(["a", "b"]), JSON.stringify(["a", "b"])],
-        );
+        callRerankServiceMock.mockResolvedValueOnce({
+          outcome: "SUCCESS",
+          response: {
+            rankedAgentIds: ["a", "b"],
+            rationales: [
+              { agentId: "a", reason: "x" },
+              { agentId: "b", reason: "y" },
+            ],
+            rerankServiceVersion: "test",
+            rankingPolicyVersion: modelId,
+            llmAdopted: true,
+          },
+          latencyMs: 100,
+          traceId: `trace-dup-${i}`,
+        });
+        await runShadowRerank(pool, {
+          runId,
+          taskDescription: "test",
+          recommendations: [
+            { agentId: "a", rank: 1, score: 0.9 },
+            { agentId: "b", rank: 2, score: 0.5 },
+          ],
+          reputationSignalsDigestByAgentId: new Map(),
+          semanticSimilarityByAgentId: new Map(),
+          traceId: `trace-dup-${i}`,
+        });
       }
 
       const gate = await evaluateReleaseGate(pool);
@@ -284,7 +388,10 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
 
     it("excludes shadow evidence outside the 30-day window", async () => {
       const modelId = await seedActiveModel(DEFAULT_FUSION_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 5, 1, { daysAgo: 45 });
+      const runIds = await realDistinctShadowResults(modelId, 5, 1);
+      for (const runId of runIds) {
+        await backdateShadowEvidence(runId, 45);
+      }
 
       const gate = await evaluateReleaseGate(pool);
       expect(gate.sampleGate?.distinctTaskCount).toBe(0);
@@ -292,7 +399,7 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
 
     it("blocks on the agreement-rate gate when real agreement is below 0.65, even with enough distinct-task samples", async () => {
       const modelId = await seedActiveModel(DEFAULT_FUSION_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 200, 0.4);
+      await realDistinctShadowResults(modelId, 200, 0.4);
 
       const gate = await evaluateReleaseGate(pool);
       expect(gate.sampleGate?.sufficientSampleSize).toBe(true);
@@ -303,7 +410,7 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
 
     it("blocks on the effect gate with 'insufficient linkage' when there is no real reward-labeled data in the window", async () => {
       const modelId = await seedActiveModel(DEFAULT_FUSION_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 200, 1);
+      await realDistinctShadowResults(modelId, 200, 1);
 
       const gate = await evaluateReleaseGate(pool);
       expect(gate.effectGate?.sufficientData).toBe(false);
@@ -316,9 +423,9 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
       // exactly the boundary case (equal, not less) — real proof the
       // comparison is `>=`, not silently biased either direction.
       const modelId = await seedActiveModel(DEFAULT_FUSION_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 200, 1);
+      await realDistinctShadowResults(modelId, 200, 1);
       await seedRewardDrivenTasks(40);
-      await seedStableRerankRuns(10, 1000, "SUCCESS");
+      await realStableRerankCalls(10, 1000, "SUCCESS");
 
       const gate = await evaluateReleaseGate(pool);
       expect(gate.effectGate?.sufficientData).toBe(true);
@@ -343,7 +450,14 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
       // number of additional slow calls layered on top of 200 fast ones
       // would not move a real P95 at all, which is the whole point of
       // using a percentile rather than a mean.
-      await seedDistinctShadowResults(modelId, 200, 1, { latencyMs: 12_000 });
+      for (let i = 0; i < 200; i += 1) {
+        await realShadowCall({
+          modelId,
+          agree: true,
+          latencyMs: 12_000,
+          traceId: `trace-slow-${i}`,
+        });
+      }
       await seedRewardDrivenTasks(40);
 
       const gate = await evaluateReleaseGate(pool);
@@ -355,12 +469,12 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
 
     it("blocks on the stability gate when the error/timeout rate reaches 2%, even though every other gate is otherwise satisfied", async () => {
       const modelId = await seedActiveModel(COMMUNICATION_ONLY_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 200, 1);
+      await realDistinctShadowResults(modelId, 200, 1);
       await seedRewardDrivenTasks(40);
       // 200 real SUCCESS calls already exist from the shadow seeding above
       // — enough real ERROR calls on top to genuinely push the combined
       // rate to/above 2%, not a number chosen to hit an exact decimal.
-      await seedStableRerankRuns(20, 1000, "ERROR");
+      await realStableRerankCalls(20, 1000, "ERROR");
 
       const gate = await evaluateReleaseGate(pool);
       expect(gate.stabilityGate?.hasData).toBe(true);
@@ -371,9 +485,9 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
 
     it("all four gates pass on real data that genuinely satisfies every threshold — the only fully-eligible scenario", async () => {
       const modelId = await seedActiveModel(COMMUNICATION_ONLY_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 200, 0.7);
+      await realDistinctShadowResults(modelId, 200, 0.7);
       await seedRewardDrivenTasks(40);
-      await seedStableRerankRuns(100, 1000, "SUCCESS");
+      await realStableRerankCalls(100, 1000, "SUCCESS");
 
       const gate = await evaluateReleaseGate(pool);
       expect(gate.readiness.ready).toBe(true);
@@ -385,6 +499,22 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
       expect(gate.stabilityGate?.meetsErrorRateThreshold).toBe(true);
       expect(gate.eligibleForAdvancement).toBe(true);
       expect(gate.blockedReasons).toEqual([]);
+    }, 30_000);
+
+    it("mixed-version data stays correctly attributed: a second, different real active model's promotion does not inherit the first model's real shadow evidence", async () => {
+      const firstModelId = await seedActiveModel(DEFAULT_FUSION_WEIGHTS);
+      await realDistinctShadowResults(firstModelId, 200, 1);
+
+      const secondModelId = await seedActiveModel(COMMUNICATION_ONLY_WEIGHTS);
+      const gate = await evaluateReleaseGate(pool);
+      // The now-active SECOND model has zero real shadow evidence of its
+      // own — the first model's 200 real samples must not leak across.
+      expect(gate.sampleGate?.distinctTaskCount).toBe(0);
+      expect(gate.eligibleForAdvancement).toBe(false);
+
+      await realDistinctShadowResults(secondModelId, 200, 1);
+      const gateAfter = await evaluateReleaseGate(pool);
+      expect(gateAfter.sampleGate?.distinctTaskCount).toBe(200);
     }, 30_000);
   });
 
@@ -403,9 +533,9 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
 
     it("advances exactly ONE stage (never skips) and records a human-approved audit row when the gate is eligible", async () => {
       const modelId = await seedActiveModel(COMMUNICATION_ONLY_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 200, 0.7);
+      await realDistinctShadowResults(modelId, 200, 0.7);
       await seedRewardDrivenTasks(40);
-      await seedStableRerankRuns(100, 1000, "SUCCESS");
+      await realStableRerankCalls(100, 1000, "SUCCESS");
 
       const result = await advanceReleaseStage(pool, {
         approvedBy: "0xadmin0000000000000000000000000000000000",
@@ -473,9 +603,9 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
 
     it("is a no-op (no audit row) when GRADUAL still passes a fresh gate re-check", async () => {
       const modelId = await seedActiveModel(COMMUNICATION_ONLY_WEIGHTS);
-      await seedDistinctShadowResults(modelId, 200, 0.7);
+      await realDistinctShadowResults(modelId, 200, 0.7);
       await seedRewardDrivenTasks(40);
-      await seedStableRerankRuns(100, 1000, "SUCCESS");
+      await realStableRerankCalls(100, 1000, "SUCCESS");
       await pool.query(`UPDATE release_stage_state SET stage = 'GRADUAL' WHERE id = true`);
 
       const result = await checkAndAutoRollback(pool);
@@ -511,5 +641,24 @@ runIfOptedIn("release-gate (integration, T-1907)", () => {
       expect(result?.toStage).toBe("SHADOW");
       await expect(getCurrentReleaseStage(pool)).resolves.toBe("SHADOW");
     });
+
+    it("reads the SAME real active-model baseline a later promotion swap produces — auto-rollback re-checks against whatever is active NOW, not what was active when GRADUAL was first entered", async () => {
+      const firstModelId = await seedActiveModel(COMMUNICATION_ONLY_WEIGHTS);
+      await realDistinctShadowResults(firstModelId, 200, 0.7);
+      await seedRewardDrivenTasks(40);
+      await realStableRerankCalls(100, 1000, "SUCCESS");
+      await pool.query(`UPDATE release_stage_state SET stage = 'GRADUAL' WHERE id = true`);
+
+      // A second model is promoted (is_active swaps) — it has NO real
+      // shadow evidence of its own yet, so a fresh gate re-check must now
+      // fail even though the FIRST model's evidence still satisfies every
+      // threshold in isolation.
+      await seedActiveModel(DEFAULT_FUSION_WEIGHTS);
+
+      const result = await checkAndAutoRollback(pool);
+      expect(result?.rolledBack).toBe(true);
+      expect(result?.fromStage).toBe("GRADUAL");
+      expect(result?.toStage).toBe("SHADOW");
+    }, 30_000);
   });
 });

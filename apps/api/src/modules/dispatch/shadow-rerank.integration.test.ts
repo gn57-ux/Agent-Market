@@ -36,6 +36,8 @@ vi.mock("./dispatch.client.js", async (importOriginal) => {
 
 const { buildApp } = await import("../../app.js");
 const { runMigrations } = await import("../../db/migrate.js");
+const { insertCtrModel, setActiveModel } = await import("../ctr-training/ctr-model-repository.js");
+const { DEFAULT_FUSION_WEIGHTS } = await import("../ctr-training/fusion-weights.js");
 
 const runIfOptedIn =
   process.env.RUN_DB_INTEGRATION_TESTS === "1" &&
@@ -231,6 +233,72 @@ runIfOptedIn(
         expect(shadowRow?.ctr_model_id).toBeNull();
         expect(shadowRow?.real_ranked_agent_ids).toEqual([agentId]);
         expect(shadowRow?.shadow_ranked_agent_ids).toEqual([agentId]);
+      },
+      { timeout: 95_000 },
+    );
+
+    it(
+      "T-1907 round 3: a real active ctr_models row's real weights genuinely reach a real Python /rerank call and its OWN response's ranking_policy_version is what gets persisted — zero mocking below the Go boundary",
+      async () => {
+        const modelId = await insertCtrModel(pool, {
+          modelVersion: `e2e-real-policy-${Math.random()}`,
+          dataSnapshotVersion: "snap-e2e",
+          featureVersion: "v1",
+          offlineMetrics: {},
+          fusionWeights: DEFAULT_FUSION_WEIGHTS,
+        });
+        await setActiveModel(pool, modelId);
+
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const agentId = await insertActiveAgent();
+        const token = await login(requester);
+
+        callMatchMock.mockResolvedValue({
+          taskId,
+          algorithmVersion: "v0.1",
+          recommendations: [
+            { agentId, rank: 1, slotType: "TOP_SCORE", score: 0.92, reasons: ["技能匹配"] },
+          ],
+        });
+
+        const response = await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/match`,
+          cookies: { session_token: token },
+        });
+        expect(response.statusCode).toBe(200);
+
+        const { rows } = await pool.query<{
+          ranking_policy_version: string | null;
+          outcome: string;
+        }>(
+          `SELECT drr.ranking_policy_version, drr.outcome
+             FROM dispatch_rerank_runs drr
+             JOIN recommendation_runs rr ON rr.id = drr.run_id
+            WHERE rr.task_id = $1`,
+          [taskId],
+        );
+        expect(rows).toHaveLength(1);
+        // A real Python process, given real weights it can actually use,
+        // must echo back the SAME real model id Node sent — this is the
+        // literal round trip T-1907 round 3 required proof of, with no
+        // mock standing in for Python or the local Ollama model.
+        expect(rows[0]?.ranking_policy_version).toBe(modelId);
+        expect(["SUCCESS", "DEGRADED"]).toContain(rows[0]?.outcome);
+
+        const shadowRows = await pool.query<{ ctr_model_id: string | null }>(
+          `SELECT srr.ctr_model_id
+             FROM shadow_ranking_results srr
+             JOIN recommendation_runs rr ON rr.id = srr.run_id
+            WHERE rr.task_id = $1`,
+          [taskId],
+        );
+        expect(shadowRows.rows).toHaveLength(1);
+        expect(shadowRows.rows[0]?.ctr_model_id).toBe(modelId);
+        // No cleanup here: `shadow_ranking_results.ctr_model_id` FK
+        // (RESTRICT) would reject deleting this model while its own real
+        // row still references it — `afterAll`'s DROP TABLE already
+        // reclaims everything, and this is the file's last test.
       },
       { timeout: 95_000 },
     );

@@ -55,7 +55,9 @@ def rerank(request: RerankRequest, http_request: Request) -> RerankResponse:
     if trace_id:
         logger.info("trace_id=%s POST /rerank", trace_id)
 
-    result = run_rerank_pipeline(request.task_description, request.candidates)
+    result = run_rerank_pipeline(
+        request.task_description, request.candidates, request.ranking_policy
+    )
 
     return RerankResponse(
         ranked_agent_ids=result["ranked_agent_ids"],
@@ -64,6 +66,11 @@ def rerank(request: RerankRequest, http_request: Request) -> RerankResponse:
             for agent_id in result["ranked_agent_ids"]
         ],
         rerank_service_version=SERVICE_VERSION,
-        ranking_policy_version=None,
+        # T-1907 (用户 2026-09-06 决策): read off the PIPELINE's own final
+        # state, never directly off `request.ranking_policy` — see
+        # `run_rerank_pipeline`'s doc comment for why that's the only way
+        # to guarantee this value always matches what `fusion_node`
+        # actually used, not merely what the caller asked for.
+        ranking_policy_version=result["ranking_policy_version"],
         llm_adopted=result["llm_adopted"],
     )

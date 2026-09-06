@@ -11,8 +11,11 @@ export interface InsertDispatchRerankRunInput {
   runId: string;
   stage: "SHADOW" | "GRADUAL" | "PRIMARY";
   rerankServiceVersion: string | null;
-  /** A `ctr_models.id` UUID, once T-1905 registers a real trained policy —
-   * always `null` today (no `ctr_models` row exists yet). */
+  /** A `ctr_models.id` UUID, once T-1905 registers a real trained policy
+   * AND T-1907's real `/rerank` round trip confirms it was actually used
+   * (`shadow-rerank.ts`'s own doc comment) — `null` whenever no policy
+   * was ever promoted, or Python's own response says it couldn't use the
+   * one it was sent. */
   rankingPolicyVersion: string | null;
   outcome: "SUCCESS" | "TIMEOUT" | "ERROR" | "DEGRADED";
   latencyMs: number;

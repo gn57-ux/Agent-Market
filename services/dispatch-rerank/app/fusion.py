@@ -20,6 +20,22 @@ excluded from BOTH the weighted sum and the weight-sum denominator (never
 replaced by 0 or any prior) — the final score is the weighted average of
 only the PRESENT signals, reweighted so their own weights sum to 1. All
 five signals missing returns `0.0` (Go's `NoHistoricalSample` case).
+
+N4 real finding (P1, round 2, T-1907): `FusionWeights`' own request-level
+validation (`models.py`) only guarantees the five weights sum to a
+positive value OVERALL — it cannot know, at validation time, WHICH of a
+given candidate's five signals will turn out to be `None` for a given
+`/rerank` call. A real `ReputationSignalsDigest` genuinely allows any
+single signal to be missing (F-1309) — a real, well-formed policy that
+weights communication only (a real, legitimate strategy this contract
+must be able to express) combined with a real candidate that simply has
+no communication history yet would otherwise leave `present` holding only
+zero-weighted signals, making `weight_sum` zero again despite the
+request-level check having passed. Falling back to `0.0` here — the SAME
+value already used for "no signals at all" — is the correct generalization
+of that existing fallback, not a new special case: "none of this
+candidate's present signals carry any real weight under this policy" is
+exactly as uninformative as "this candidate has no signals at all."
 """
 
 from .models import CandidateSignals
@@ -51,4 +67,6 @@ def fuse_signals(
 
     weighted_sum = sum(value * weight for value, weight in present)
     weight_sum = sum(weight for _, weight in present)
+    if weight_sum <= 0:
+        return 0.0
     return round(weighted_sum / weight_sum, 6)

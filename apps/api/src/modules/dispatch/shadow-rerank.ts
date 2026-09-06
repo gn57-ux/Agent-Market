@@ -7,6 +7,7 @@ import {
 } from "./rerank-repository.js";
 import { toReputationSignalsWire, type ReputationSignalsDigest } from "./reputation-signals.js";
 import { getCurrentReleaseStage } from "../ctr-training/release-gate.js";
+import { getActiveModel } from "../ctr-training/ctr-model-repository.js";
 
 export interface RunShadowRerankInput {
   runId: string;
@@ -84,6 +85,28 @@ export async function runShadowRerank(pool: Pool, input: RunShadowRerankInput): 
     );
   }
 
+  // T-1907 (用户 2026-09-06 决策): the real active `ranking_policy_version`
+  // (if any) is looked up HERE, fresh, on every call — never cached,
+  // never guessed from client input, never a constant — and its actual
+  // fusion weights are sent to Python so the round-tripped
+  // `rankingPolicyVersion` in the response genuinely corresponds to what
+  // was computed (see `rerank-repository.ts`'s own doc comment on why the
+  // response value, not this lookup's own value, is what actually gets
+  // persisted below). A failed lookup degrades the SAME way a failed
+  // stage read does — this function's "never throws" contract covers
+  // this new read too, and omitting `rankingPolicy` entirely is the
+  // existing, always-safe default (Go's fixed weights, `null` version).
+  let activeModel: Awaited<ReturnType<typeof getActiveModel>> = null;
+  try {
+    activeModel = await getActiveModel(pool);
+  } catch (error) {
+    activeModel = null;
+    console.error(
+      "runShadowRerank: failed to read the active ranking_policy_version, omitting it",
+      error,
+    );
+  }
+
   const request: RerankRequestBody = {
     candidates: input.recommendations.map((recommendation) => {
       const digest = input.reputationSignalsDigestByAgentId.get(recommendation.agentId);
@@ -96,9 +119,42 @@ export async function runShadowRerank(pool: Pool, input: RunShadowRerankInput): 
     }),
     taskDescription: input.taskDescription,
     stage,
+    rankingPolicy: activeModel
+      ? { version: activeModel.id, weights: activeModel.fusionWeights }
+      : null,
   };
 
   const result = await callRerankService(request, { traceId: input.traceId });
+
+  // N4 real finding (P1, round 2, T-1907): Python's response is the sole
+  // authority on whether a real policy was used (see the doc comment
+  // below), but that authority only extends to CONFIRMING the exact
+  // version this call itself sent — it must never be trusted to name an
+  // arbitrary OTHER existing model. A version-drifted, buggy, or
+  // compromised Python process echoing back some other real `ctr_models`
+  // .id (one that passes the `ctr_model_id` foreign key just as validly
+  // as the correct one) would otherwise get silently attributed to THIS
+  // call's shadow evidence, corrupting `evaluateReleaseGate`'s sample
+  // attribution and — depending on which model's evidence looked
+  // better — could bias `advanceReleaseStage` itself. Only an EXACT match
+  // against the version this call actually requested is trusted; anything
+  // else (including "no policy was requested at all") degrades to `null`,
+  // the same fail-closed default as "Python couldn't use it."
+  const requestedRankingPolicyVersion = activeModel?.id ?? null;
+  const confirmedRankingPolicyVersion =
+    result.response?.rankingPolicyVersion != null &&
+    result.response.rankingPolicyVersion === requestedRankingPolicyVersion
+      ? result.response.rankingPolicyVersion
+      : null;
+  if (
+    result.response?.rankingPolicyVersion != null &&
+    result.response.rankingPolicyVersion !== requestedRankingPolicyVersion
+  ) {
+    console.error(
+      "runShadowRerank: Python's response named a ranking_policy_version that does not match what this call requested — refusing to attribute this evidence to any model",
+      { requested: requestedRankingPolicyVersion, received: result.response.rankingPolicyVersion },
+    );
+  }
 
   // N4 real finding (P2, round 1): a successful rerank's `dispatch_rerank_
   // runs` row and its `shadow_ranking_results` row are the SAME logical
@@ -115,9 +171,20 @@ export async function runShadowRerank(pool: Pool, input: RunShadowRerankInput): 
       runId: input.runId,
       stage,
       rerankServiceVersion: result.response?.rerankServiceVersion ?? null,
-      // No `ctr_models` row exists yet (T-1905 not built) — every real
-      // `/rerank` response's `rankingPolicyVersion` is `null` today.
-      rankingPolicyVersion: result.response?.rankingPolicyVersion ?? null,
+      // T-1907 (用户 2026-09-06 决策): read off the RESPONSE, never off
+      // `activeModel`/the request this function just sent — Python's own
+      // response is the one source of truth for "was a real policy
+      // actually used for this computation" (see this function's own doc
+      // comment on `rankingPolicy` above, and `models.py`'s
+      // `RankingPolicy`/`run_rerank_pipeline` on the Python side for why
+      // the two can never disagree once a response comes back at all) —
+      // but ONLY once confirmed to match what this call actually
+      // requested (`confirmedRankingPolicyVersion` above, N4 P1 fix round
+      // 2). `null` here can mean "no active model existed," "Python
+      // itself couldn't use the supplied one," OR "Python's answer didn't
+      // match what was asked" — all three are equally and correctly
+      // "don't attribute this evidence to any candidate model."
+      rankingPolicyVersion: confirmedRankingPolicyVersion,
       outcome: resolveDispatchRerankOutcome(result.outcome, result.response?.llmAdopted),
       latencyMs: result.latencyMs,
       adopted: false,
@@ -133,7 +200,7 @@ export async function runShadowRerank(pool: Pool, input: RunShadowRerankInput): 
       await insertShadowRankingResult(client, {
         runId: input.runId,
         rerankRunId,
-        ctrModelId: result.response.rankingPolicyVersion ?? null,
+        ctrModelId: confirmedRankingPolicyVersion,
         shadowRankedAgentIds: result.response.rankedAgentIds,
         realRankedAgentIds: [...input.recommendations]
           .sort((a, b) => a.rank - b.rank)

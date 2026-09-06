@@ -3,8 +3,9 @@ import os
 import pytest
 
 import app.pipeline as pipeline_module
+from app.fusion import DEFAULT_WEIGHTS
 from app.llm_client import LlmCallError, LlmRerankOutput
-from app.models import CandidateSignals, CandidateSnapshot
+from app.models import CandidateSignals, CandidateSnapshot, FusionWeights, RankingPolicy
 from app.pipeline import run_rerank_pipeline
 
 # Real local Ollama + qwen3:8b calls — same "opt-in, needs a real external
@@ -54,6 +55,8 @@ def test_n4_p1_fix_fusion_uses_v0_score_when_signals_are_entirely_absent():
         {
             "task_description": "x",
             "candidates": candidates,
+            "fusion_weights": DEFAULT_WEIGHTS,
+            "ranking_policy_version": None,
             "fused_scores": {},
             "fusion_ordered_ids": [],
             "ranked_agent_ids": [],
@@ -74,6 +77,8 @@ def test_fusion_only_stage_is_deterministic_and_reproducible_without_any_llm_cal
         {
             "task_description": "x",
             "candidates": candidates,
+            "fusion_weights": DEFAULT_WEIGHTS,
+            "ranking_policy_version": None,
             "fused_scores": {},
             "fusion_ordered_ids": [],
             "ranked_agent_ids": [],
@@ -85,6 +90,8 @@ def test_fusion_only_stage_is_deterministic_and_reproducible_without_any_llm_cal
         {
             "task_description": "x",
             "candidates": candidates,
+            "fusion_weights": DEFAULT_WEIGHTS,
+            "ranking_policy_version": None,
             "fused_scores": {},
             "fusion_ordered_ids": [],
             "ranked_agent_ids": [],
@@ -93,6 +100,65 @@ def test_fusion_only_stage_is_deterministic_and_reproducible_without_any_llm_cal
         }
     )
     assert first["fusion_ordered_ids"] == second["fusion_ordered_ids"] == ["agent-1", "agent-2"]
+
+
+# --- T-1907 (用户 2026-09-06 决策): the fusion node must genuinely USE a
+# supplied ranking_policy's weights (not just echo its version string
+# back unused), and the reported version must always match what was
+# really computed ---
+
+
+def test_ranking_policy_weights_are_actually_used_by_the_fusion_node(monkeypatch):
+    # A policy that weights ONLY communication — under Go's real
+    # DEFAULT_WEIGHTS, agent-completion-heavy would win (completionRate's
+    # weight 0.30 > communication's 0.15); under this candidate policy,
+    # the communication-heavy agent must win instead. This is only
+    # possible if `fusion_node` genuinely computed with THESE weights, not
+    # merely accepted and ignored them.
+    monkeypatch.setattr(
+        pipeline_module,
+        "call_rerank_llm",
+        lambda *a, **k: (_ for _ in ()).throw(LlmCallError("skip LLM, fusion order only")),
+    )
+    candidates = [
+        make_candidate("completion-heavy", 0.5, completionRate=0.9, communication=0.0),
+        make_candidate("communication-heavy", 0.5, completionRate=0.0, communication=0.9),
+    ]
+    policy = RankingPolicy(
+        version="11111111-1111-1111-1111-111111111111",
+        weights=FusionWeights(
+            completionRate=0.0,
+            qualityFeedback=0.0,
+            communication=1.0,
+            disputeSignal=0.0,
+            historicalScale=0.0,
+        ),
+    )
+
+    result = run_rerank_pipeline("task", candidates, policy)
+
+    assert result["ranked_agent_ids"][0] == "communication-heavy"
+    assert result["ranking_policy_version"] == "11111111-1111-1111-1111-111111111111"
+
+
+def test_no_ranking_policy_falls_back_to_default_weights_and_null_version(monkeypatch):
+    monkeypatch.setattr(
+        pipeline_module,
+        "call_rerank_llm",
+        lambda *a, **k: (_ for _ in ()).throw(LlmCallError("skip LLM, fusion order only")),
+    )
+    candidates = [
+        make_candidate("completion-heavy", 0.5, completionRate=0.9, communication=0.0),
+        make_candidate("communication-heavy", 0.5, completionRate=0.0, communication=0.9),
+    ]
+
+    result = run_rerank_pipeline("task", candidates, ranking_policy=None)
+
+    # DEFAULT_WEIGHTS' completionRate (0.30) outweighs communication
+    # (0.15) — the completion-heavy candidate wins under Go's real
+    # baseline, exactly like today's existing (pre-T-1907) behavior.
+    assert result["ranked_agent_ids"][0] == "completion-heavy"
+    assert result["ranking_policy_version"] is None
 
 
 def test_empty_candidate_list_short_circuits_without_calling_the_llm(monkeypatch):

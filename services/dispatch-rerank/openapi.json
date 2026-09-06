@@ -120,6 +120,45 @@
         "title": "CandidateSnapshot",
         "type": "object"
       },
+      "FusionWeights": {
+        "description": "Mirrors `apps/api`'s `FusionWeights` (`ctr-training/fusion-weights.ts`)\nfield-for-field \u2014 the same five coefficients `fusion.py`'s\n`fuse_signals` already uses, just supplied by the caller instead of\nthis service's own `DEFAULT_WEIGHTS` constant. This service has no\ndatabase connection of its own (F-1914/F-1915's own architectural\nboundary) \u2014 Node is the only side that knows which `ranking_policy_\nversion` is currently active, so it must supply the actual weight\nvalues, not just an opaque id this service would have no way to\nresolve.",
+        "properties": {
+          "communication": {
+            "minimum": 0.0,
+            "title": "Communication",
+            "type": "number"
+          },
+          "completionRate": {
+            "minimum": 0.0,
+            "title": "Completionrate",
+            "type": "number"
+          },
+          "disputeSignal": {
+            "minimum": 0.0,
+            "title": "Disputesignal",
+            "type": "number"
+          },
+          "historicalScale": {
+            "minimum": 0.0,
+            "title": "Historicalscale",
+            "type": "number"
+          },
+          "qualityFeedback": {
+            "minimum": 0.0,
+            "title": "Qualityfeedback",
+            "type": "number"
+          }
+        },
+        "required": [
+          "completionRate",
+          "qualityFeedback",
+          "communication",
+          "disputeSignal",
+          "historicalScale"
+        ],
+        "title": "FusionWeights",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -133,6 +172,24 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "RankingPolicy": {
+        "description": "T-1907 real finding (round 3, \u7528\u6237 2026-09-06 \u51b3\u7b56): a single,\natomic object rather than two independent optional fields\n(`rankingPolicyVersion`/`fusionWeights` sent separately) \u2014 CLAUDE.md\n\u539f\u5219 8 (\"\u5c3d\u53ef\u80fd\u8ba9\u975e\u6cd5\u72b6\u6001\u65e0\u6cd5\u8868\u793a\"): `version` naming a real\n`ctr_models.id` while `weights` is missing (or vice versa) is not a\nreal, meaningful state this contract should be able to express at\nall. A request with a `RankingPolicy` genuinely commits to \"use THESE\nweights, under THIS version id\"; omitting the whole object is the only\nway to ask for the always-safe default (Go's fixed `v0.2` weights,\n`ranking_policy_version: null` in the response \u2014 today's existing\nhonest behavior, unchanged).\n\n`version` deliberately has no format constraint here (Node's\n`ctr_models.id` is a UUID today, but this service has no reason to\nknow or enforce that shape \u2014 it only ever echoes back verbatim\nwhatever string Node sent, once it has confirmed the accompanying\nweights were real enough to actually use for this computation).",
+        "properties": {
+          "version": {
+            "title": "Version",
+            "type": "string"
+          },
+          "weights": {
+            "$ref": "#/components/schemas/FusionWeights"
+          }
+        },
+        "required": [
+          "version",
+          "weights"
+        ],
+        "title": "RankingPolicy",
+        "type": "object"
+      },
       "RerankRequest": {
         "properties": {
           "candidates": {
@@ -141,6 +198,16 @@
             },
             "title": "Candidates",
             "type": "array"
+          },
+          "rankingPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RankingPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "stage": {
             "enum": [

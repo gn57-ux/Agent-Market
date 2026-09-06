@@ -15,20 +15,22 @@ import { evaluateRerankStabilityForReleaseGate } from "../dispatch/rerank-reposi
  * 6) — `shadow-rerank.ts` (or any future adoption-path code) reads the
  * resulting stage but never decides it.
  *
- * **Explicit, hard architectural limitation this module does NOT paper
- * over** (the user's own 2026-09-06 instruction: "不得用合成数据冒充上线
- * 证据，也不得宣称真实晋升已经验证"): `dispatch_rerank_runs.ranking_policy
- * _version`/`shadow_ranking_results.ctr_model_id` are only ever populated
- * once Python's real `/rerank` response tags a call with a real candidate
- * model id — no writer does this yet (see `rerank-repository.ts`'s own
- * doc comment on `insertDispatchRerankRun`). Until that wiring lands (a
- * real, separate, NOT-in-Feature-19-scope follow-up), `evaluateReleaseGate`
- * below will ALWAYS report zero real shadow samples for any active model,
- * `eligibleForAdvancement` will ALWAYS be `false`, and the system stays in
- * `SHADOW` — not because this code is broken, but because the real
- * telemetry link this gate depends on does not exist in production yet.
- * This is the intended, fail-closed behavior, not a bug to work around
- * with a synthetic bypass.
+ * **T-1907 round 3 (用户 2026-09-06 决策)**: the real `ranking_policy_
+ * version` propagation this gate's sample-size dimension depends on is
+ * now genuinely wired end to end — `shadow-rerank.ts` looks up the real
+ * active `ctr_models` row on every call and sends its actual fusion
+ * weights (not just an opaque id) to Python; Python's `RankingPolicy`/
+ * `run_rerank_pipeline` genuinely uses those weights for `fuse_signals`
+ * and echoes the SAME version back only when it truly did; Node persists
+ * exactly what the response says (never what it originally requested —
+ * see `rerank-repository.ts`'s own `rankingPolicyVersion` doc comment).
+ * Real shadow samples now accumulate against a real candidate model id
+ * as real traffic flows, and the sample/agreement gates below can
+ * genuinely be satisfied by real data — this is no longer a structural
+ * zero, which is exactly what the user's 2026-09-06 follow-up instruction
+ * required ("不得用合成数据冒充上线证据，也不得宣称真实晋升已经验证" —
+ * satisfied by making the real pipeline itself produce the evidence,
+ * never by fabricating rows).
  */
 export type ReleaseStage = "SHADOW" | "GRADUAL" | "PRIMARY";
 
