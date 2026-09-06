@@ -14,7 +14,12 @@
     "admin:bootstrap": "node --env-file-if-exists=../../.env --import tsx/esm scripts/admin-bootstrap.ts",
     "build-ctr-training-dataset": "node --env-file-if-exists=../../.env --import tsx/esm scripts/build-ctr-training-dataset.ts",
     "train-ctr-model": "node --env-file-if-exists=../../.env --import tsx/esm scripts/train-ctr-model.ts",
-    "generate-rerank-types": "openapi-typescript ../../services/dispatch-rerank/openapi.json -o src/modules/dispatch/rerank-types.generated.d.ts"
+    "generate-rerank-types": "openapi-typescript ../../services/dispatch-rerank/openapi.json -o src/modules/dispatch/rerank-types.generated.d.ts",
+    "detect-score-manipulation": "node --env-file-if-exists=../../.env --import tsx/esm scripts/detect-score-manipulation.ts",
+    "detect-fake-delivery": "node --env-file-if-exists=../../.env --import tsx/esm scripts/detect-fake-delivery.ts",
+    "detect-collusion": "node --env-file-if-exists=../../.env --import tsx/esm scripts/detect-collusion.ts",
+    "seed-baseline-evaluation-tasks": "node --env-file-if-exists=../../.env --import tsx/esm scripts/seed-baseline-evaluation-tasks.ts",
+    "backfill-existing-agents-baseline-status": "node --env-file-if-exists=../../.env --import tsx/esm scripts/backfill-existing-agents-baseline-status.ts"
   },
   "dependencies": {
     "@agent-market/domain": "workspace:*",

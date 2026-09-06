@@ -49,6 +49,21 @@ type matchRequest struct {
 	RequesterAddress string           `json:"requesterAddress"`
 	AlgorithmVersion string           `json:"algorithmVersion"`
 	Candidates       []matchCandidate `json:"candidates"`
+	// EnforceBaselineEvaluationGate (Feature 20/T-2009): see
+	// domain.TaskFeatures' own field of the same meaning. A plain bool, not
+	// a pointer — an OLDER apps/api that predates this field entirely
+	// (rolling deployment) decodes it to Go's natural zero value `false`,
+	// which is the safe default (gate disabled) exactly like
+	// `baselineEvaluationStatus`'s own missing-field handling below.
+	EnforceBaselineEvaluationGate bool `json:"enforceBaselineEvaluationGate"`
+	// EnforceRiskHoldGate (Feature 20/T-2008, N4 round-2 follow-up
+	// decision): see domain.TaskFeatures' own field of the same meaning.
+	// Same rolling-deploy-safe reasoning as EnforceBaselineEvaluationGate
+	// above — an OLDER apps/api decodes this to Go's zero value `false`
+	// (gate disabled, condition 9 skipped), which is exactly the intended
+	// fallback: apps/api's own SQL-level filter is the primary, always-on
+	// defense regardless of this flag.
+	EnforceRiskHoldGate bool `json:"enforceRiskHoldGate"`
 }
 
 // matchCandidate is one wire-format candidate inside matchRequest.
@@ -71,6 +86,14 @@ type matchCandidate struct {
 	QualityScore       *float64 `json:"qualityScore"`
 	CreatedAt          string   `json:"createdAt"` // RFC3339
 	IsBanned           bool     `json:"isBanned"`
+	// BaselineEvaluationStatus (Feature 20/T-2009): F-2012's admission-gate
+	// enum, passed straight through to domain.CandidateSnapshot and checked
+	// by eligibility.Filter — see that field's own doc comment.
+	BaselineEvaluationStatus string `json:"baselineEvaluationStatus"`
+	// RiskHoldStatus (Feature 20/T-2008): the independent risk-hold
+	// module's own admission enum — see domain.CandidateSnapshot's own doc
+	// comment for why this is a SEPARATE field from BaselineEvaluationStatus.
+	RiskHoldStatus string `json:"riskHoldStatus"`
 	// SemanticSimilarity (Feature 13, T-1304): apps/api only sends this
 	// non-zero for a "v0.2" request (design.md's contract) — a plain
 	// (non-pointer) float64 so an absent field on the wire (every "v0.1"
@@ -336,13 +359,15 @@ func convertMatchRequest(req matchRequest) (domain.TaskFeatures, []domain.Candid
 	}
 
 	task := domain.TaskFeatures{
-		TaskID:           req.TaskID,
-		Category:         req.Category,
-		SkillTags:        req.SkillTags,
-		DeliveryDeadline: deadline,
-		RequiredLevel:    requiredLevel,
-		RequesterAddress: req.RequesterAddress,
-		AlgorithmVersion: req.AlgorithmVersion,
+		TaskID:                        req.TaskID,
+		Category:                      req.Category,
+		SkillTags:                     req.SkillTags,
+		DeliveryDeadline:              deadline,
+		RequiredLevel:                 requiredLevel,
+		RequesterAddress:              req.RequesterAddress,
+		AlgorithmVersion:              req.AlgorithmVersion,
+		EnforceBaselineEvaluationGate: req.EnforceBaselineEvaluationGate,
+		EnforceRiskHoldGate:           req.EnforceRiskHoldGate,
 	}
 
 	candidates := make([]domain.CandidateSnapshot, 0, len(req.Candidates))
@@ -390,6 +415,40 @@ func convertMatchRequest(req matchRequest) (domain.TaskFeatures, []domain.Candid
 		if err := validateReputationSignalsRange(c.ReputationSignals); err != nil {
 			return domain.TaskFeatures{}, nil, fieldErr(err.Error())
 		}
+		// N4 real finding (P1): an EMPTY string (the field entirely absent
+		// on the wire, since this is a plain non-pointer string) must NOT
+		// be rejected — apps/api and this service deploy independently, so
+		// a rolling deployment that ships this service before apps/api
+		// starts sending the field would otherwise turn every real match
+		// request into a 400 until both sides finish deploying. Missing
+		// resolves to the same conservative "NOT_STARTED" a fresh Agent
+		// already gets from the migration's own column default — never
+		// eligible, exactly the safe direction to fail in. An explicitly
+		// PROVIDED but unrecognized value is still rejected as real
+		// malformed input.
+		if c.BaselineEvaluationStatus != "" && !isValidBaselineEvaluationStatus(c.BaselineEvaluationStatus) {
+			return domain.TaskFeatures{}, nil, fieldErr(`baselineEvaluationStatus must be one of "NOT_STARTED", "PENDING", "PASSED", "FAILED"`)
+		}
+		baselineEvaluationStatus := c.BaselineEvaluationStatus
+		if baselineEvaluationStatus == "" {
+			baselineEvaluationStatus = "NOT_STARTED"
+		}
+
+		// Same rolling-deploy-safe missing-field handling as
+		// baselineEvaluationStatus above — an absent riskHoldStatus
+		// resolves to "NONE" (0034_add_agents_risk_hold_status.sql's own
+		// column default), which happens to ALSO be the eligible direction
+		// here (unlike baselineEvaluationStatus's "NOT_STARTED"). This is
+		// not a coincidence worth relying on elsewhere — it's simply true
+		// that a fresh/never-held Agent should be eligible with respect to
+		// this specific condition, matching the column's own real default.
+		if c.RiskHoldStatus != "" && !isValidRiskHoldStatus(c.RiskHoldStatus) {
+			return domain.TaskFeatures{}, nil, fieldErr(`riskHoldStatus must be one of "NONE", "HELD"`)
+		}
+		riskHoldStatus := c.RiskHoldStatus
+		if riskHoldStatus == "" {
+			riskHoldStatus = "NONE"
+		}
 
 		level, err := domain.ParseLevel(c.Level)
 		if err != nil {
@@ -401,27 +460,55 @@ func convertMatchRequest(req matchRequest) (domain.TaskFeatures, []domain.Candid
 		}
 
 		candidates = append(candidates, domain.CandidateSnapshot{
-			AgentID:            c.AgentID,
-			WalletAddress:      c.WalletAddress,
-			Status:             c.Status,
-			Category:           c.Category,
-			SkillTags:          c.SkillTags,
-			Level:              level,
-			MaxConcurrentTasks: c.MaxConcurrentTasks,
-			ActiveTaskCount:    c.ActiveTaskCount,
-			CompletedTaskCount: c.CompletedTaskCount,
-			SuccessCount:       c.SuccessCount,
-			OverdueCount:       c.OverdueCount,
-			QualityScore:       c.QualityScore,
-			CreatedAt:          createdAt,
-			IsNewcomer:         domain.IsNewcomer(c.CompletedTaskCount),
-			IsBanned:           c.IsBanned,
-			SemanticSimilarity: c.SemanticSimilarity,
-			ReputationSignals:  toDomainReputationSignals(c.ReputationSignals),
+			AgentID:                  c.AgentID,
+			WalletAddress:            c.WalletAddress,
+			Status:                   c.Status,
+			Category:                 c.Category,
+			SkillTags:                c.SkillTags,
+			Level:                    level,
+			MaxConcurrentTasks:       c.MaxConcurrentTasks,
+			ActiveTaskCount:          c.ActiveTaskCount,
+			CompletedTaskCount:       c.CompletedTaskCount,
+			SuccessCount:             c.SuccessCount,
+			OverdueCount:             c.OverdueCount,
+			QualityScore:             c.QualityScore,
+			CreatedAt:                createdAt,
+			IsNewcomer:               domain.IsNewcomer(c.CompletedTaskCount),
+			IsBanned:                 c.IsBanned,
+			SemanticSimilarity:       c.SemanticSimilarity,
+			ReputationSignals:        toDomainReputationSignals(c.ReputationSignals),
+			BaselineEvaluationStatus: baselineEvaluationStatus,
+			RiskHoldStatus:           riskHoldStatus,
 		})
 	}
 
 	return task, candidates, nil
+}
+
+// isValidBaselineEvaluationStatus reports whether s is one of the four
+// enum values 0032_add_agents_baseline_evaluation_status.sql's CHECK
+// constraint allows (Feature 20/T-2009) — this service is a trust boundary
+// for apps/api's candidate snapshot exactly like every other field
+// convertMatchRequest validates above.
+func isValidBaselineEvaluationStatus(s string) bool {
+	switch s {
+	case "NOT_STARTED", "PENDING", "PASSED", "FAILED":
+		return true
+	default:
+		return false
+	}
+}
+
+// isValidRiskHoldStatus reports whether s is one of the two enum values
+// 0034_add_agents_risk_hold_status.sql's CHECK constraint allows (Feature
+// 20/T-2008) — same trust-boundary reasoning as isValidBaselineEvaluationStatus.
+func isValidRiskHoldStatus(s string) bool {
+	switch s {
+	case "NONE", "HELD":
+		return true
+	default:
+		return false
+	}
 }
 
 // toDomainReputationSignals converts the wire's nilable pointer-to-object

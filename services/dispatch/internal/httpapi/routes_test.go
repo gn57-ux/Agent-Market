@@ -17,7 +17,7 @@ func TestHealthz(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", rec.Code)
 	}
-	if got := rec.Body.String(); got != "{\"status\":\"ok\"}\n" {
+	if got := rec.Body.String(); got != "{\"capabilities\":[\"risk_hold_gate\"],\"status\":\"ok\"}\n" {
 		t.Fatalf("unexpected body: %q", got)
 	}
 }

@@ -37,20 +37,22 @@ const (
 // repeating every field in each test.
 func validCandidate(agentID string, overrides map[string]any) map[string]any {
 	base := map[string]any{
-		"agentId":            agentID,
-		"walletAddress":      "0x" + strings.Repeat("a", 40),
-		"status":             "ACTIVE",
-		"category":           "design",
-		"skillTags":          []string{"figma", "branding"},
-		"level":              "INTERMEDIATE",
-		"maxConcurrentTasks": 5,
-		"activeTaskCount":    0,
-		"completedTaskCount": 10,
-		"successCount":       8,
-		"overdueCount":       1,
-		"qualityScore":       0.8,
-		"createdAt":          "2024-01-01T00:00:00Z",
-		"isBanned":           false,
+		"agentId":                  agentID,
+		"walletAddress":            "0x" + strings.Repeat("a", 40),
+		"status":                   "ACTIVE",
+		"category":                 "design",
+		"skillTags":                []string{"figma", "branding"},
+		"level":                    "INTERMEDIATE",
+		"maxConcurrentTasks":       5,
+		"activeTaskCount":          0,
+		"completedTaskCount":       10,
+		"successCount":             8,
+		"overdueCount":             1,
+		"qualityScore":             0.8,
+		"createdAt":                "2024-01-01T00:00:00Z",
+		"isBanned":                 false,
+		"baselineEvaluationStatus": "PASSED",
+		"riskHoldStatus":           "NONE",
 	}
 	for k, v := range overrides {
 		base[k] = v
@@ -191,6 +193,156 @@ func TestHandleMatch_InvalidCandidateLevel(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+// TestHandleMatch_MissingBaselineEvaluationStatus_RollingDeployCompat is a
+// direct regression for an N4 real finding (P1, Feature 20/T-2009): a rolling
+// deployment can have this service running the NEW code (which expects
+// baselineEvaluationStatus) while apps/api is still on the OLD version (which
+// doesn't send it yet). The field entirely absent must NOT 400 the whole
+// request — it must resolve to the same conservative "NOT_STARTED" a fresh
+// Agent already gets from the migration's own column default. This condition
+// is not yet enforced by eligibility.Filter at all (see that package's own
+// doc comment, N4 round-2 finding), so this candidate is still eligible
+// today — the point of this test is only that a missing field never causes
+// a 400, not any particular eligibility outcome.
+func TestHandleMatch_MissingBaselineEvaluationStatus_RollingDeployCompat(t *testing.T) {
+	candidate := validCandidate(agent1Fixture, nil)
+	delete(candidate, "baselineEvaluationStatus")
+	rec := postMatch(t, validRequestBody([]map[string]any{candidate}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleMatch_InvalidBaselineEvaluationStatus(t *testing.T) {
+	candidates := []map[string]any{
+		validCandidate(agent1Fixture, map[string]any{"baselineEvaluationStatus": "SOMETHING_ELSE"}),
+	}
+	rec := postMatch(t, validRequestBody(candidates))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleMatch_MissingRiskHoldStatus_RollingDeployCompat (Feature 20/
+// T-2008) is riskHoldStatus's own version of the identical rolling-deploy
+// regression already covered for baselineEvaluationStatus above.
+func TestHandleMatch_MissingRiskHoldStatus_RollingDeployCompat(t *testing.T) {
+	candidate := validCandidate(agent1Fixture, nil)
+	delete(candidate, "riskHoldStatus")
+	rec := postMatch(t, validRequestBody([]map[string]any{candidate}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleMatch_InvalidRiskHoldStatus(t *testing.T) {
+	candidates := []map[string]any{
+		validCandidate(agent1Fixture, map[string]any{"riskHoldStatus": "SOMETHING_ELSE"}),
+	}
+	rec := postMatch(t, validRequestBody(candidates))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleMatch_RiskHoldStatus_EndToEnd (Feature 20/T-2008, 用户
+// 2026-09-06 Q-2003 决策 + N4 round-2 follow-up decision) is the real,
+// full-HTTP-pipeline proof that `enforceRiskHoldGate` actually changes
+// recommendations: with the gate off (the default — an OLDER apps/api or
+// one that hasn't yet confirmed dispatch's `/healthz` capability), a HELD
+// candidate is STILL recommended (apps/api's own SQL-level filter is the
+// real defense in that case, not exercised by this Go-only test); with the
+// gate explicitly on, the identical HELD candidate is excluded and the
+// NONE candidate is still recommended.
+func TestHandleMatch_RiskHoldStatus_EndToEnd(t *testing.T) {
+	held := validCandidate(agentEligible1Fixture, map[string]any{"riskHoldStatus": "HELD"})
+	none := validCandidate(agentEligible2Fixture, map[string]any{"riskHoldStatus": "NONE"})
+
+	gateOffRec := postMatch(t, validRequestBody([]map[string]any{held, none}))
+	if gateOffRec.Code != http.StatusOK {
+		t.Fatalf("gate-off: expected 200, got %d: %s", gateOffRec.Code, gateOffRec.Body.String())
+	}
+	var gateOffResp matchResponse
+	if err := json.Unmarshal(gateOffRec.Body.Bytes(), &gateOffResp); err != nil {
+		t.Fatalf("gate-off: failed to decode response: %v", err)
+	}
+	if !containsAgentID(gateOffResp.Recommendations, agentEligible1Fixture) {
+		t.Fatalf("gate-off: expected HELD candidate to still be recommended, got %+v", gateOffResp.Recommendations)
+	}
+
+	gateOnBody := validRequestBody([]map[string]any{held, none})
+	gateOnBody["enforceRiskHoldGate"] = true
+	gateOnRec := postMatch(t, gateOnBody)
+	if gateOnRec.Code != http.StatusOK {
+		t.Fatalf("gate-on: expected 200, got %d: %s", gateOnRec.Code, gateOnRec.Body.String())
+	}
+	var gateOnResp matchResponse
+	if err := json.Unmarshal(gateOnRec.Body.Bytes(), &gateOnResp); err != nil {
+		t.Fatalf("gate-on: failed to decode response: %v", err)
+	}
+	if containsAgentID(gateOnResp.Recommendations, agentEligible1Fixture) {
+		t.Fatalf("gate-on: expected HELD candidate to be excluded, got %+v", gateOnResp.Recommendations)
+	}
+	if !containsAgentID(gateOnResp.Recommendations, agentEligible2Fixture) {
+		t.Fatalf("gate-on: expected NONE candidate to still be recommended, got %+v", gateOnResp.Recommendations)
+	}
+}
+
+// TestHandleMatch_BaselineEvaluationGate_EndToEnd (Feature 20/T-2009, 用户
+// 2026-09-06 Q-2001 决策) is the real, full-HTTP-pipeline proof that
+// enforceBaselineEvaluationGate actually changes recommendations, not just
+// eligibility.Filter's own package-level unit tests: with the gate off
+// (the default), a NOT_STARTED candidate is still recommended; with the
+// gate explicitly on, the identical candidate is excluded and only the
+// PASSED one is recommended.
+func TestHandleMatch_BaselineEvaluationGate_EndToEnd(t *testing.T) {
+	notStarted := validCandidate(agentEligible1Fixture, map[string]any{
+		"baselineEvaluationStatus": "NOT_STARTED",
+	})
+	passed := validCandidate(agentEligible2Fixture, map[string]any{
+		"baselineEvaluationStatus": "PASSED",
+	})
+
+	gateOffBody := validRequestBody([]map[string]any{notStarted, passed})
+	gateOffRec := postMatch(t, gateOffBody)
+	if gateOffRec.Code != http.StatusOK {
+		t.Fatalf("gate-off: expected 200, got %d: %s", gateOffRec.Code, gateOffRec.Body.String())
+	}
+	var gateOffResp matchResponse
+	if err := json.Unmarshal(gateOffRec.Body.Bytes(), &gateOffResp); err != nil {
+		t.Fatalf("gate-off: failed to decode response: %v", err)
+	}
+	if !containsAgentID(gateOffResp.Recommendations, agentEligible1Fixture) {
+		t.Fatalf("gate-off: expected NOT_STARTED candidate to still be recommended, got %+v", gateOffResp.Recommendations)
+	}
+
+	gateOnBody := validRequestBody([]map[string]any{notStarted, passed})
+	gateOnBody["enforceBaselineEvaluationGate"] = true
+	gateOnRec := postMatch(t, gateOnBody)
+	if gateOnRec.Code != http.StatusOK {
+		t.Fatalf("gate-on: expected 200, got %d: %s", gateOnRec.Code, gateOnRec.Body.String())
+	}
+	var gateOnResp matchResponse
+	if err := json.Unmarshal(gateOnRec.Body.Bytes(), &gateOnResp); err != nil {
+		t.Fatalf("gate-on: failed to decode response: %v", err)
+	}
+	if containsAgentID(gateOnResp.Recommendations, agentEligible1Fixture) {
+		t.Fatalf("gate-on: expected NOT_STARTED candidate to be excluded, got %+v", gateOnResp.Recommendations)
+	}
+	if !containsAgentID(gateOnResp.Recommendations, agentEligible2Fixture) {
+		t.Fatalf("gate-on: expected PASSED candidate to still be recommended, got %+v", gateOnResp.Recommendations)
+	}
+}
+
+func containsAgentID(recommendations []matchRecommendation, agentID string) bool {
+	for _, r := range recommendations {
+		if r.AgentID == agentID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandleMatch_InvalidRequiredLevel(t *testing.T) {

@@ -1,6 +1,6 @@
 -- Feature 19 (ctr-online-learning), T-1905.
 --
--- design.md's own `ctr_models` schema (T-1912's migration 0033) never gave
+-- design.md's own `ctr_models` schema (T-1912's migration 0037) never gave
 -- the trained artifact itself a column — `offline_metrics` is documented as
 -- "评估指标" (evaluation results), a distinct concern from the actual
 -- fusion-weight VALUES a training run produces (CLAUDE.md 原则 6: one piece

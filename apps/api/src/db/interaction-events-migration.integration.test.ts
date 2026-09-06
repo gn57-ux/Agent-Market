@@ -8,7 +8,7 @@ import { requireTestDatabaseUrl } from "@agent-market/domain";
 // See migrate.integration.test.ts's header comment: skipped unless a human
 // opts in with RUN_DB_INTEGRATION_TESTS=1 against a confirmed-safe
 // TEST_DATABASE_URL. T-1900's own dedicated verification that
-// 0031_create_interaction_events.sql actually enforces, at the database
+// 0035_create_interaction_events.sql actually enforces, at the database
 // layer, F-1901's closed 9-event-type enum and F-1902/AC-1902's dedup
 // guarantee — this Task's own scope is the migration only (no
 // application-layer collection endpoint yet, that is T-1901's separate
@@ -33,7 +33,7 @@ runIfOptedIn("interaction_events migration (integration, T-1900)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, evaluation_appeals, evaluation_results, evaluation_submissions, evaluation_tasks, evaluation_rubrics, risk_signals, risk_hold_audit_logs, schema_migrations CASCADE",
     );
     await pool.end();
   });

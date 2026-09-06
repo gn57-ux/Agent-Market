@@ -8,6 +8,7 @@ import { requireTestDatabaseUrl } from "@agent-market/domain";
 import { canonicalJsonSha256 } from "./input-digest.js";
 import { deriveOnChainTaskId } from "../tasks/onchain-task-id.js";
 import { issueAcceptancePermit } from "./permit.service.js";
+import { updateBaselineEvaluationStatusForResult } from "../evaluation/repository.js";
 import {
   assembleCandidateSnapshots,
   consumeAcceptancePermits,
@@ -52,9 +53,7 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, " +
-  "sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, schema_migrations CASCADE";
+  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, evaluation_appeals, evaluation_results, evaluation_submissions, evaluation_tasks, evaluation_rubrics, risk_signals, risk_hold_audit_logs, schema_migrations CASCADE";
 
 const OWNER_ADDRESS = "0x4283fefc63f0cd0e873a0000c6d07ef7b77e90d3";
 const BANNED_OWNER_ADDRESS = "0x5583fefc63f0cd0e873a0000c6d07ef7b77e90d4";
@@ -73,12 +72,17 @@ async function insertAgent(
      * every existing call site (all written before Feature 16) keeps
      * inserting a candidate-eligible row exactly as before. */
     reviewStatus: string;
+    /** T-2008 round-1 P1 fix's own test seam — defaults to `NONE`
+     * (0034_add_agents_risk_hold_status.sql's own column default), so
+     * every existing call site keeps inserting a candidate-eligible row
+     * exactly as before. */
+    riskHoldStatus: string;
   }> = {},
 ): Promise<string> {
   const ownerAddress = overrides.ownerAddress ?? OWNER_ADDRESS;
   const { rows } = await pool.query<{ id: string }>(
-    `INSERT INTO agents (owner_address, name, description, category, payout_address, status, level, review_status)
-     VALUES ($1, 'Agent', 'desc', $2, $1, $3, $4, $5)
+    `INSERT INTO agents (owner_address, name, description, category, payout_address, status, level, review_status, risk_hold_status)
+     VALUES ($1, 'Agent', 'desc', $2, $1, $3, $4, $5, $6)
      RETURNING id`,
     [
       ownerAddress,
@@ -86,6 +90,7 @@ async function insertAgent(
       overrides.status ?? "ACTIVE",
       overrides.level ?? "BEGINNER",
       overrides.reviewStatus ?? "ACTIVE",
+      overrides.riskHoldStatus ?? "NONE",
     ],
   );
   const id = rows[0]?.id;
@@ -161,6 +166,14 @@ runIfOptedIn(
       expect(active?.skillTags.sort()).toEqual(["copywriting", "seo"]);
       expect(active?.activeTaskCount).toBe(2);
       expect(active?.isBanned).toBe(false);
+      // F-2012/T-2009: a fresh Agent's admission gate defaults to
+      // NOT_STARTED (0032_add_agents_baseline_evaluation_status.sql), and
+      // this function passes the real column value straight through — it
+      // never filters by it itself (that's eligibility.Filter's job, Go).
+      expect(active?.baselineEvaluationStatus).toBe("NOT_STARTED");
+      // F-2010/T-2008: same pass-through contract for the other
+      // orthogonal admission column — a fresh Agent defaults to NONE.
+      expect(active?.riskHoldStatus).toBe("NONE");
 
       const banned = snapshots.find((s) => s.agentId === bannedAgentId);
       expect(banned).toBeDefined();
@@ -191,6 +204,26 @@ runIfOptedIn(
       },
     );
 
+    it(
+      "N4 P1 fix (T-2008 round 1): excludes an Agent whose risk_hold_status is HELD, " +
+        "at the SQL level — not merely relying on eligibility.Filter (Go), so a rolling " +
+        "deployment against an OLDER dispatch instance that doesn't know about " +
+        "riskHoldStatus still never sees a confirmed-antifraud-HELD Agent as a candidate",
+      async () => {
+        const activeAgentId = await insertAgent(pool, { riskHoldStatus: "NONE" });
+        const heldAgentId = await insertAgent(pool, {
+          ownerAddress: BANNED_OWNER_ADDRESS,
+          riskHoldStatus: "HELD",
+        });
+
+        const snapshots = await assembleCandidateSnapshots(pool, "writing");
+        const candidateIds = snapshots.map((s) => s.agentId);
+
+        expect(candidateIds).toEqual([activeAgentId]);
+        expect(candidateIds).not.toContain(heldAgentId);
+      },
+    );
+
     it("returns an empty array when there are no ACTIVE agents", async () => {
       await insertAgent(pool, { status: "INACTIVE" });
       const snapshots = await assembleCandidateSnapshots(pool, "writing");
@@ -201,6 +234,50 @@ runIfOptedIn(
       await insertAgent(pool, { category: "design" });
       const snapshots = await assembleCandidateSnapshots(pool, "writing");
       expect(snapshots).toHaveLength(1);
+    });
+
+    it(
+      "AC-2006: reflects a real basic-evaluation admission transition — " +
+        "the candidate snapshot's baselineEvaluationStatus flips from " +
+        "NOT_STARTED to PASSED once the same write path a real evaluation " +
+        "completion uses (evaluation/repository.ts's single writer) marks " +
+        "it, with no other field on the snapshot changing",
+      async () => {
+        const agentId = await insertAgent(pool);
+
+        const before = await assembleCandidateSnapshots(pool, "writing");
+        expect(before.find((s) => s.agentId === agentId)?.baselineEvaluationStatus).toBe(
+          "NOT_STARTED",
+        );
+
+        // F-2012/T-2009: same function every real evaluation-completion
+        // write path (routes.ts/admin-routes.ts) calls in its own
+        // transaction — not a raw UPDATE, so this test exercises the real
+        // single writer, not a hand-rolled stand-in for it.
+        await updateBaselineEvaluationStatusForResult(pool, agentId, 75);
+
+        const afterPass = await assembleCandidateSnapshots(pool, "writing");
+        expect(afterPass.find((s) => s.agentId === agentId)?.baselineEvaluationStatus).toBe(
+          "PASSED",
+        );
+
+        // A later low score must never revoke an already-granted PASSED
+        // status (evaluation/repository.ts's own documented one-way-gate
+        // design) — F-2011's boundary also holds throughout: no other
+        // snapshot field is affected by this transition.
+        await updateBaselineEvaluationStatusForResult(pool, agentId, 10);
+        const afterLowScore = await assembleCandidateSnapshots(pool, "writing");
+        const stillPassed = afterLowScore.find((s) => s.agentId === agentId);
+        expect(stillPassed?.baselineEvaluationStatus).toBe("PASSED");
+        expect(stillPassed?.status).toBe("ACTIVE");
+      },
+    );
+
+    it("AC-2006: a failing score (below the passing threshold) on a fresh Agent marks it FAILED, not PASSED", async () => {
+      const agentId = await insertAgent(pool);
+      await updateBaselineEvaluationStatusForResult(pool, agentId, 10);
+      const snapshots = await assembleCandidateSnapshots(pool, "writing");
+      expect(snapshots.find((s) => s.agentId === agentId)?.baselineEvaluationStatus).toBe("FAILED");
     });
 
     /** Shared by every `insertRecommendationRunWithPermits` test below —
