@@ -15,6 +15,34 @@ export interface MatchRequest {
   requesterAddress: string;
   algorithmVersion: string;
   candidates: CandidateSnapshot[];
+  /**
+   * F-2012/T-2009 (用户 2026-09-06 Q-2001 决策): whether Go's
+   * `eligibility.Filter` should actually ENFORCE
+   * `baselineEvaluationStatus == "PASSED"` as a hard condition. A per-
+   * request field, not a Go-side env var — matches `algorithmVersion`'s own
+   * precedent (design.md 决策 3: Go stays a stateless computation service,
+   * every business decision arrives from Node in the request body). See
+   * `resolveEnforceBaselineEvaluationGate` (routes.ts) for how Node decides
+   * this value.
+   */
+  enforceBaselineEvaluationGate: boolean;
+  /**
+   * F-2010/T-2008 (N4 round-2 real finding + user's 2026-09-06 follow-up
+   * decision): whether Go's `eligibility.Filter` should enforce
+   * `riskHoldStatus != "HELD"` as a hard condition. Originally this
+   * condition was unconditional in Go (no gate at all) — N4 found that a
+   * rolling deployment with an OLDER dispatch instance would silently
+   * ignore the unknown `riskHoldStatus` field and let a confirmed-
+   * antifraud-HELD Agent through. Rather than accept that gap, apps/api
+   * now only claims `true` here once `checkDispatchSupportsRiskHoldGate`
+   * has confirmed the CURRENT dispatch instance actually understands it
+   * (see that function's own doc comment). apps/api's own SQL-level
+   * filter (`assembleCandidateSnapshots`, `dispatch/repository.ts`) stays
+   * the PRIMARY, always-on defense regardless of this flag's value — a
+   * HELD Agent is never even assembled as a candidate by an apps/api
+   * instance running this Task's code.
+   */
+  enforceRiskHoldGate: boolean;
 }
 
 /** One recommended slot, matching `matchRecommendation` (Go). */
@@ -102,6 +130,88 @@ export class DispatchServiceUnavailableError extends Error {
  * module-reload trick. */
 function resolveDispatchServiceUrl(): string {
   return process.env.DISPATCH_SERVICE_URL ?? "http://127.0.0.1:8081";
+}
+
+/** Bounded wait for `/healthz` — this is a readiness probe, not the actual
+ * match request, so it gets a much tighter timeout than
+ * `DISPATCH_REQUEST_TIMEOUT_MS`: a slow/unreachable dispatch instance
+ * should fail this cheap check quickly rather than adding real latency to
+ * every `matchTask` call. */
+const HEALTHZ_REQUEST_TIMEOUT_MS = 1_000;
+
+/** How long a confirmed (or denied) capability result is trusted before
+ * `checkDispatchSupportsRiskHoldGate` probes again — long enough that a
+ * normal request volume doesn't call `/healthz` on every single match,
+ * short enough that a dispatch upgrade/downgrade during a rolling deploy
+ * is picked up within a bounded window rather than requiring a apps/api
+ * restart. */
+const RISK_HOLD_GATE_CAPABILITY_CACHE_TTL_MS = 30_000;
+
+let riskHoldGateCapabilityCache: { supported: boolean; checkedAt: number } | null = null;
+
+/**
+ * F-2010/T-2008 (N4 round-2 real finding + user's 2026-09-06 follow-up
+ * decision): confirms — by actually asking, not assuming — that the
+ * dispatch instance currently answering `/match` requests understands
+ * `riskHoldStatus`/`enforceRiskHoldGate` at all, via `/healthz`'s
+ * `capabilities` array (services/dispatch, `handleHealthz`). An OLDER
+ * dispatch instance's `/healthz` response simply omits the `capabilities`
+ * key entirely (that field didn't exist in its code), which this function
+ * treats identically to an explicit "not supported" — never assumed
+ * supported by default. Any failure to reach `/healthz` at all (network
+ * error, timeout, non-2xx, malformed JSON) is ALSO treated as "not
+ * supported" — the conservative direction for a readiness probe: apps/api
+ * simply won't claim `enforceRiskHoldGate: true` on `/match` if it isn't
+ * sure, and its own SQL-level filter keeps enforcing regardless.
+ *
+ * Cached for `RISK_HOLD_GATE_CAPABILITY_CACHE_TTL_MS` so `matchTask` never
+ * pays a network round-trip to `/healthz` on every call.
+ */
+export async function checkDispatchSupportsRiskHoldGate(): Promise<boolean> {
+  const now = Date.now();
+  if (
+    riskHoldGateCapabilityCache &&
+    now - riskHoldGateCapabilityCache.checkedAt < RISK_HOLD_GATE_CAPABILITY_CACHE_TTL_MS
+  ) {
+    return riskHoldGateCapabilityCache.supported;
+  }
+
+  const supported = await probeRiskHoldGateSupport();
+  riskHoldGateCapabilityCache = { supported, checkedAt: now };
+  return supported;
+}
+
+const healthzResponseSchema = z.object({
+  capabilities: z.array(z.string()).optional(),
+});
+
+async function probeRiskHoldGateSupport(): Promise<boolean> {
+  const url = `${resolveDispatchServiceUrl()}/healthz`;
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout(HEALTHZ_REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      return false;
+    }
+    const parsed = healthzResponseSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      return false;
+    }
+    return (parsed.data.capabilities ?? []).includes("risk_hold_gate");
+  } catch {
+    return false;
+  }
+}
+
+/** Test-only escape hatch — resets the module-level capability cache so a
+ * test can control dispatch's advertised capability across calls without
+ * waiting out `RISK_HOLD_GATE_CAPABILITY_CACHE_TTL_MS` or reloading the
+ * module (same rationale as `resolveDispatchServiceUrl` reading its env var
+ * fresh on every call rather than memoizing it). */
+export function resetRiskHoldGateCapabilityCacheForTests(): void {
+  riskHoldGateCapabilityCache = null;
 }
 
 /**

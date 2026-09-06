@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CandidateSnapshot } from "./repository.js";
 import {
   callMatch,
+  checkDispatchSupportsRiskHoldGate,
   DispatchServiceUnavailableError,
+  resetRiskHoldGateCapabilityCacheForTests,
   type MatchRequest,
 } from "./dispatch.client.js";
 
@@ -43,6 +45,8 @@ describe("callMatch (unit, T-705)", () => {
     qualityScore: null,
     createdAt: "2025-01-01T00:00:00.000Z",
     isBanned: false,
+    baselineEvaluationStatus: "PASSED",
+    riskHoldStatus: "NONE",
   };
 
   const REQUEST: MatchRequest = {
@@ -54,6 +58,8 @@ describe("callMatch (unit, T-705)", () => {
     requesterAddress: "0x5583fefc63f0cd0e873a0000c6d07ef7b77e90d4",
     algorithmVersion: "v0.1",
     candidates: [CANDIDATE],
+    enforceBaselineEvaluationGate: false,
+    enforceRiskHoldGate: false,
   };
 
   it("POSTs the exact request body to <DISPATCH_SERVICE_URL>/match and returns the parsed response", async () => {
@@ -220,5 +226,112 @@ describe("callMatch (unit, T-705)", () => {
       const message = error instanceof Error ? error.message : String(error);
       return !message.includes(sensitiveDetail);
     });
+  });
+});
+
+// F-2010/T-2008 (N4 round-2 real finding + user's 2026-09-06 follow-up
+// decision): unit tests for checkDispatchSupportsRiskHoldGate — mocks
+// global fetch, no real Go service involved. Verifies the capability
+// probe's own "never assume supported" contract: only an explicit
+// `capabilities` array containing "risk_hold_gate" returns true; every
+// other outcome (missing key, wrong value, non-2xx, network error,
+// malformed JSON, timeout) returns false.
+describe("checkDispatchSupportsRiskHoldGate (unit, T-2008)", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env.DISPATCH_SERVICE_URL;
+
+  beforeEach(() => {
+    process.env.DISPATCH_SERVICE_URL = "http://127.0.0.1:9999";
+    resetRiskHoldGateCapabilityCacheForTests();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalEnv === undefined) {
+      delete process.env.DISPATCH_SERVICE_URL;
+    } else {
+      process.env.DISPATCH_SERVICE_URL = originalEnv;
+    }
+    resetRiskHoldGateCapabilityCacheForTests();
+    vi.restoreAllMocks();
+  });
+
+  it("returns true when /healthz advertises the risk_hold_gate capability", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok", capabilities: ["risk_hold_gate"] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkDispatchSupportsRiskHoldGate()).resolves.toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:9999/healthz");
+    expect(init.method).toBe("GET");
+  });
+
+  it("returns false when /healthz omits capabilities entirely (older dispatch)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkDispatchSupportsRiskHoldGate()).resolves.toBe(false);
+  });
+
+  it("returns false when capabilities is present but doesn't include risk_hold_gate", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok", capabilities: ["something_else"] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkDispatchSupportsRiskHoldGate()).resolves.toBe(false);
+  });
+
+  it("returns false on a non-2xx /healthz response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("nope", { status: 503 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkDispatchSupportsRiskHoldGate()).resolves.toBe(false);
+  });
+
+  it("returns false on a network error", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkDispatchSupportsRiskHoldGate()).resolves.toBe(false);
+  });
+
+  it("returns false on malformed JSON", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("{not valid json", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkDispatchSupportsRiskHoldGate()).resolves.toBe(false);
+  });
+
+  it("caches a positive result — a second call within the TTL does not call fetch again", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok", capabilities: ["risk_hold_gate"] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkDispatchSupportsRiskHoldGate()).resolves.toBe(true);
+    await expect(checkDispatchSupportsRiskHoldGate()).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
