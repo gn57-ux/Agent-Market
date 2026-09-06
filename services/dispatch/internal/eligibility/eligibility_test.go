@@ -40,6 +40,16 @@ func baseCandidate() domain.CandidateSnapshot {
 		CreatedAt:          time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		IsNewcomer:         false,
 		IsBanned:           false,
+		// Feature 20/T-2009: "everything satisfied" includes condition 8
+		// (basic-evaluation admission) whenever a test's task has
+		// EnforceBaselineEvaluationGate = true — the dedicated
+		// TestFilter_BaselineEvaluationStatus_GateOn_* tests below deviate
+		// from this one field, matching every other condition's pattern.
+		BaselineEvaluationStatus: "PASSED",
+		// Feature 20/T-2008: "everything satisfied" includes condition 9
+		// (risk-hold admission) — a dedicated TestFilter_RiskHoldStatus_*
+		// pair below deviates from this one field.
+		RiskHoldStatus: "NONE",
 	}
 }
 
@@ -294,6 +304,86 @@ func TestFilter_Banned_NegativeWhenBanned(t *testing.T) {
 	c.WalletAddress = "0x8888888888888888888888888888888888888888"[:42]
 	c.IsBanned = true
 	mustEliminated(t, baseTask(), c)
+}
+
+// --- Condition 8: basic-evaluation admission (Feature 20/T-2009, F-2012,
+// 用户 2026-09-06 Q-2001 决策), gated behind task.EnforceBaselineEvaluationGate ---
+
+func TestFilter_BaselineEvaluationStatus_GateOff_NotStartedStillEligible(t *testing.T) {
+	task := baseTask()
+	task.EnforceBaselineEvaluationGate = false
+	c := baseCandidate()
+	c.BaselineEvaluationStatus = "NOT_STARTED"
+	mustEligible(t, task, c)
+}
+
+func TestFilter_BaselineEvaluationStatus_GateOff_FailedStillEligible(t *testing.T) {
+	task := baseTask()
+	task.EnforceBaselineEvaluationGate = false
+	c := baseCandidate()
+	c.BaselineEvaluationStatus = "FAILED"
+	mustEligible(t, task, c)
+}
+
+func TestFilter_BaselineEvaluationStatus_GateOn_PositiveWhenPassed(t *testing.T) {
+	task := baseTask()
+	task.EnforceBaselineEvaluationGate = true
+	c := baseCandidate()
+	c.BaselineEvaluationStatus = "PASSED"
+	mustEligible(t, task, c)
+}
+
+func TestFilter_BaselineEvaluationStatus_GateOn_NegativeWhenNotStarted(t *testing.T) {
+	task := baseTask()
+	task.EnforceBaselineEvaluationGate = true
+	c := baseCandidate()
+	c.BaselineEvaluationStatus = "NOT_STARTED"
+	mustEliminated(t, task, c)
+}
+
+func TestFilter_BaselineEvaluationStatus_GateOn_NegativeWhenPending(t *testing.T) {
+	task := baseTask()
+	task.EnforceBaselineEvaluationGate = true
+	c := baseCandidate()
+	c.BaselineEvaluationStatus = "PENDING"
+	mustEliminated(t, task, c)
+}
+
+func TestFilter_BaselineEvaluationStatus_GateOn_NegativeWhenFailed(t *testing.T) {
+	task := baseTask()
+	task.EnforceBaselineEvaluationGate = true
+	c := baseCandidate()
+	c.BaselineEvaluationStatus = "FAILED"
+	mustEliminated(t, task, c)
+}
+
+// --- Condition 9: risk-hold admission (Feature 20/T-2008, F-2010, 用户
+// 2026-09-06 Q-2003 决策 + N4 round-2 follow-up decision), gated behind
+// task.EnforceRiskHoldGate — see domain.TaskFeatures' own doc comment on
+// EnforceRiskHoldGate for why this went from "always enforced" to gated. ---
+
+func TestFilter_RiskHoldStatus_GateOff_HeldStillEligible(t *testing.T) {
+	task := baseTask()
+	task.EnforceRiskHoldGate = false
+	c := baseCandidate()
+	c.RiskHoldStatus = "HELD"
+	mustEligible(t, task, c)
+}
+
+func TestFilter_RiskHoldStatus_GateOn_PositiveWhenNone(t *testing.T) {
+	task := baseTask()
+	task.EnforceRiskHoldGate = true
+	c := baseCandidate()
+	c.RiskHoldStatus = "NONE"
+	mustEligible(t, task, c)
+}
+
+func TestFilter_RiskHoldStatus_GateOn_NegativeWhenHeld(t *testing.T) {
+	task := baseTask()
+	task.EnforceRiskHoldGate = true
+	c := baseCandidate()
+	c.RiskHoldStatus = "HELD"
+	mustEliminated(t, task, c)
 }
 
 // --- Mixed candidates: verify Filter returns exactly the expected subset ---

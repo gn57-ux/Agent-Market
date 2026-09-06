@@ -22,6 +22,10 @@ import { registerRatingsRoutes } from "./modules/ratings/routes.js";
 import { registerTasksRoutes } from "./modules/tasks/routes.js";
 import { registerOfficeRoutes } from "./modules/office/routes.js";
 import { registerDagRoutes } from "./modules/dag/routes.js";
+import { registerEvaluationAdminRoutes } from "./modules/evaluation/admin-routes.js";
+import { registerEvaluationRoutes } from "./modules/evaluation/routes.js";
+import { registerAntifraudAdminRoutes } from "./modules/antifraud/admin-routes.js";
+import { registerRiskHoldAdminRoutes } from "./modules/risk-hold/admin-routes.js";
 import type { OfficeFundsReader } from "./modules/office/funds-reader.js";
 
 export interface BuildAppOptions {
@@ -197,6 +201,38 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // `app.requireAdmin` (T-1608b).
   void app.register(async (instance) => {
     registerAdminDashboardRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: POST /evaluation/tasks/
+  // :taskId/submit uses `app.requireSession` (Feature 20, T-2001).
+  void app.register(async (instance) => {
+    registerEvaluationRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: GET /admin/evaluation/
+  // pending-review and POST /admin/evaluation/results/:id/review use
+  // `app.requireAdmin` (Feature 20, T-2002).
+  void app.register(async (instance) => {
+    registerEvaluationAdminRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: GET /admin/risk-signals and
+  // POST /admin/risk-signals/:id/{confirm,dismiss} use `app.requireAdmin`
+  // (Feature 20, T-2008 — `confirm` on SCORE_MANIPULATION/COLLUSION/
+  // FAKE_DELIVERY now orchestrates a real HOLD via the independent
+  // risk-hold module, 用户 2026-09-06 Q-2003 决策; see admin-routes.ts's
+  // own doc comment).
+  void app.register(async (instance) => {
+    registerAntifraudAdminRoutes(instance, pool);
+  });
+
+  // Same reasoning as the registrations above: GET /admin/agents/:agentId/
+  // risk-hold/audit-log and POST .../risk-hold/release use
+  // `app.requireAdmin` (Feature 20, T-2008 — the ONLY way an Agent's
+  // `risk_hold_status` ever moves back to NONE, always its own explicit
+  // admin action, never implicit).
+  void app.register(async (instance) => {
+    registerRiskHoldAdminRoutes(instance, pool);
   });
 
   return app;

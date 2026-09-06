@@ -84,6 +84,30 @@ const v02SemanticSimilarityThreshold = 0.64
 //     upstream of.
 //  7. Wallet validity + ban list: address matches ^0x[0-9a-f]{40}$ and
 //     candidate.IsBanned is false.
+//  8. Basic-evaluation admission (Feature 20/T-2009, F-2012, 用户
+//     2026-09-06 Q-2001 决策), ONLY when task.EnforceBaselineEvaluationGate
+//     is true: candidate.BaselineEvaluationStatus == "PASSED". Gated behind
+//     a per-request flag from apps/api (see domain.TaskFeatures' own doc
+//     comment) rather than always-on, by explicit user instruction — an
+//     operator only flips it on after seeding a real question bank
+//     (scripts/seed-baseline-evaluation-tasks.ts) and backfilling every
+//     pre-existing Agent to PASSED (scripts/backfill-existing-agents-
+//     baseline-status.ts); with the flag off (the default), this condition
+//     is skipped entirely and every candidate is eligible regardless of its
+//     BaselineEvaluationStatus, exactly like before this condition existed.
+//  9. Risk-hold admission (Feature 20/T-2008, F-2010, 用户 2026-09-06
+//     Q-2003 决策), ONLY when task.EnforceRiskHoldGate is true:
+//     candidate.RiskHoldStatus != "HELD". Originally unconditional (no
+//     gate) — N4 round 2 found a real rolling-deployment gap (see
+//     domain.TaskFeatures' own doc comment on EnforceRiskHoldGate for the
+//     full reasoning) and the user explicitly decided to close it with a
+//     version/readiness handshake instead of accepting the gap. apps/api's
+//     own SQL-level filter (`assembleCandidateSnapshots`) is the PRIMARY,
+//     always-on defense regardless of this flag — a HELD Agent is never
+//     even assembled as a candidate by an apps/api instance running this
+//     Task's code — so this condition is intentional defense-in-depth for
+//     the specific "new apps/api, old dispatch" pairing, not the sole
+//     enforcement point.
 func Filter(task domain.TaskFeatures, candidates []domain.CandidateSnapshot) []domain.CandidateSnapshot {
 	eligible := make([]domain.CandidateSnapshot, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -123,6 +147,12 @@ func isEligible(task domain.TaskFeatures, candidate domain.CandidateSnapshot) bo
 		return false
 	}
 	if candidate.IsBanned {
+		return false
+	}
+	if task.EnforceBaselineEvaluationGate && candidate.BaselineEvaluationStatus != "PASSED" {
+		return false
+	}
+	if task.EnforceRiskHoldGate && candidate.RiskHoldStatus == "HELD" {
 		return false
 	}
 	return true

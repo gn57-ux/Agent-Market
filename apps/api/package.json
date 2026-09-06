@@ -11,7 +11,12 @@
     "test": "vitest run",
     "migrate": "node --env-file-if-exists=../../.env --import tsx/esm src/db/migrate-cli.ts",
     "backfill-embeddings": "node --env-file-if-exists=../../.env --import tsx/esm scripts/backfill-embeddings.ts",
-    "admin:bootstrap": "node --env-file-if-exists=../../.env --import tsx/esm scripts/admin-bootstrap.ts"
+    "admin:bootstrap": "node --env-file-if-exists=../../.env --import tsx/esm scripts/admin-bootstrap.ts",
+    "detect-score-manipulation": "node --env-file-if-exists=../../.env --import tsx/esm scripts/detect-score-manipulation.ts",
+    "detect-fake-delivery": "node --env-file-if-exists=../../.env --import tsx/esm scripts/detect-fake-delivery.ts",
+    "detect-collusion": "node --env-file-if-exists=../../.env --import tsx/esm scripts/detect-collusion.ts",
+    "seed-baseline-evaluation-tasks": "node --env-file-if-exists=../../.env --import tsx/esm scripts/seed-baseline-evaluation-tasks.ts",
+    "backfill-existing-agents-baseline-status": "node --env-file-if-exists=../../.env --import tsx/esm scripts/backfill-existing-agents-baseline-status.ts"
   },
   "dependencies": {
     "@agent-market/domain": "workspace:*",

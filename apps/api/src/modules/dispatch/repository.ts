@@ -36,6 +36,27 @@ export interface CandidateSnapshot {
   isBanned: boolean;
   semanticSimilarity?: number;
   reputationSignals?: ReputationSignalsInput;
+  /**
+   * Feature 20 (agent-evaluation-appeal-antifraud), T-2009, design.md 决策
+   * 3 — F-2012's basic-evaluation admission gate. A plain enum, never a
+   * score (F-2011's boundary): Go's `eligibility.Filter` reads only
+   * `baselineEvaluationStatus === "PASSED"` as one more in-memory AND
+   * condition; it has no database connection of its own, so this field is
+   * the only channel through which "cleared the basic evaluation gate"
+   * reaches dispatch at all.
+   */
+  baselineEvaluationStatus: "NOT_STARTED" | "PENDING" | "PASSED" | "FAILED";
+  /**
+   * Feature 20 (agent-evaluation-appeal-antifraud), T-2008, 用户 2026-09-06
+   * Q-2003 决策 — the independent risk-hold module's own admission signal,
+   * DELIBERATELY a separate field from `baselineEvaluationStatus` above
+   * (two orthogonal domain states, see `risk-hold/repository.ts`'s own doc
+   * comment). Unlike `baselineEvaluationStatus`, this condition is always
+   * enforced unconditionally (no config-flag gate): every Agent defaults
+   * to `NONE` (safe), and the only way to reach `HELD` is a real confirmed
+   * antifraud signal — there is no chicken-and-egg rollout problem here.
+   */
+  riskHoldStatus: "NONE" | "HELD";
 }
 
 interface CandidateAgentRow {
@@ -50,6 +71,8 @@ interface CandidateAgentRow {
   overdue_count: number;
   quality_score: number | null;
   created_at: Date;
+  baseline_evaluation_status: "NOT_STARTED" | "PENDING" | "PASSED" | "FAILED";
+  risk_hold_status: "NONE" | "HELD";
 }
 
 /**
@@ -79,6 +102,20 @@ interface CandidateAgentRow {
  * cannot be treated as merely a read optimization the way the `status`
  * filter is.
  *
+ * `AND risk_hold_status = 'NONE'` (N4 review, T-2008 round 1 P1): same
+ * "not merely an optimization" reasoning as `review_status` above, for a
+ * rolling-deployment reason specifically. `eligibility.Filter`'s
+ * risk-hold condition (services/dispatch, Feature 20/T-2008) only exists
+ * in the Go binary from this Task onward; during a rolling deploy where
+ * this API instance runs against an OLDER dispatch instance, that older
+ * Go service silently ignores the unknown `riskHoldStatus` JSON field and
+ * would recommend a confirmed-antifraud-HELD Agent anyway — a real
+ * "punishment recorded but not enforced" window. Filtering it here too
+ * closes that window unconditionally, independent of which dispatch
+ * version answers the request, with no config flag needed (the condition
+ * is a pure narrowing of an already-safe default, unlike T-2009's
+ * `baseline_evaluation_status` gate).
+ *
  * Deliberately does NOT filter by `taskCategory` — category-compatibility
  * matching is eligibility's job alone (T-701 already fixed this as an exact
  * match rule); this function only fetches raw data and hands it over.
@@ -95,9 +132,10 @@ export async function assembleCandidateSnapshots(
 
   const { rows: agentRows } = await client.query<CandidateAgentRow>(
     `SELECT id, owner_address, status, category, level, max_concurrent_tasks,
-            completed_task_count, success_count, overdue_count, quality_score, created_at
+            completed_task_count, success_count, overdue_count, quality_score, created_at,
+            baseline_evaluation_status, risk_hold_status
      FROM agents
-     WHERE status = 'ACTIVE' AND review_status = 'ACTIVE'`,
+     WHERE status = 'ACTIVE' AND review_status = 'ACTIVE' AND risk_hold_status = 'NONE'`,
   );
 
   if (agentRows.length === 0) {
@@ -147,6 +185,8 @@ export async function assembleCandidateSnapshots(
     qualityScore: row.quality_score,
     createdAt: row.created_at.toISOString(),
     isBanned: bannedWallets.has(row.owner_address),
+    baselineEvaluationStatus: row.baseline_evaluation_status,
+    riskHoldStatus: row.risk_hold_status,
   }));
 }
 

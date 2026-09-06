@@ -30,6 +30,25 @@ type CandidateSnapshot struct {
 	IsNewcomer bool // PRD §2.4: an enabled Agent with CompletedTaskCount < 5
 	IsBanned   bool // from a real blocked_wallets batch lookup (F-712), never a fixed value
 
+	// BaselineEvaluationStatus (Feature 20/T-2009, design.md 决策 3): F-2012's
+	// basic-evaluation admission gate. A plain enum ("NOT_STARTED" |
+	// "PENDING" | "PASSED" | "FAILED"), never a score — eligibility.Filter
+	// reads only whether this equals "PASSED"; this service has no database
+	// connection of its own, so apps/api's candidate snapshot is the ONLY
+	// channel this value ever arrives through.
+	BaselineEvaluationStatus string
+
+	// RiskHoldStatus (Feature 20/T-2008, 用户 2026-09-06 Q-2003 决策): the
+	// independent risk-hold module's own admission signal — DELIBERATELY a
+	// separate field from BaselineEvaluationStatus above (two orthogonal
+	// domain states: "hasn't proven competence" vs "confirmed antifraud
+	// hold"). A plain enum ("NONE" | "HELD"), never enriched with which
+	// signal caused it — eligibility.Filter reads only whether this equals
+	// "HELD", always unconditionally (no config-flag gate, unlike
+	// BaselineEvaluationStatus: every Agent defaults to "NONE", so there is
+	// no chicken-and-egg rollout problem here).
+	RiskHoldStatus string
+
 	// SemanticSimilarity is this candidate's cosine similarity (in
 	// [-1, 1], practically [0, 1] for real text embeddings) against the
 	// task's own embedding, as computed by apps/api's pgvector `<=>` query
@@ -89,4 +108,45 @@ type TaskFeatures struct {
 	RequiredLevel    Level
 	RequesterAddress string
 	AlgorithmVersion string
+
+	// EnforceBaselineEvaluationGate (Feature 20/T-2009, 用户 2026-09-06
+	// Q-2001 决策): whether eligibility.Filter's condition 8 actually
+	// excludes candidates whose BaselineEvaluationStatus isn't "PASSED".
+	// A per-request flag from apps/api (see MatchRequest's own doc comment,
+	// dispatch.client.ts) — this service still has no database connection
+	// and no config file of its own; every business decision, including
+	// whether this gate is live yet, arrives from Node.
+	EnforceBaselineEvaluationGate bool
+
+	// EnforceRiskHoldGate (Feature 20/T-2008, N4 round-2 real finding +
+	// user's explicit 2026-09-06 follow-up decision): whether
+	// eligibility.Filter's condition 9 actually excludes HELD candidates.
+	// Originally condition 9 was unconditional (every request enforced it,
+	// no gate) — N4 round 2 found a real rolling-deployment gap: an OLDER
+	// apps/api instance (pre-T-2008, no risk_hold_status awareness at all)
+	// forwards a HELD Agent to a NEWER dispatch instance with the
+	// `riskHoldStatus` field entirely absent from the JSON; treating a
+	// missing value as the safe default "NONE" (this codebase's own
+	// established rolling-deploy-compat convention for every other enum
+	// field) would then silently let a confirmed-antifraud-HELD Agent
+	// through. Gating condition 9 behind this flag means: apps/api only
+	// claims "I am risk-hold-aware" once it has independently confirmed
+	// (dispatch.client.ts's `checkDispatchSupportsRiskHoldGate`, via
+	// dispatch's own `/healthz` capability advertisement) that THIS
+	// dispatch instance understands the field — closing the symmetric
+	// "new apps/api / old dispatch" pairing with an explicit handshake
+	// rather than an unverified assumption. apps/api's own SQL-level
+	// filter (`assembleCandidateSnapshots`, `AND risk_hold_status =
+	// 'NONE'`) remains the PRIMARY, unconditional defense — a HELD Agent
+	// is never even assembled as a candidate by any apps/api instance
+	// running this Task's code, regardless of what this flag is set to —
+	// so this Go-side condition is intentionally defense-in-depth, not the
+	// sole enforcement point. The one residual, explicitly accepted risk
+	// (per the user's own decision on this exact finding): an apps/api
+	// replica that has NOT yet rolled out to this Task's code at all
+	// (mid-rollout of apps/api itself) still lacks both the SQL filter and
+	// this flag — that window is bounded to apps/api's own rollout
+	// duration and is not something a flag apps/api sends can close, since
+	// the flag-sending code itself is what's missing on that replica.
+	EnforceRiskHoldGate bool
 }

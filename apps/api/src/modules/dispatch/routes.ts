@@ -5,6 +5,7 @@ import { deriveOnChainTaskId } from "../tasks/onchain-task-id.js";
 import { getTaskById, type TaskStatusValue } from "../tasks/repository.js";
 import {
   callMatch,
+  checkDispatchSupportsRiskHoldGate,
   DispatchServiceUnavailableError,
   type MatchRequest,
 } from "./dispatch.client.js";
@@ -55,6 +56,42 @@ const V02_ALGORITHM_VERSION = "v0.2";
  * T-709, P2). Reuses `TaskStatusValue` from the tasks module rather than
  * hand-writing the `'OPEN'` literal as though this module owned that rule. */
 const OPEN_STATUS: TaskStatusValue = "OPEN";
+
+/**
+ * F-2012/T-2009 (用户 2026-09-06 Q-2001 决策): whether Go's
+ * `eligibility.Filter` actually enforces `baselineEvaluationStatus ==
+ * "PASSED"`. Defaults to OFF (disabled unless the env var is literally
+ * `"1"`) — the user's own explicit instruction: "不得仅因为常量已有 60 就
+ * 立即全局开启强制过滤...启用前用配置开关控制，避免全部 Agent 被意外排
+ * 除". An operator flips this on only after `scripts/seed-baseline-
+ * evaluation-tasks.ts` has populated a real question bank AND `scripts/
+ * backfill-existing-agents-baseline-status.ts` has grandfathered every
+ * Agent that existed before this gate did (see those scripts' own doc
+ * comments). Read at call time, not memoized — same convention as
+ * `dispatch.client.ts`'s `resolveDispatchServiceUrl`, so a test can flip
+ * the env var immediately before calling `matchTask` with no module-reload
+ * trick.
+ */
+export function resolveEnforceBaselineEvaluationGate(): boolean {
+  return process.env.BASELINE_EVALUATION_GATE_ENABLED === "1";
+}
+
+/**
+ * F-2010/T-2008 (N4 round-2 real finding + user's 2026-09-06 follow-up
+ * decision): unlike `resolveEnforceBaselineEvaluationGate` above (a manual
+ * operator env-var flip), this is an automated readiness check —
+ * `checkDispatchSupportsRiskHoldGate` (dispatch.client.ts) actually asks
+ * the currently-configured dispatch instance via `/healthz` whether it
+ * understands `riskHoldStatus` at all, rather than trusting a static
+ * config value that could go stale the moment dispatch is rolled back to
+ * an older version. No operator action is required to turn this on — it
+ * turns itself on automatically the moment dispatch is confirmed upgraded,
+ * consistent with the user's original Q-2003 "no manual gate needed"
+ * intent, while still closing the rolling-deploy gap N4 found.
+ */
+async function resolveEnforceRiskHoldGate(): Promise<boolean> {
+  return checkDispatchSupportsRiskHoldGate();
+}
 
 /** Same pattern as tasks/routes.ts's/agents/routes.ts's own local copy of
  * this helper — reads `request.address` (populated by `app.requireSession`)
@@ -308,6 +345,8 @@ async function matchTask(
     requesterAddress: task.requesterAddress,
     algorithmVersion,
     candidates,
+    enforceBaselineEvaluationGate: resolveEnforceBaselineEvaluationGate(),
+    enforceRiskHoldGate: await resolveEnforceRiskHoldGate(),
   };
 
   let matchResponse;
