@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import {
   createPostgresIdempotencyLedger,
@@ -8,6 +8,7 @@ import {
   type EventEnvelope,
   type QueueAdapter,
 } from "@agent-market/queue";
+import { applyInteractionEvent, isInteractionEventPayload } from "./interaction-events.js";
 
 /**
  * F-1806 / T-1804: the independent Worker deployment unit — a real,
@@ -101,7 +102,21 @@ async function main(): Promise<void> {
   });
 
   const ledger = createPostgresIdempotencyLedger(pool, CONSUMER_NAME);
-  const handler = withIdempotentConsumption<unknown, unknown>(ledger, async (payload) => {
+  // F-1901 (T-1901): the first real business handler this queue carries —
+  // see interaction-events.ts's own doc comment. `tx` is the SAME
+  // transaction the ledger's own idempotency-record INSERT used
+  // (`createPostgresIdempotencyLedger`'s contract), so a message that
+  // isn't shaped like an interaction event is simply logged and the
+  // ledger record still commits (correctly marking it "processed" —
+  // there is no other known message kind yet, so an unrecognized shape
+  // is either a bug worth seeing in logs or a genuinely new kind a future
+  // Task will add its own `if` branch for here, not something to retry
+  // forever).
+  const handler = withIdempotentConsumption<unknown, PoolClient>(ledger, async (payload, tx) => {
+    if (isInteractionEventPayload(payload)) {
+      await applyInteractionEvent(tx, payload);
+      return;
+    }
     console.log(`apps/worker consumed event, payload=${JSON.stringify(payload)}`);
   });
 

@@ -32,7 +32,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, schema_migrations CASCADE";
 
 runIfOptedIn("POST /tasks/:taskId/ratings (integration, T-1003)", () => {
   let pool: Pool;
@@ -176,6 +176,15 @@ runIfOptedIn("POST /tasks/:taskId/ratings (integration, T-1003)", () => {
     expect(stats.qualityScore).toBeCloseTo(1, 10); // score 5 -> (5-1)/4 = 1.0
     // AC-1008: this route must never touch the settlement counters.
     expect(stats).toMatchObject({ completed: 3, success: 2, overdue: 1 });
+
+    // F-1901 (T-1901): a real RATE event is written to the outbox
+    // atomically with the rating itself.
+    const outboxEvents = await pool.query<{ event_type: string }>(
+      `SELECT event_type FROM outbox_events WHERE aggregate_type = 'task' AND aggregate_id = $1`,
+      [taskId],
+    );
+    expect(outboxEvents.rows).toHaveLength(1);
+    expect(outboxEvents.rows[0]?.event_type).toBe("RATE");
   });
 
   // F-1310 (Feature 13, T-1306): communicationScore is submitted in the

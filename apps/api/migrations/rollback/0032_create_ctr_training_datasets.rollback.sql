@@ -1,0 +1,7 @@
+-- Manual rollback for 0032_create_ctr_training_datasets.sql (T-1904).
+--
+-- NOT wired into any automated `migrate down` command — same forward-only
+-- policy as every other rollback file in this directory.
+DROP TABLE IF EXISTS ctr_training_datasets;
+
+DELETE FROM schema_migrations WHERE id = '0032_create_ctr_training_datasets.sql';

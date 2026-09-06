@@ -25,3 +25,10 @@ test-results/
 docs/
 specs/
 .claude/
+
+# Feature 19 (ctr-online-learning), T-1910: generated OpenAPI contract
+# artifacts (Python's json.dumps / openapi-typescript's own output style,
+# neither matched to this repo's Prettier config) — CI enforces "matches a
+# fresh regeneration" via `git diff --exit-code`, not Prettier formatting.
+services/dispatch-rerank/openapi.json
+apps/api/src/modules/dispatch/rerank-types.generated.d.ts

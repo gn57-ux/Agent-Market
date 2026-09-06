@@ -11,7 +11,10 @@
     "test": "vitest run",
     "migrate": "node --env-file-if-exists=../../.env --import tsx/esm src/db/migrate-cli.ts",
     "backfill-embeddings": "node --env-file-if-exists=../../.env --import tsx/esm scripts/backfill-embeddings.ts",
-    "admin:bootstrap": "node --env-file-if-exists=../../.env --import tsx/esm scripts/admin-bootstrap.ts"
+    "admin:bootstrap": "node --env-file-if-exists=../../.env --import tsx/esm scripts/admin-bootstrap.ts",
+    "build-ctr-training-dataset": "node --env-file-if-exists=../../.env --import tsx/esm scripts/build-ctr-training-dataset.ts",
+    "train-ctr-model": "node --env-file-if-exists=../../.env --import tsx/esm scripts/train-ctr-model.ts",
+    "generate-rerank-types": "openapi-typescript ../../services/dispatch-rerank/openapi.json -o src/modules/dispatch/rerank-types.generated.d.ts"
   },
   "dependencies": {
     "@agent-market/domain": "workspace:*",
@@ -31,6 +34,7 @@
   "devDependencies": {
     "@types/node": "^20.14.10",
     "@types/pg": "^8.11.6",
+    "openapi-typescript": "^7.13.0",
     "tsx": "^4.16.2",
     "typescript": "^5.5.4",
     "vitest": "^2.0.5"

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import { normalizeAddress } from "../auth/nonce.store.js";
@@ -10,6 +11,7 @@ import {
 } from "./dispatch.client.js";
 import { canonicalJsonSha256 } from "./input-digest.js";
 import { issueAcceptancePermit } from "./permit.service.js";
+import { runShadowRerank } from "./shadow-rerank.js";
 import {
   assembleReputationSignals,
   toReputationSignalsWire,
@@ -266,6 +268,16 @@ async function matchTask(
   sessionAddress: string,
   taskId: string,
 ): Promise<MatchTaskResult> {
+  // F-1919 (Feature 19, T-1912): one trace id generated at this call
+  // chain's real entry point and threaded unchanged through Go
+  // (`callMatch`'s `X-Trace-Id` header, logged by `handleMatch`) and Python
+  // (`runShadowRerank` → `callRerankService`'s `x-trace-id` header,
+  // `dispatch_rerank_runs.trace_id`) — the one value that lets a real
+  // operator grep Node/Go/Python's own log lines for the SAME `/match`
+  // call. Generated even on the early-return paths below for consistency,
+  // though only the path that reaches Go/Python actually uses it.
+  const traceId = randomUUID();
+
   const task = await getTaskById(pool, taskId);
   if (!task || task.requesterAddress !== normalizeAddress(sessionAddress)) {
     return { ok: false, reason: "not_found" };
@@ -312,7 +324,7 @@ async function matchTask(
 
   let matchResponse;
   try {
-    matchResponse = await callMatch(request);
+    matchResponse = await callMatch(request, { traceId });
   } catch (error) {
     if (error instanceof DispatchServiceUnavailableError) {
       return { ok: false, reason: "dispatch_unavailable", message: error.message };
@@ -400,8 +412,9 @@ async function matchTask(
   // failure anywhere (including a permit insert hitting a real constraint
   // violation) rolls back all three tables together, so this call can never
   // leave a partially-written run behind.
+  let runId: string;
   try {
-    await insertRecommendationRunWithPermits(pool, {
+    ({ runId } = await insertRecommendationRunWithPermits(pool, {
       taskId: task.id,
       algorithmVersion,
       // The full candidate pool sent to Go, not the recommendation count —
@@ -423,7 +436,7 @@ async function matchTask(
         reputationSignals: reputationSignalsDigestByAgentId.get(recommendation.agentId),
       })),
       permits: signedPermits,
-    });
+    }));
   } catch (error) {
     if (error instanceof PermitsStillOutstandingError) {
       // Lost the race: a concurrent /match call committed an unexpired
@@ -448,6 +461,20 @@ async function matchTask(
     }
     throw error;
   }
+
+  // F-1914/F-1915 (T-1912): the real call-chain insertion point — after
+  // Go's response is already persisted, Node calls Python once more.
+  // `runId` was just committed above; a failure inside `runShadowRerank`
+  // itself never throws (see its own doc comment), so this can never turn
+  // a successful match into a failed `/match` response (AC-1905/AC-1908).
+  await runShadowRerank(pool, {
+    runId,
+    taskDescription: task.description,
+    recommendations: matchResponse.recommendations,
+    reputationSignalsDigestByAgentId,
+    semanticSimilarityByAgentId,
+    traceId,
+  });
 
   return {
     ok: true,

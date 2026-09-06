@@ -44,7 +44,7 @@ const contractsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, schema_migrations CASCADE";
 
 const HARDHAT_DEPLOYER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const HARDHAT_REQUESTER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -344,6 +344,17 @@ runIfOptedIn("POST /tasks/:taskId/cancel-verifications (real Hardhat e2e, T-1705
       [taskId],
     );
     expect(eventRows).toHaveLength(1);
+
+    // F-1901 (T-1901): a real REFUND event is written to the outbox
+    // atomically with this cancellation — the real on-chain `cancelTask`
+    // call returns the locked budget even though this task's own `status`
+    // records the distinct terminal state `CANCELLED`, not `REFUNDED`.
+    const { rows: outboxRows } = await pool.query<{ event_type: string }>(
+      `SELECT event_type FROM outbox_events WHERE aggregate_type = 'task' AND aggregate_id = $1`,
+      [taskId],
+    );
+    expect(outboxRows).toHaveLength(1);
+    expect(outboxRows[0]?.event_type).toBe("REFUND");
 
     // Idempotent replay: resubmitting the exact same real txHash returns
     // the same CANCELLED result rather than erroring, matching every other

@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastif
 import type { Pool } from "pg";
 import { getPool } from "./db/pool.js";
 import { registerAdminDashboardRoutes } from "./modules/admin/dashboard-routes.js";
+import { registerAnalyticsRoutes } from "./modules/analytics/routes.js";
 import { registerAdminMiddleware } from "./modules/admin/middleware.js";
 import { registerAdminRoutes } from "./modules/admin/routes.js";
 import { registerAdminAgentReviewRoutes } from "./modules/agents/admin-review-routes.js";
@@ -198,6 +199,13 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   void app.register(async (instance) => {
     registerAdminDashboardRoutes(instance, pool);
   });
+
+  // F-1901/F-1902 (T-1901): `POST /analytics/events` deliberately does NOT
+  // use `app.requireSession` — it must stay reachable from an anonymous
+  // browsing session (VIEW/CLICK happen before a wallet is ever connected)
+  // — so, unlike every registration above, it does not need to wait for
+  // `registerSessionMiddleware` to have attached that decorator first.
+  registerAnalyticsRoutes(app, pool);
 
   return app;
 }

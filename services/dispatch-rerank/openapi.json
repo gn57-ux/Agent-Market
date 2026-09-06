@@ -1,0 +1,293 @@
+{
+  "components": {
+    "schemas": {
+      "CandidateRationale": {
+        "properties": {
+          "agentId": {
+            "title": "Agentid",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId",
+          "reason"
+        ],
+        "title": "CandidateRationale",
+        "type": "object"
+      },
+      "CandidateSignals": {
+        "description": "Mirrors `apps/api`'s `ReputationSignalsInput` (the flat wire shape,\nnot the full digest with sampleSize \u2014 Go's own wire contract already\nestablished this flattened shape, and Python receives the same one).\nEvery field is `None` when that signal is genuinely missing (F-1309) \u2014\nnever a fabricated 0.",
+        "properties": {
+          "communication": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Communication"
+          },
+          "completionRate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completionrate"
+          },
+          "disputeSignal": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disputesignal"
+          },
+          "historicalScale": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Historicalscale"
+          },
+          "qualityFeedback": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualityfeedback"
+          }
+        },
+        "title": "CandidateSignals",
+        "type": "object"
+      },
+      "CandidateSnapshot": {
+        "properties": {
+          "agentId": {
+            "title": "Agentid",
+            "type": "string"
+          },
+          "semanticSimilarity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semanticsimilarity"
+          },
+          "signals": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CandidateSignals"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "v0Score": {
+            "title": "V0Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "agentId",
+          "v0Score"
+        ],
+        "title": "CandidateSnapshot",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "RerankRequest": {
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateSnapshot"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "stage": {
+            "enum": [
+              "SHADOW",
+              "GRADUAL",
+              "PRIMARY"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "taskDescription": {
+            "title": "Taskdescription",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidates",
+          "taskDescription",
+          "stage"
+        ],
+        "title": "RerankRequest",
+        "type": "object"
+      },
+      "RerankResponse": {
+        "description": "`rerank_service_version`/`ranking_policy_version` are two\nINDEPENDENT fields (F-1922) \u2014 never merged into one version string.\n`ranking_policy_version` is nullable: this skeleton (T-1910/T-1911)\nruns with no registered `ctr_models` row yet, matching design.md's own\nnote that an early-stage reranker can run with \"\u672a\u7248\u672c\u5316\u7684\nprompt/\u6743\u91cd\".",
+        "properties": {
+          "llmAdopted": {
+            "title": "Llmadopted",
+            "type": "boolean"
+          },
+          "rankedAgentIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rankedagentids",
+            "type": "array"
+          },
+          "rankingPolicyVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rankingpolicyversion"
+          },
+          "rationales": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateRationale"
+            },
+            "title": "Rationales",
+            "type": "array"
+          },
+          "rerankServiceVersion": {
+            "title": "Rerankserviceversion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rankedAgentIds",
+          "rationales",
+          "rerankServiceVersion",
+          "llmAdopted"
+        ],
+        "title": "RerankResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "dispatch-rerank",
+    "version": "0.1.0-skeleton"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/rerank": {
+      "post": {
+        "operationId": "rerank_rerank_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerankRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rerank"
+      }
+    }
+  }
+}

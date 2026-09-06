@@ -35,3 +35,14 @@ test-results/
 # review would have caught this; caught it first via `git status` showing
 # the whole scripts/local-env/ source directory as untracked-and-ignored).
 /local-env/
+
+# Feature 19 (ctr-online-learning), T-1910 — `services/dispatch-rerank/`
+# (Python, uv-managed, design.md 决策 5) is not in the pnpm/Go workspace and
+# manages its own virtualenv/caches; `openapi.json` and Node's
+# `rerank-types.generated.d.ts` are the real generated artifacts and ARE
+# committed (design.md's own stated preference — reviewable contract diffs).
+services/dispatch-rerank/.venv/
+services/dispatch-rerank/.pytest_cache/
+services/dispatch-rerank/.ruff_cache/
+services/dispatch-rerank/**/__pycache__/
+services/dispatch-rerank/*.egg-info/

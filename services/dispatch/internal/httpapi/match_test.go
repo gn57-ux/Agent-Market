@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1050,6 +1051,53 @@ func TestHandleMatch_EmptySkillTagsAllowed(t *testing.T) {
 	body["skillTags"] = []string{}
 
 	rec := postMatch(t, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleMatch_LogsRealTraceIDWhenHeaderPresent (Feature 19, T-1912,
+// F-1919): a real X-Trace-Id header must actually reach this service's own
+// log output — this is the one real, verifiable half of "Go participates
+// in the cross-process trace" this Task's own N4 review required (the
+// other half, Node generating and sending it, is apps/api's own scope).
+func TestHandleMatch_LogsRealTraceIDWhenHeaderPresent(t *testing.T) {
+	var logBuf bytes.Buffer
+	originalOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(originalOutput) })
+
+	const realTraceID = "11111111-2222-3333-4444-555555555555"
+	raw, err := json.Marshal(validRequestBody([]map[string]any{
+		validCandidate(agent1Fixture, nil),
+	}))
+	if err != nil {
+		t.Fatalf("failed to marshal request body: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/match", bytes.NewReader(raw))
+	req.Header.Set("X-Trace-Id", realTraceID)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(logBuf.String(), realTraceID) {
+		t.Fatalf("expected log output to contain trace_id %q, got: %q", realTraceID, logBuf.String())
+	}
+}
+
+// TestHandleMatch_NoTraceIDHeader_DoesNotLogOrFail confirms a request with
+// no X-Trace-Id header (every caller before T-1912, and any future direct
+// caller of this service) is still handled normally — this service never
+// requires the header.
+func TestHandleMatch_NoTraceIDHeader_DoesNotLogOrFail(t *testing.T) {
+	rec := postMatch(t, validRequestBody([]map[string]any{
+		validCandidate(agent1Fixture, nil),
+	}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}

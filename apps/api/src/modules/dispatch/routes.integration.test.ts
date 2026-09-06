@@ -23,6 +23,20 @@ vi.mock("./dispatch.client.js", async (importOriginal) => {
   };
 });
 
+// T-1912: `matchTask` now also calls `runShadowRerank` after persisting
+// the run — a REAL local `qwen3:8b` call (`services/dispatch-rerank`)
+// measured tens of seconds in T-1911's own testing, which would make
+// every ordinary test in this file (previously fast, Go-only tests) incur
+// that real latency and risk vitest's own default 5s test timeout. Mocked
+// to a no-op here for the same reason `callMatch` is mocked above; the
+// REAL end-to-end chain (AC-1909) is proven separately in
+// `shadow-rerank.integration.test.ts`, gated behind its own explicit
+// opt-in env var, not inside this file's fast happy-path suite.
+const runShadowRerankMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("./shadow-rerank.js", () => ({
+  runShadowRerank: (...args: unknown[]) => runShadowRerankMock(...args),
+}));
+
 const { buildApp } = await import("../../app.js");
 const { runMigrations } = await import("../../db/migrate.js");
 
@@ -40,7 +54,7 @@ const migrationsDir = path.resolve(
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
   "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, " +
-  "sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE";
+  "sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, schema_migrations CASCADE";
 
 const TOKEN_ADDRESS = "0x8883fefc63f0cd0e873a0000c6d07ef7b77e90d7";
 
@@ -95,8 +109,17 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
 
   afterEach(async () => {
     callMatchMock.mockReset();
+    runShadowRerankMock.mockReset();
+    runShadowRerankMock.mockResolvedValue(undefined);
     await pool.query("DELETE FROM acceptance_permits");
     await pool.query("DELETE FROM recommendation_candidates");
+    // dispatch_rerank_runs.run_id references recommendation_runs with no
+    // ON DELETE CASCADE (T-1912's own migration) — must be cleared first,
+    // even though `runShadowRerank` is mocked to a no-op above and never
+    // actually inserts one in THIS file's own tests; kept for defense in
+    // depth against a future test in this file exercising the real path.
+    await pool.query("DELETE FROM dispatch_rerank_runs");
+    await pool.query("DELETE FROM shadow_ranking_results");
     await pool.query("DELETE FROM recommendation_runs");
     await pool.query("DELETE FROM tasks");
     await pool.query("DELETE FROM agent_skills");
@@ -287,6 +310,15 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     expect(candidateRows).toHaveLength(1);
     expect(candidateRows[0]?.agent_id).toBe(agentId);
     expect(candidateRows[0]?.rank).toBe(1);
+
+    // F-1901 (T-1901): a real EXPOSURE event is written to the outbox for
+    // the one recommended candidate, atomically with the run itself.
+    const outboxEvents = await pool.query<{ event_type: string }>(
+      `SELECT event_type FROM outbox_events WHERE aggregate_type = 'task' AND aggregate_id = $1`,
+      [taskId],
+    );
+    expect(outboxEvents.rows).toHaveLength(1);
+    expect(outboxEvents.rows[0]?.event_type).toBe("EXPOSURE");
   });
 
   // --- Feature 13/T-1303: algorithmVersion decision + v0.2 enrichment ---

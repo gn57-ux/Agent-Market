@@ -112,14 +112,29 @@ function resolveDispatchServiceUrl(): string {
  * non-2xx status — becomes a `DispatchServiceUnavailableError`; the caller
  * (routes.ts) is the only place that decides what HTTP status that maps to.
  */
-export async function callMatch(request: MatchRequest): Promise<MatchResponse> {
+export async function callMatch(
+  request: MatchRequest,
+  options: { traceId?: string } = {},
+): Promise<MatchResponse> {
   const url = `${resolveDispatchServiceUrl()}/match`;
+
+  // F-1919 (Feature 19, T-1912): forwards the SAME trace id `matchTask`
+  // generates for this whole call chain, so Go's own log line
+  // (`handleMatch`'s doc comment, services/dispatch) and this call's
+  // eventual `dispatch_rerank_runs.trace_id` correlate to one real
+  // request — Go never calls Python and stays unaware this header exists
+  // for anything beyond logging it (F-1914/F-1915's three-party boundary
+  // is unchanged).
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (options.traceId) {
+    headers["X-Trace-Id"] = options.traceId;
+  }
 
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(request),
       signal: AbortSignal.timeout(DISPATCH_REQUEST_TIMEOUT_MS),
     });

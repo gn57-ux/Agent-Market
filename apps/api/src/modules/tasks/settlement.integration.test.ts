@@ -34,7 +34,7 @@ const migrationsDir = path.resolve(
 
 const DROP_ALL_TABLES_SQL =
   "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, schema_migrations CASCADE";
+  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, schema_migrations CASCADE";
 
 const TASK_ESCROW_ADDRESS = "0x1234567890123456789012345678901234567890" as `0x${string}`;
 const YD_TOKEN_ADDRESS = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
@@ -250,6 +250,16 @@ runIfOptedIn("verifySettlement (integration, T-1001)", () => {
     expect(replay).toEqual({ ok: true, status: "RELEASED", confirmations: 1 });
     const statsAfterReplay = await agentStats(agentId);
     expect(statsAfterReplay).toEqual({ completed: 1, success: 1, overdue: 0, qualityScore: null });
+
+    // F-1901 (T-1901): a real APPROVE event is written to the outbox
+    // atomically with the fund release — exactly once, even after the
+    // idempotent replay above.
+    const outboxEvents = await pool.query<{ event_type: string }>(
+      `SELECT event_type FROM outbox_events WHERE aggregate_type = 'task' AND aggregate_id = $1`,
+      [taskId],
+    );
+    expect(outboxEvents.rows).toHaveLength(1);
+    expect(outboxEvents.rows[0]?.event_type).toBe("APPROVE");
   });
 
   it("DeliveryTimeoutClaimed: ACCEPTED -> REFUNDED, completed+1/overdue+1/success+0 (AC-1002, AC-1005)", async () => {
@@ -275,6 +285,15 @@ runIfOptedIn("verifySettlement (integration, T-1001)", () => {
 
     const stats = await agentStats(agentId);
     expect(stats).toEqual({ completed: 1, success: 0, overdue: 1, qualityScore: null });
+
+    // F-1901 (T-1901): a real REFUND event is written to the outbox
+    // atomically with this settlement path (DeliveryTimeoutClaimed).
+    const outboxEvents = await pool.query<{ event_type: string }>(
+      `SELECT event_type FROM outbox_events WHERE aggregate_type = 'task' AND aggregate_id = $1`,
+      [taskId],
+    );
+    expect(outboxEvents.rows).toHaveLength(1);
+    expect(outboxEvents.rows[0]?.event_type).toBe("REFUND");
   });
 
   it("ReviewTimeoutFinalized: SUBMITTED -> RELEASED, completed+1/success+1/overdue+0 (AC-1002, AC-1005)", async () => {

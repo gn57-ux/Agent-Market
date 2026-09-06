@@ -141,6 +141,47 @@ jobs:
       - name: Test
         run: go test ./...
 
+  python-quality-gates:
+    name: Python (dispatch-rerank) lint / test + OpenAPI/Node contract drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v3
+      - name: Install dependencies
+        working-directory: services/dispatch-rerank
+        run: uv sync
+      - name: Lint
+        working-directory: services/dispatch-rerank
+        run: uv run ruff check .
+      - name: Test
+        working-directory: services/dispatch-rerank
+        run: uv run pytest
+      # F-1917/design.md 决策 4: the committed `openapi.json` and Node's
+      # generated types are build ARTIFACTS, not hand-maintained files —
+      # regenerating both here and failing on any diff is the actual
+      # enforcement of "禁止手工同步" (a manual edit to either file, or a
+      # Pydantic model change without regenerating, shows up as CI-red).
+      - name: Regenerate OpenAPI schema and check for drift
+        working-directory: services/dispatch-rerank
+        run: |
+          uv run python scripts/export_openapi.py
+          git diff --exit-code openapi.json
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Regenerate Node rerank types and check for drift
+        working-directory: apps/api
+        run: |
+          pnpm run generate-rerank-types
+          cd ../.. && git diff --exit-code apps/api/src/modules/dispatch/rerank-types.generated.d.ts
+
   contracts-quality-gate:
     name: Hardhat compile / test
     runs-on: ubuntu-latest
