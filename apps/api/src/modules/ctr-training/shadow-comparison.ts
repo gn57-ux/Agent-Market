@@ -93,3 +93,88 @@ export async function evaluateAgainstShadowData(
     meetsAgreementThreshold: topOneAgreementRate >= minAgreementRate,
   };
 }
+
+/**
+ * T-1907 (F-1910/F-1916 release-stage gate), 用户 2026-09-06 Q-1902 决策
+ * 1+2: a DIFFERENT sample-sufficiency question from `evaluateAgainstShadowData`
+ * above — that function counts total ROWS ever recorded for a model with
+ * no time bound (T-1905's own promotion gate, an all-time engineering
+ * sanity check); this one counts DISTINCT TASKS within a trailing window
+ * (default 30 days), per the user's explicit requirement: "最近 30 天内至少
+ * 200 个不同 task 的有效 shadow comparison；不得使用生命周期累计数，也不得
+ * 让同一 task 重复计数". A task re-matched more than once within the window
+ * contributes ONE data point (its most recent comparison), not one per
+ * match — re-matching the same task repeatedly must not be a way to
+ * artificially inflate the sample count.
+ */
+export interface ReleaseGateShadowResult {
+  distinctTaskCount: number;
+  topOneAgreementRate: number | null;
+  sufficientSampleSize: boolean;
+  meetsAgreementThreshold: boolean;
+}
+
+const RELEASE_GATE_MIN_DISTINCT_TASKS = 200;
+const RELEASE_GATE_MIN_AGREEMENT_RATE = 0.65;
+const RELEASE_GATE_WINDOW_DAYS = 30;
+
+export async function evaluateShadowDataForReleaseGate(
+  client: Queryable,
+  modelId: string,
+  options: { windowDays?: number; minDistinctTasks?: number; minAgreementRate?: number } = {},
+): Promise<ReleaseGateShadowResult> {
+  const windowDays = options.windowDays ?? RELEASE_GATE_WINDOW_DAYS;
+  const minDistinctTasks = options.minDistinctTasks ?? RELEASE_GATE_MIN_DISTINCT_TASKS;
+  const minAgreementRate = options.minAgreementRate ?? RELEASE_GATE_MIN_AGREEMENT_RATE;
+
+  const { rows } = await client.query<{
+    task_id: string;
+    shadow_ranked_agent_ids: string[];
+    real_ranked_agent_ids: string[];
+    computed_at: Date;
+  }>(
+    `SELECT rr.task_id, sr.shadow_ranked_agent_ids, sr.real_ranked_agent_ids, sr.computed_at
+       FROM shadow_ranking_results sr
+       JOIN recommendation_runs rr ON rr.id = sr.run_id
+      WHERE sr.ctr_model_id = $1
+        AND sr.computed_at >= now() - ($2::int * interval '1 day')`,
+    [modelId, windowDays],
+  );
+
+  const latestByTask = new Map<
+    string,
+    { shadowFirst: string | undefined; realFirst: string | undefined; computedAt: Date }
+  >();
+  for (const row of rows) {
+    const existing = latestByTask.get(row.task_id);
+    if (!existing || row.computed_at > existing.computedAt) {
+      latestByTask.set(row.task_id, {
+        shadowFirst: row.shadow_ranked_agent_ids[0],
+        realFirst: row.real_ranked_agent_ids[0],
+        computedAt: row.computed_at,
+      });
+    }
+  }
+
+  const distinctTaskCount = latestByTask.size;
+  if (distinctTaskCount === 0) {
+    return {
+      distinctTaskCount: 0,
+      topOneAgreementRate: null,
+      sufficientSampleSize: false,
+      meetsAgreementThreshold: false,
+    };
+  }
+
+  const agreements = [...latestByTask.values()].filter(
+    (v) => v.shadowFirst !== undefined && v.shadowFirst === v.realFirst,
+  ).length;
+  const topOneAgreementRate = agreements / distinctTaskCount;
+
+  return {
+    distinctTaskCount,
+    topOneAgreementRate,
+    sufficientSampleSize: distinctTaskCount >= minDistinctTasks,
+    meetsAgreementThreshold: topOneAgreementRate >= minAgreementRate,
+  };
+}

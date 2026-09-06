@@ -109,3 +109,86 @@ export function resolveDispatchRerankOutcome(
   if (callOutcome === "ERROR") return "ERROR";
   return llmAdopted ? "SUCCESS" : "DEGRADED";
 }
+
+/**
+ * T-1907 (F-1910/F-1916 release-stage gate), 用户 2026-09-06 Q-1902 决策 4:
+ * "进入 GRADUAL/PRIMARY 必须同时满足 P95 ≤ 8 秒、错误与超时合计比例 < 2%，
+ * 指标使用与样本量相同的最近 30 天窗口". Deliberately scoped to EVERY real
+ * `dispatch_rerank_runs` row in the window, regardless of
+ * `ranking_policy_version` — unlike the shadow-agreement/effect gates
+ * (which must isolate a specific candidate model's own evidence), latency
+ * and error/timeout rate are properties of the Python service call itself
+ * (dominated by the local LLM inference time — T-1911's own measured
+ * "tens of seconds" — which fusion weights never affect), not of which
+ * `ranking_policy_version` happened to be active for a given call. Using
+ * every real call the service actually handled is the more honest,
+ * strictly MORE available signal — restricting to one (today, always
+ * unset) `ranking_policy_version` would make this gate permanently
+ * "no data" for the same architectural reason `evaluateShadowDataFor
+ * ReleaseGate` is.
+ */
+export interface RerankStabilityResult {
+  sampleCount: number;
+  p95LatencyMs: number | null;
+  errorOrTimeoutRate: number | null;
+  hasData: boolean;
+  meetsLatencyThreshold: boolean;
+  meetsErrorRateThreshold: boolean;
+}
+
+const RELEASE_GATE_MAX_P95_LATENCY_MS = 8_000;
+const RELEASE_GATE_MAX_ERROR_OR_TIMEOUT_RATE = 0.02;
+const RELEASE_GATE_STABILITY_WINDOW_DAYS = 30;
+
+export async function evaluateRerankStabilityForReleaseGate(
+  client: Queryable,
+  options: {
+    windowDays?: number;
+    maxP95LatencyMs?: number;
+    maxErrorOrTimeoutRate?: number;
+  } = {},
+): Promise<RerankStabilityResult> {
+  const windowDays = options.windowDays ?? RELEASE_GATE_STABILITY_WINDOW_DAYS;
+  const maxP95LatencyMs = options.maxP95LatencyMs ?? RELEASE_GATE_MAX_P95_LATENCY_MS;
+  const maxErrorOrTimeoutRate =
+    options.maxErrorOrTimeoutRate ?? RELEASE_GATE_MAX_ERROR_OR_TIMEOUT_RATE;
+
+  const { rows } = await client.query<{
+    sample_count: string;
+    p95_latency_ms: string | null;
+    error_or_timeout_count: string;
+  }>(
+    `SELECT
+       count(*) AS sample_count,
+       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_latency_ms,
+       count(*) FILTER (WHERE outcome IN ('ERROR', 'TIMEOUT')) AS error_or_timeout_count
+     FROM dispatch_rerank_runs
+     WHERE created_at >= now() - ($1::int * interval '1 day')`,
+    [windowDays],
+  );
+
+  const row = rows[0];
+  const sampleCount = row ? Number(row.sample_count) : 0;
+  if (!row || sampleCount === 0) {
+    return {
+      sampleCount: 0,
+      p95LatencyMs: null,
+      errorOrTimeoutRate: null,
+      hasData: false,
+      meetsLatencyThreshold: false,
+      meetsErrorRateThreshold: false,
+    };
+  }
+
+  const p95LatencyMs = row.p95_latency_ms === null ? null : Number(row.p95_latency_ms);
+  const errorOrTimeoutRate = Number(row.error_or_timeout_count) / sampleCount;
+
+  return {
+    sampleCount,
+    p95LatencyMs,
+    errorOrTimeoutRate,
+    hasData: true,
+    meetsLatencyThreshold: p95LatencyMs !== null && p95LatencyMs <= maxP95LatencyMs,
+    meetsErrorRateThreshold: errorOrTimeoutRate < maxErrorOrTimeoutRate,
+  };
+}

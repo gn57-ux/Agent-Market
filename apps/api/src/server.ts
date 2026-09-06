@@ -10,11 +10,16 @@ import {
 } from "./modules/tasks/result-submission-poller.js";
 import { startDagPoller, type DagPollerHandle } from "./modules/dag/dag-poller.js";
 import { LangGraphDagExecutor } from "./modules/dag/langgraph-executor.js";
+import {
+  startReleaseStagePoller,
+  type ReleaseStagePollerHandle,
+} from "./modules/ctr-training/release-stage-poller.js";
 
 const app = buildApp();
 const port = Number(process.env.API_PORT ?? 3001);
 let resultSubmissionPollerHandle: ResultSubmissionPollerHandle | undefined;
 let dagPollerHandle: DagPollerHandle | undefined;
+let releaseStagePollerHandle: ReleaseStagePollerHandle | undefined;
 
 /**
  * Startup gate (Feature 7 sync, T-709, P1): confirms
@@ -103,6 +108,24 @@ function startBackgroundPollers(): void {
       app.log.error({ err: error }, "dag poller tick failed");
     },
   });
+
+  // T-1907 (F-1910/F-1916), N4 round 2 real finding (P1): the automatic
+  // rollback logic (`release-gate.ts`'s `checkAndAutoRollback`) previously
+  // had no real periodic trigger — only a manual CLI invocation. Same
+  // "nothing calls the real state-transition logic on its own" gap
+  // T-905/T-1703 already closed for their own logic, closed here the same
+  // way — see `release-stage-poller.ts`'s own doc comment.
+  releaseStagePollerHandle = startReleaseStagePoller({
+    pool: getPool(),
+    onTick: (result) => {
+      if (result?.rolledBack) {
+        app.log.warn({ result }, "release stage auto-rollback triggered");
+      }
+    },
+    onError: (error) => {
+      app.log.error({ err: error }, "release stage poller tick failed");
+    },
+  });
 }
 
 async function stopBackgroundPollers(): Promise<void> {
@@ -115,6 +138,8 @@ async function stopBackgroundPollers(): Promise<void> {
   resultSubmissionPollerHandle = undefined;
   await dagPollerHandle?.stop();
   dagPollerHandle = undefined;
+  await releaseStagePollerHandle?.stop();
+  releaseStagePollerHandle = undefined;
 }
 
 async function start(): Promise<void> {

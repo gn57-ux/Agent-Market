@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Queryable } from "../../db/pool.js";
 import {
   DEFAULT_ATTRIBUTION_WINDOW_MS,
   isAttributedEvent,
@@ -137,10 +137,16 @@ interface ExposureRow {
  * stable UUID) is the deterministic tiebreaker.
  */
 export async function buildTrainingDataset(
-  pool: Pool,
-  options: { asOf?: Date; excludedRunIds?: string[] } = {},
+  pool: Queryable,
+  options: { asOf?: Date; since?: Date; excludedRunIds?: string[] } = {},
 ): Promise<DatasetBuildResult> {
   const asOf = options.asOf ?? new Date();
+  // T-1907 (F-1910/F-1916 release-gate): `since` bounds the exposure window
+  // to a trailing window (e.g. "last 30 days") for a LIVE health check —
+  // distinct from `asOf`, which bounds how far forward a historical
+  // rebuild is allowed to see. Defaults to the epoch (no lower bound),
+  // matching every existing caller's un-windowed behavior exactly.
+  const since = options.since ?? new Date(0);
   // F-1912/T-1908: the real "排除" half of "识别并排除明显的刷曝光/刷点击
   // 行为对训练数据...的污染". N4 real finding (P1, round 2 [T-1908]): a
   // real `EXPOSURE` row's `session_id` is always the server-synthesized
@@ -191,12 +197,13 @@ export async function buildTrainingDataset(
      ) term ON true
      WHERE ie.event_type = 'EXPOSURE'
        AND ie.occurred_at <= $1
+       AND ie.occurred_at >= $3
        AND ie.task_id IS NOT NULL
        AND ie.agent_id IS NOT NULL
        AND ie.run_id IS NOT NULL
        AND ie.run_id <> ALL($2::uuid[])
      ORDER BY ie.occurred_at ASC, ie.id ASC`,
-    [asOf.toISOString(), excludedRunIds],
+    [asOf.toISOString(), excludedRunIds, since.toISOString()],
   );
 
   const matureRows = rows.filter((row) => row.terminal_status_as_of !== null);
@@ -281,7 +288,7 @@ export async function buildTrainingDataset(
  * per-exposure version enforced via `upperBound`.
  */
 async function fetchCandidateEventsByTask(
-  pool: Pool,
+  pool: Queryable,
   taskIds: string[],
   asOf: Date,
 ): Promise<Map<string, AttributionCandidate[]>> {
@@ -328,7 +335,7 @@ async function fetchCandidateEventsByTask(
  * unambiguous.
  */
 async function fetchRatingScoresByTask(
-  pool: Pool,
+  pool: Queryable,
   taskIds: string[],
 ): Promise<Map<string, number>> {
   const byTask = new Map<string, number>();

@@ -36,7 +36,7 @@ runIfOptedIn("runMigrations (integration)", () => {
 
   afterAll(async () => {
     await pool.query(
-      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, evaluation_appeals, evaluation_results, evaluation_submissions, evaluation_tasks, evaluation_rubrics, risk_signals, risk_hold_audit_logs, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, evaluation_appeals, evaluation_results, evaluation_submissions, evaluation_tasks, evaluation_rubrics, risk_signals, risk_hold_audit_logs, release_stage_state, release_stage_audit_logs, schema_migrations CASCADE",
     );
     await pool.end();
   });
@@ -82,6 +82,7 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0036_create_ctr_training_datasets.sql",
       "0037_create_ctr_models_and_rerank_observability.sql",
       "0038_add_ctr_models_fusion_weights.sql",
+      "0039_create_release_stage.sql",
     ]);
     expect(result.alreadyApplied).toEqual([]);
 
@@ -171,6 +172,7 @@ runIfOptedIn("runMigrations (integration)", () => {
       "0036_create_ctr_training_datasets.sql",
       "0037_create_ctr_models_and_rerank_observability.sql",
       "0038_add_ctr_models_fusion_weights.sql",
+      "0039_create_release_stage.sql",
     ]);
   });
 });

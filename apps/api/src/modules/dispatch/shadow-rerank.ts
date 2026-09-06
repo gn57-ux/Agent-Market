@@ -6,6 +6,7 @@ import {
   resolveDispatchRerankOutcome,
 } from "./rerank-repository.js";
 import { toReputationSignalsWire, type ReputationSignalsDigest } from "./reputation-signals.js";
+import { getCurrentReleaseStage } from "../ctr-training/release-gate.js";
 
 export interface RunShadowRerankInput {
   runId: string;
@@ -37,14 +38,23 @@ export interface RunShadowRerankInput {
  * reranking is fit to ever leave SHADOW; this function does not attempt
  * to solve that latency itself.
  *
- * `stage` is hardcoded to `"SHADOW"` — T-1907 (the only thing that could
- * ever change it) stays hard-blocked pending Q-1902's real threshold
- * values, so there is no other real stage to request yet (design.md:
- * "默认停留 SHADOW"). A SHADOW call's result is NEVER adopted into the
- * real response, by construction: this function's return value is
- * `void` — `matchTask`'s own response is built entirely from `matchResponse`
- * (Go's result), before this function is ever called, and stays that way
- * regardless of what this function does or how it fails (AC-1905).
+ * `stage` (N4 fix, T-1907): read fresh from `release_stage_state`
+ * (`release-gate.ts`'s own single source of truth) on every real call,
+ * never hardcoded — so a real GRADUAL/PRIMARY advancement is genuinely
+ * observable in what Python receives and what `dispatch_rerank_runs.stage`
+ * records, not silently ignored. **What this does NOT do** (an explicit,
+ * documented limitation, not an oversight): this function's return value
+ * stays `void` regardless of stage — `matchTask`'s own response is built
+ * entirely from `matchResponse` (Go's result) BEFORE this function is ever
+ * called, so a real GRADUAL/PRIMARY stage still never changes what a real
+ * user is shown; `adopted` stays `false` unconditionally for the same
+ * reason. Building real traffic adoption (routing some/all real responses
+ * through Python's reranked order once past SHADOW) is a separate,
+ * larger, NOT-yet-authorized follow-up — it needs its own design decisions
+ * (what fraction of GRADUAL traffic, how/where the response construction
+ * changes) that were never part of T-1907's scope (门槛配置/计算/拒绝路径/
+ * 自动回滚), and inventing one here would be exactly the kind of
+ * unauthorized scope expansion CLAUDE.md 原则 1 warns against.
  *
  * This function never throws — a Python/network failure degrades to a
  * logged `TIMEOUT`/`ERROR` `dispatch_rerank_runs` row (F-1913/AC-1908),
@@ -54,6 +64,26 @@ export interface RunShadowRerankInput {
  * roll back if this fails.
  */
 export async function runShadowRerank(pool: Pool, input: RunShadowRerankInput): Promise<void> {
+  // N4 P1 fix (round 2): `getCurrentReleaseStage` genuinely CAN throw (a
+  // missing singleton row, or any transient DB error on this one query) —
+  // letting that propagate would break this function's own "never throws"
+  // contract for the FIRST time in its history and turn an already-
+  // decided-successful `/match` response into a failed one, since
+  // `routes.ts` calls this function unguarded. Falls back to `"SHADOW"`
+  // (the always-safe stage — Python is told nothing has actually been
+  // approved for wider exposure) rather than letting a read failure here
+  // ever affect a real user-facing request.
+  let stage: Awaited<ReturnType<typeof getCurrentReleaseStage>>;
+  try {
+    stage = await getCurrentReleaseStage(pool);
+  } catch (error) {
+    stage = "SHADOW";
+    console.error(
+      "runShadowRerank: failed to read the real release stage, defaulting to SHADOW",
+      error,
+    );
+  }
+
   const request: RerankRequestBody = {
     candidates: input.recommendations.map((recommendation) => {
       const digest = input.reputationSignalsDigestByAgentId.get(recommendation.agentId);
@@ -65,7 +95,7 @@ export async function runShadowRerank(pool: Pool, input: RunShadowRerankInput): 
       };
     }),
     taskDescription: input.taskDescription,
-    stage: "SHADOW",
+    stage,
   };
 
   const result = await callRerankService(request, { traceId: input.traceId });
@@ -83,7 +113,7 @@ export async function runShadowRerank(pool: Pool, input: RunShadowRerankInput): 
 
     const rerankRunId = await insertDispatchRerankRun(client, {
       runId: input.runId,
-      stage: "SHADOW",
+      stage,
       rerankServiceVersion: result.response?.rerankServiceVersion ?? null,
       // No `ctr_models` row exists yet (T-1905 not built) — every real
       // `/rerank` response's `rankingPolicyVersion` is `null` today.
