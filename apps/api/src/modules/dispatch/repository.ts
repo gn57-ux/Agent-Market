@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import type { Queryable } from "../../db/pool.js";
+import { serverSessionId, writeInteractionEventToOutbox } from "../analytics/outbox-event.js";
 import { countActiveTasksByAgentIds } from "../tasks/repository.js";
 import type { ReputationSignalsDigest, ReputationSignalsInput } from "./reputation-signals.js";
 
@@ -532,6 +533,19 @@ export async function insertRecommendationRunWithPermits(
 
     for (const candidate of input.candidates) {
       await insertRecommendationCandidate(client, runId, candidate);
+      // F-1901 (T-1901): real EXPOSURE event, one per recommended
+      // candidate — mirrors design.md's own note that VIEW/CLICK ("同一
+      // 撮合记录") are per-candidate rows keyed by `run_id`, so EXPOSURE
+      // (the earlier stage of the same funnel) uses the same granularity
+      // rather than one row per whole run with `agent_id` left null.
+      await writeInteractionEventToOutbox(client, {
+        eventType: "EXPOSURE",
+        sessionId: serverSessionId(input.taskId),
+        clientEventId: `exposure:${runId}:${candidate.agentId}`,
+        taskId: input.taskId,
+        agentId: candidate.agentId,
+        runId,
+      });
     }
 
     // Feature 7 sync (T-709): marks every OTHER run's still-OUTSTANDING

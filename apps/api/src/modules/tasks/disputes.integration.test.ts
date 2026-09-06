@@ -37,8 +37,7 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, evaluation_appeals, evaluation_results, evaluation_submissions, evaluation_tasks, evaluation_rubrics, risk_signals, risk_hold_audit_logs, schema_migrations CASCADE";
+  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, evaluation_appeals, evaluation_results, evaluation_submissions, evaluation_tasks, evaluation_rubrics, risk_signals, risk_hold_audit_logs, release_stage_state, release_stage_audit_logs, schema_migrations CASCADE";
 
 const TASK_ESCROW_ADDRESS = "0x1234567890123456789012345678901234567890" as `0x${string}`;
 const YD_TOKEN_ADDRESS = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
@@ -372,6 +371,16 @@ runIfOptedIn("disputes flow (integration, T-1002)", () => {
     expect(disputeRow?.resolution).toBe("SUPPORT_AGENT");
     expect(disputeRow?.resolvedBy).toBe(arbitrator.address.toLowerCase());
 
+    // F-1901 (T-1901): an agent-favor dispute resolution is a fund release
+    // with no explicit "approval" action and no distinct slot in the
+    // 9-value event_type enum — deliberately writes no interaction event
+    // (service.ts's own doc comment).
+    const outboxEvents = await pool.query(
+      `SELECT id FROM outbox_events WHERE aggregate_type = 'task' AND aggregate_id = $1`,
+      [taskId],
+    );
+    expect(outboxEvents.rows).toHaveLength(0);
+
     const { rows: auditRows } = await pool.query<{ action: string; actor_address: string }>(
       `SELECT action, actor_address FROM audit_logs WHERE task_id = $1`,
       [taskId],
@@ -419,6 +428,17 @@ runIfOptedIn("disputes flow (integration, T-1002)", () => {
     const disputeRow = await getDisputeForTask(pool, taskId);
     expect(disputeRow?.status).toBe("RESOLVED");
     expect(disputeRow?.resolution).toBe("SUPPORT_REQUESTER");
+
+    // F-1901 (T-1901): a real REFUND event is written to the outbox
+    // atomically with this dispute-resolution path (requester-favor only —
+    // an agent-favor resolution deliberately writes no event, see
+    // service.ts's own doc comment).
+    const outboxEvents = await pool.query<{ event_type: string }>(
+      `SELECT event_type FROM outbox_events WHERE aggregate_type = 'task' AND aggregate_id = $1`,
+      [taskId],
+    );
+    expect(outboxEvents.rows).toHaveLength(1);
+    expect(outboxEvents.rows[0]?.event_type).toBe("REFUND");
   });
 
   it("upserts a users row for an arbitrator address that never logged into this backend before (resolved_by FK)", async () => {

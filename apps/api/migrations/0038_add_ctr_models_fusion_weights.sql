@@ -1,0 +1,18 @@
+-- Feature 19 (ctr-online-learning), T-1905.
+--
+-- design.md's own `ctr_models` schema (T-1912's migration 0037) never gave
+-- the trained artifact itself a column — `offline_metrics` is documented as
+-- "评估指标" (evaluation results), a distinct concern from the actual
+-- fusion-weight VALUES a training run produces (CLAUDE.md 原则 6: one piece
+-- of design knowledge, one home — conflating "what we measured" and "what
+-- we produced" into one JSONB blob would make a promoted version's actual
+-- parameters unrecoverable except by re-deriving them from raw metrics).
+-- `fusion_weights` is the five weight coefficients (same keys as Go's
+-- `ScoreV2`/Python's `fusion.py` — `completionRate`/`qualityFeedback`/
+-- `communication`/`disputeSignal`/`historicalScale`) this `model_version`
+-- actually uses; `NOT NULL` because every real `ctr_models` row (including
+-- an eventual seeded "Go v0.2 defaults" row) has a concrete weight set —
+-- there is no meaningful "model with no weights" state.
+-- No existing rows to backfill: `ctr_models` has had zero real writers
+-- until this Task, so a plain NOT NULL add is safe (no default needed).
+ALTER TABLE ctr_models ADD COLUMN fusion_weights JSONB NOT NULL;

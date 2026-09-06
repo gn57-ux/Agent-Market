@@ -1,6 +1,7 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
+import { serverSessionId, writeInteractionEventToOutbox } from "../analytics/outbox-event.js";
 import { verifySession } from "../auth/session.service.js";
 import { createChainRpcClient } from "../chain/rpc.client.js";
 import type { TaskStatusValue } from "../tasks/repository.js";
@@ -153,6 +154,20 @@ export function registerDisputesRoutes(app: FastifyInstance, pool: Pool): void {
             error: { code: TASK_STATE_CONFLICT, message: "该任务已有一个正在处理的争议。" },
           });
         }
+
+        // F-1901 (T-1901): real DISPUTE event — this is the actual act of
+        // a requester opening a dispute (as opposed to
+        // `tasks/service.ts`'s `verifyDisputeOpen`, which only confirms
+        // the on-chain tx that follows this call; recording it here, not
+        // there, matches F-1901's literal "争议" wording).
+        await writeInteractionEventToOutbox(client, {
+          eventType: "DISPUTE",
+          sessionId: serverSessionId(task.id),
+          clientEventId: `dispute:${task.id}`,
+          taskId: task.id,
+          agentId: task.acceptedAgentId ?? undefined,
+          actorAddress: sessionAddress,
+        });
 
         await client.query("COMMIT");
         return reply

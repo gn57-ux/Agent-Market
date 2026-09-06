@@ -24,6 +24,12 @@ export default tseslint.config(
       "apps/office-cocos/local/**",
       "apps/office-cocos/build/**",
       "apps/office-cocos/profiles/**",
+      // Feature 19 (ctr-online-learning), T-1910/T-1911 —
+      // `services/dispatch-rerank/` is a Python project (uv-managed); its
+      // `.venv/` bundles third-party packages' own vendored JS (e.g.
+      // urllib3's emscripten worker), which is neither this repo's source
+      // nor subject to its lint rules.
+      "services/dispatch-rerank/.venv/**",
     ],
   },
   js.configs.recommended,

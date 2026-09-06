@@ -1,6 +1,7 @@
 import { resolveChainConfig, type ChainConfig, type ErrorCode } from "@agent-market/domain";
 import type { Pool } from "pg";
 import type { Queryable } from "../../db/pool.js";
+import { serverSessionId, writeInteractionEventToOutbox } from "../analytics/outbox-event.js";
 import { normalizeAddress } from "../auth/nonce.store.js";
 import { verifyAcceptanceTransaction } from "../chain/acceptance-tx-verifier.js";
 import { verifyCancellationTransaction } from "../chain/cancellation-tx-verifier.js";
@@ -1126,6 +1127,17 @@ export async function verifyAcceptance(
         // never be observably out of sync.
         await consumeAcceptancePermits(client, taskId, agentId, nonce, normalizedTxHash);
         await invalidateOtherOutstandingPermits(client, taskId, agentId, nonce);
+        // F-1901 (T-1901): real ACCEPT event, written atomically with the
+        // acceptance itself — see analytics/outbox-event.ts's own doc
+        // comment for the session_id placeholder rationale.
+        await writeInteractionEventToOutbox(client, {
+          eventType: "ACCEPT",
+          sessionId: serverSessionId(taskId),
+          clientEventId: `accept:${taskId}`,
+          taskId,
+          agentId,
+          actorAddress: acceptedAgentAddress,
+        });
       },
     });
   } catch (error) {
@@ -1373,6 +1385,16 @@ export async function verifyResultSubmission(
             submittedAt: matchingEvent.event.submittedAt.toString(),
             reviewDeadline: matchingEvent.event.reviewDeadline.toString(),
           },
+        });
+        // F-1901 (T-1901): real SUBMIT event, written atomically with the
+        // result submission itself.
+        await writeInteractionEventToOutbox(client, {
+          eventType: "SUBMIT",
+          sessionId: serverSessionId(taskId),
+          clientEventId: `submit:${taskId}`,
+          taskId,
+          agentId: task.acceptedAgentId ?? undefined,
+          actorAddress: normalizedSessionAddress,
         });
       },
     });
@@ -1695,6 +1717,18 @@ export async function verifySettlement(
           payload,
         });
         await applySettlementStats(client, acceptedAgentId, plan.statsKind);
+        // F-1901 (T-1901): this same function handles both fund-release
+        // (APPROVE, real event: RESULT_APPROVED/REVIEW_TIMEOUT_FINALIZED)
+        // and one of the two REFUND paths (DELIVERY_TIMEOUT_CLAIMED) — see
+        // `planForSettlementKind`'s own `toStatus` for which one this call
+        // actually is.
+        await writeInteractionEventToOutbox(client, {
+          eventType: plan.toStatus === "RELEASED" ? "APPROVE" : "REFUND",
+          sessionId: serverSessionId(taskId),
+          clientEventId: `${plan.toStatus === "RELEASED" ? "approve" : "refund"}:${taskId}`,
+          taskId,
+          agentId: acceptedAgentId ?? undefined,
+        });
       },
     });
   } catch (error) {
@@ -2164,6 +2198,23 @@ export async function verifyDisputeResolution(
           reason: `resolveDispute(supportAgent=${supportAgent})`,
           txHash: normalizedTxHash,
         });
+        // F-1901 (T-1901): real REFUND event — one of this Task's two real
+        // REFUND sites (the other is verifyCancellation below). Only the
+        // requester-favor outcome maps to REFUND; a dispute resolved in
+        // the agent's favor is a fund release with no explicit "approval"
+        // action, and the 9-value event_type enum (T-1900) has no distinct
+        // slot for it, so it is deliberately left unrecorded rather than
+        // mislabeled as APPROVE or a fabricated 10th event type.
+        if (!supportAgent) {
+          await writeInteractionEventToOutbox(client, {
+            eventType: "REFUND",
+            sessionId: serverSessionId(taskId),
+            clientEventId: `refund:${taskId}`,
+            taskId,
+            agentId: acceptedAgentId ?? undefined,
+            actorAddress: resolvedByAddress,
+          });
+        }
       },
     });
   } catch (error) {
@@ -2381,6 +2432,24 @@ export async function verifyCancellation(
           payload: {
             taskId: matchingEvent.event.taskId,
           },
+        });
+        // F-1901 (T-1901): real REFUND event — this Task's second REFUND
+        // site. `allowedFromStatuses: ["OPEN"]` above means every
+        // cancellation this function handles happens after funding was
+        // already verified (AWAITING_FUNDING -> OPEN, `verifyFunding`'s own
+        // transition) — the on-chain `cancelTask` call this verifies
+        // genuinely returns the locked budget to the requester, even
+        // though this row's own `status` column records the distinct
+        // terminal state `CANCELLED`, not `REFUNDED`. No `agentId`: a
+        // cancellation only ever fires pre-acceptance (see this function's
+        // own doc comment), so there is no accepted Agent to attribute it
+        // to.
+        await writeInteractionEventToOutbox(client, {
+          eventType: "REFUND",
+          sessionId: serverSessionId(taskId),
+          clientEventId: `refund:${taskId}`,
+          taskId,
+          actorAddress: normalizeAddress(sessionAddress),
         });
       },
     });

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -149,6 +150,21 @@ func handleMatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeMatchError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
+	}
+
+	// F-1919 (Feature 19, T-1912): the one point where this service
+	// participates in the cross-process trace Node originates for one
+	// `/match` call — Go never calls Python and has no reason to know
+	// about the eventual `/rerank` leg (F-1914/F-1915's own three-party
+	// boundary stays unchanged), but logging the SAME `X-Trace-Id` Node
+	// generated lets a real operator grep one id across Node's own log
+	// line, this one, and Python's (`main.py`'s matching read of the same
+	// header) to reconstruct one request's full path. Using this
+	// package's already-established `log.Printf` convention
+	// (`cmd/server/main.go`), not introducing a new logging library for
+	// one line.
+	if traceID := r.Header.Get("X-Trace-Id"); traceID != "" {
+		log.Printf("trace_id=%s POST /match", traceID)
 	}
 
 	// http.MaxBytesReader wraps r.Body so any read beyond

@@ -1,6 +1,7 @@
 import type { ErrorCode } from "@agent-market/domain";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
+import { serverSessionId, writeInteractionEventToOutbox } from "../analytics/outbox-event.js";
 import { getTaskById } from "../tasks/repository.js";
 import { insertRating, getScoresForAgent, getRatingForTask } from "./repository.js";
 import { aggregateQualityScore } from "./service.js";
@@ -98,6 +99,17 @@ export function registerRatingsRoutes(app: FastifyInstance, pool: Pool): void {
         acceptedAgentId,
         qualityScore,
       ]);
+
+      // F-1901 (T-1901): real RATE event, written atomically with the
+      // rating itself.
+      await writeInteractionEventToOutbox(client, {
+        eventType: "RATE",
+        sessionId: serverSessionId(task.id),
+        clientEventId: `rate:${task.id}`,
+        taskId: task.id,
+        agentId: acceptedAgentId,
+        actorAddress: sessionAddress,
+      });
 
       await client.query("COMMIT");
       return reply.status(201).send({ ratingId: rating.id });

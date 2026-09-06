@@ -23,6 +23,20 @@ vi.mock("./dispatch.client.js", async (importOriginal) => {
   };
 });
 
+// T-1912: `matchTask` now also calls `runShadowRerank` after persisting
+// the run — a REAL local `qwen3:8b` call (`services/dispatch-rerank`)
+// measured tens of seconds in T-1911's own testing, which would make
+// every ordinary test in this file (previously fast, Go-only tests) incur
+// that real latency and risk vitest's own default 5s test timeout. Mocked
+// to a no-op here for the same reason `callMatch` is mocked above; the
+// REAL end-to-end chain (AC-1909) is proven separately in
+// `shadow-rerank.integration.test.ts`, gated behind its own explicit
+// opt-in env var, not inside this file's fast happy-path suite.
+const runShadowRerankMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("./shadow-rerank.js", () => ({
+  runShadowRerank: (...args: unknown[]) => runShadowRerankMock(...args),
+}));
+
 const { buildApp } = await import("../../app.js");
 const { runMigrations } = await import("../../db/migrate.js");
 
@@ -38,9 +52,7 @@ const migrationsDir = path.resolve(
 );
 
 const DROP_ALL_TABLES_SQL =
-  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, " +
-  "chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, " +
-  "sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, evaluation_appeals, evaluation_results, evaluation_submissions, evaluation_tasks, evaluation_rubrics, risk_signals, risk_hold_audit_logs, schema_migrations CASCADE";
+  "DROP TABLE IF EXISTS ratings, audit_logs, disputes, pending_result_submissions, recommendation_candidates, recommendation_runs, acceptance_permits, deliverables, task_state_history, chain_events, chain_transactions, task_skills, tasks, agent_embeddings, task_embeddings, embedding_budget_usage, blocked_wallets, agent_skills, agents, sessions, auth_nonces, users, consumed_privy_tokens, agent_review_audit_logs, admin_role_audit_logs, admin_roles, task_dag_node_skills, task_dag_edges, task_dag_nodes, task_dags, outbox_events, chain_indexed_events, processed_events, indexer_scan_checkpoints, interaction_events, ctr_training_datasets, ctr_models, dispatch_rerank_runs, shadow_ranking_results, evaluation_appeals, evaluation_results, evaluation_submissions, evaluation_tasks, evaluation_rubrics, risk_signals, risk_hold_audit_logs, release_stage_state, release_stage_audit_logs, schema_migrations CASCADE";
 
 const TOKEN_ADDRESS = "0x8883fefc63f0cd0e873a0000c6d07ef7b77e90d7";
 
@@ -95,8 +107,17 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
 
   afterEach(async () => {
     callMatchMock.mockReset();
+    runShadowRerankMock.mockReset();
+    runShadowRerankMock.mockResolvedValue(undefined);
     await pool.query("DELETE FROM acceptance_permits");
     await pool.query("DELETE FROM recommendation_candidates");
+    // dispatch_rerank_runs.run_id references recommendation_runs with no
+    // ON DELETE CASCADE (T-1912's own migration) — must be cleared first,
+    // even though `runShadowRerank` is mocked to a no-op above and never
+    // actually inserts one in THIS file's own tests; kept for defense in
+    // depth against a future test in this file exercising the real path.
+    await pool.query("DELETE FROM dispatch_rerank_runs");
+    await pool.query("DELETE FROM shadow_ranking_results");
     await pool.query("DELETE FROM recommendation_runs");
     await pool.query("DELETE FROM tasks");
     await pool.query("DELETE FROM agent_skills");
@@ -158,7 +179,10 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     return id;
   }
 
-  async function insertActiveAgent(skillTags: string[] = []): Promise<string> {
+  async function insertActiveAgent(
+    skillTags: string[] = [],
+    overrides: { baselineEvaluationStatus?: string } = {},
+  ): Promise<string> {
     const ownerAddress = "0x9983fefc63f0cd0e873a0000c6d07ef7b77e90d8";
     await pool.query(`INSERT INTO users (address) VALUES ($1) ON CONFLICT DO NOTHING`, [
       ownerAddress,
@@ -174,6 +198,16 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
       await pool.query(`INSERT INTO agent_skills (agent_id, skill_tag) VALUES ($1, $2)`, [
         id,
         skillTag,
+      ]);
+    }
+    // Feature 20/T-1913: defaults to the migration's own column default
+    // (NOT_STARTED) when omitted — every existing test in this file never
+    // sets `enforceBaselineEvaluationGate`, so this override only matters
+    // for the dedicated gate-integration tests below.
+    if (overrides.baselineEvaluationStatus) {
+      await pool.query(`UPDATE agents SET baseline_evaluation_status = $1 WHERE id = $2`, [
+        overrides.baselineEvaluationStatus,
+        id,
       ]);
     }
     return id;
@@ -287,6 +321,15 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
     expect(candidateRows).toHaveLength(1);
     expect(candidateRows[0]?.agent_id).toBe(agentId);
     expect(candidateRows[0]?.rank).toBe(1);
+
+    // F-1901 (T-1901): a real EXPOSURE event is written to the outbox for
+    // the one recommended candidate, atomically with the run itself.
+    const outboxEvents = await pool.query<{ event_type: string }>(
+      `SELECT event_type FROM outbox_events WHERE aggregate_type = 'task' AND aggregate_id = $1`,
+      [taskId],
+    );
+    expect(outboxEvents.rows).toHaveLength(1);
+    expect(outboxEvents.rows[0]?.event_type).toBe("EXPOSURE");
   });
 
   // --- Feature 13/T-1303: algorithmVersion decision + v0.2 enrichment ---
@@ -863,6 +906,196 @@ runIfOptedIn("POST /tasks/:taskId/match (integration, T-705)", () => {
       taskId,
     ]);
     expect(rows).toHaveLength(0);
+  });
+
+  // --- Feature 20/T-1913 (AC-1911): Feature 20 admission-gate integration ---
+
+  describe("Feature 20 admission-gate integration (T-1913, AC-1911)", () => {
+    const savedGateEnv: { value: string | undefined } = { value: undefined };
+
+    beforeAll(() => {
+      savedGateEnv.value = process.env.BASELINE_EVALUATION_GATE_ENABLED;
+      process.env.BASELINE_EVALUATION_GATE_ENABLED = "1";
+    });
+
+    afterAll(() => {
+      if (savedGateEnv.value === undefined) {
+        delete process.env.BASELINE_EVALUATION_GATE_ENABLED;
+      } else {
+        process.env.BASELINE_EVALUATION_GATE_ENABLED = savedGateEnv.value;
+      }
+    });
+
+    it(
+      "sends enforceBaselineEvaluationGate=true to Go once the operator flag is on, and never forwards a " +
+        "gate-excluded candidate to the real Python shadow-rerank call — proven by composing two already-" +
+        "independently-verified real boundaries: Go's own eligibility.Filter really excludes a NOT_STARTED " +
+        "candidate when this flag is true (services/dispatch's TestFilter_BaselineEvaluationStatus_GateOn_* " +
+        "and TestHandleMatch_BaselineEvaluationGate_EndToEnd, real HTTP, no mocking), and this test proves " +
+        "Node's own wiring never re-includes a candidate Go excluded when it later calls runShadowRerank — " +
+        "so the mocked Go response below deliberately mirrors real Go's actual documented behavior for this " +
+        "exact input, not an arbitrary fixture",
+      async () => {
+        const taskId = await insertOpenTask(requester.address.toLowerCase());
+        const passedAgentId = await insertActiveAgent([], { baselineEvaluationStatus: "PASSED" });
+        const notStartedAgentId = await insertActiveAgent([], {
+          baselineEvaluationStatus: "NOT_STARTED",
+        });
+        const token = await login(requester);
+
+        // Real Go, given enforceBaselineEvaluationGate=true, excludes the
+        // NOT_STARTED candidate entirely from its response (proven at the
+        // Go level, cited above) — this mock returns exactly that already-
+        // filtered shape, never re-deriving it from the full candidate list
+        // itself.
+        callMatchMock.mockResolvedValue({
+          taskId,
+          algorithmVersion: "v0.1",
+          recommendations: [
+            {
+              agentId: passedAgentId,
+              rank: 1,
+              slotType: "TOP_SCORE",
+              score: 0.9,
+              reasons: ["技能匹配", "评分最高"],
+            },
+          ],
+        });
+
+        const response = await app.inject({
+          method: "POST",
+          url: `/tasks/${taskId}/match`,
+          cookies: { session_token: token },
+        });
+
+        expect(response.statusCode).toBe(200);
+
+        // Node sent BOTH candidates to Go, along with the real flag value
+        // — Go is the one deciding admission, not Node pre-filtering (F-2012's
+        // own design: the hard filter lives in eligibility.Filter alone).
+        expect(callMatchMock).toHaveBeenCalledTimes(1);
+        const [sentRequest] = callMatchMock.mock.calls[0] as [
+          {
+            candidates: Array<{ agentId: string; baselineEvaluationStatus: string }>;
+            enforceBaselineEvaluationGate: boolean;
+          },
+        ];
+        expect(sentRequest.enforceBaselineEvaluationGate).toBe(true);
+        const sentAgentIds = sentRequest.candidates.map((c) => c.agentId).sort();
+        expect(sentAgentIds).toEqual([notStartedAgentId, passedAgentId].sort());
+        // N4 P2 fix (round 1): asserting the two agentIds alone doesn't
+        // prove which STATUS each one carries — a swapped or dropped
+        // `baselineEvaluationStatus` field would still pass the assertion
+        // above while making real Go's admission filter act on the wrong
+        // Agent entirely.
+        const statusByAgentId = new Map(
+          sentRequest.candidates.map((c) => [c.agentId, c.baselineEvaluationStatus]),
+        );
+        expect(statusByAgentId.get(passedAgentId)).toBe("PASSED");
+        expect(statusByAgentId.get(notStartedAgentId)).toBe("NOT_STARTED");
+
+        // AC-1911's literal requirement: the excluded candidate never
+        // reaches the call that would forward it to Python.
+        expect(runShadowRerankMock).toHaveBeenCalledTimes(1);
+        const [, shadowInput] = runShadowRerankMock.mock.calls[0] as [
+          unknown,
+          { recommendations: Array<{ agentId: string }> },
+        ];
+        const shadowAgentIds = shadowInput.recommendations.map((r) => r.agentId);
+        expect(shadowAgentIds).toEqual([passedAgentId]);
+        expect(shadowAgentIds).not.toContain(notStartedAgentId);
+
+        // And the persisted candidate set matches what Go actually
+        // returned — the excluded Agent was never a candidate for this run
+        // at all, not merely "recommended but hidden."
+        const { rows: candidateRows } = await pool.query<{ agent_id: string }>(
+          `SELECT agent_id FROM recommendation_candidates rc
+           JOIN recommendation_runs rr ON rr.id = rc.run_id
+           WHERE rr.task_id = $1`,
+          [taskId],
+        );
+        expect(candidateRows.map((r) => r.agent_id)).toEqual([passedAgentId]);
+      },
+    );
+
+    // N4 P2 fix (round 1): the test above only ever exercised
+    // BASELINE_EVALUATION_GATE_ENABLED="1" — nothing in this file proved
+    // the gate actually stays OFF (the documented, safe default) when the
+    // env var is unset or set to anything else. A regression that made
+    // `resolveEnforceBaselineEvaluationGate` always return `true` would
+    // have passed every existing test in this suite while silently
+    // excluding every pre-existing NOT_STARTED Agent from real matching.
+    it("sends enforceBaselineEvaluationGate=false to Go when the operator flag is unset (the safe default)", async () => {
+      delete process.env.BASELINE_EVALUATION_GATE_ENABLED;
+
+      const taskId = await insertOpenTask(requester.address.toLowerCase());
+      const notStartedAgentId = await insertActiveAgent([], {
+        baselineEvaluationStatus: "NOT_STARTED",
+      });
+      const token = await login(requester);
+
+      callMatchMock.mockResolvedValue({
+        taskId,
+        algorithmVersion: "v0.1",
+        recommendations: [
+          {
+            agentId: notStartedAgentId,
+            rank: 1,
+            slotType: "TOP_SCORE",
+            score: 0.9,
+            reasons: ["技能匹配"],
+          },
+        ],
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/tasks/${taskId}/match`,
+        cookies: { session_token: token },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const [sentRequest] = callMatchMock.mock.calls[0] as [
+        { enforceBaselineEvaluationGate: boolean },
+      ];
+      expect(sentRequest.enforceBaselineEvaluationGate).toBe(false);
+    });
+
+    it('sends enforceBaselineEvaluationGate=false to Go when the operator flag is set to anything other than "1"', async () => {
+      process.env.BASELINE_EVALUATION_GATE_ENABLED = "true";
+
+      const taskId = await insertOpenTask(requester.address.toLowerCase());
+      const notStartedAgentId = await insertActiveAgent([], {
+        baselineEvaluationStatus: "NOT_STARTED",
+      });
+      const token = await login(requester);
+
+      callMatchMock.mockResolvedValue({
+        taskId,
+        algorithmVersion: "v0.1",
+        recommendations: [
+          {
+            agentId: notStartedAgentId,
+            rank: 1,
+            slotType: "TOP_SCORE",
+            score: 0.9,
+            reasons: ["技能匹配"],
+          },
+        ],
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/tasks/${taskId}/match`,
+        cookies: { session_token: token },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const [sentRequest] = callMatchMock.mock.calls[0] as [
+        { enforceBaselineEvaluationGate: boolean },
+      ];
+      expect(sentRequest.enforceBaselineEvaluationGate).toBe(false);
+    });
   });
 });
 

@@ -1,0 +1,360 @@
+{
+  "components": {
+    "schemas": {
+      "CandidateRationale": {
+        "properties": {
+          "agentId": {
+            "title": "Agentid",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId",
+          "reason"
+        ],
+        "title": "CandidateRationale",
+        "type": "object"
+      },
+      "CandidateSignals": {
+        "description": "Mirrors `apps/api`'s `ReputationSignalsInput` (the flat wire shape,\nnot the full digest with sampleSize \u2014 Go's own wire contract already\nestablished this flattened shape, and Python receives the same one).\nEvery field is `None` when that signal is genuinely missing (F-1309) \u2014\nnever a fabricated 0.",
+        "properties": {
+          "communication": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Communication"
+          },
+          "completionRate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completionrate"
+          },
+          "disputeSignal": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disputesignal"
+          },
+          "historicalScale": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Historicalscale"
+          },
+          "qualityFeedback": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualityfeedback"
+          }
+        },
+        "title": "CandidateSignals",
+        "type": "object"
+      },
+      "CandidateSnapshot": {
+        "properties": {
+          "agentId": {
+            "title": "Agentid",
+            "type": "string"
+          },
+          "semanticSimilarity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semanticsimilarity"
+          },
+          "signals": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CandidateSignals"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "v0Score": {
+            "title": "V0Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "agentId",
+          "v0Score"
+        ],
+        "title": "CandidateSnapshot",
+        "type": "object"
+      },
+      "FusionWeights": {
+        "description": "Mirrors `apps/api`'s `FusionWeights` (`ctr-training/fusion-weights.ts`)\nfield-for-field \u2014 the same five coefficients `fusion.py`'s\n`fuse_signals` already uses, just supplied by the caller instead of\nthis service's own `DEFAULT_WEIGHTS` constant. This service has no\ndatabase connection of its own (F-1914/F-1915's own architectural\nboundary) \u2014 Node is the only side that knows which `ranking_policy_\nversion` is currently active, so it must supply the actual weight\nvalues, not just an opaque id this service would have no way to\nresolve.",
+        "properties": {
+          "communication": {
+            "minimum": 0.0,
+            "title": "Communication",
+            "type": "number"
+          },
+          "completionRate": {
+            "minimum": 0.0,
+            "title": "Completionrate",
+            "type": "number"
+          },
+          "disputeSignal": {
+            "minimum": 0.0,
+            "title": "Disputesignal",
+            "type": "number"
+          },
+          "historicalScale": {
+            "minimum": 0.0,
+            "title": "Historicalscale",
+            "type": "number"
+          },
+          "qualityFeedback": {
+            "minimum": 0.0,
+            "title": "Qualityfeedback",
+            "type": "number"
+          }
+        },
+        "required": [
+          "completionRate",
+          "qualityFeedback",
+          "communication",
+          "disputeSignal",
+          "historicalScale"
+        ],
+        "title": "FusionWeights",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "RankingPolicy": {
+        "description": "T-1907 real finding (round 3, \u7528\u6237 2026-09-06 \u51b3\u7b56): a single,\natomic object rather than two independent optional fields\n(`rankingPolicyVersion`/`fusionWeights` sent separately) \u2014 CLAUDE.md\n\u539f\u5219 8 (\"\u5c3d\u53ef\u80fd\u8ba9\u975e\u6cd5\u72b6\u6001\u65e0\u6cd5\u8868\u793a\"): `version` naming a real\n`ctr_models.id` while `weights` is missing (or vice versa) is not a\nreal, meaningful state this contract should be able to express at\nall. A request with a `RankingPolicy` genuinely commits to \"use THESE\nweights, under THIS version id\"; omitting the whole object is the only\nway to ask for the always-safe default (Go's fixed `v0.2` weights,\n`ranking_policy_version: null` in the response \u2014 today's existing\nhonest behavior, unchanged).\n\n`version` deliberately has no format constraint here (Node's\n`ctr_models.id` is a UUID today, but this service has no reason to\nknow or enforce that shape \u2014 it only ever echoes back verbatim\nwhatever string Node sent, once it has confirmed the accompanying\nweights were real enough to actually use for this computation).",
+        "properties": {
+          "version": {
+            "title": "Version",
+            "type": "string"
+          },
+          "weights": {
+            "$ref": "#/components/schemas/FusionWeights"
+          }
+        },
+        "required": [
+          "version",
+          "weights"
+        ],
+        "title": "RankingPolicy",
+        "type": "object"
+      },
+      "RerankRequest": {
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateSnapshot"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "rankingPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RankingPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stage": {
+            "enum": [
+              "SHADOW",
+              "GRADUAL",
+              "PRIMARY"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "taskDescription": {
+            "title": "Taskdescription",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidates",
+          "taskDescription",
+          "stage"
+        ],
+        "title": "RerankRequest",
+        "type": "object"
+      },
+      "RerankResponse": {
+        "description": "`rerank_service_version`/`ranking_policy_version` are two\nINDEPENDENT fields (F-1922) \u2014 never merged into one version string.\n`ranking_policy_version` is nullable: this skeleton (T-1910/T-1911)\nruns with no registered `ctr_models` row yet, matching design.md's own\nnote that an early-stage reranker can run with \"\u672a\u7248\u672c\u5316\u7684\nprompt/\u6743\u91cd\".",
+        "properties": {
+          "llmAdopted": {
+            "title": "Llmadopted",
+            "type": "boolean"
+          },
+          "rankedAgentIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rankedagentids",
+            "type": "array"
+          },
+          "rankingPolicyVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rankingpolicyversion"
+          },
+          "rationales": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateRationale"
+            },
+            "title": "Rationales",
+            "type": "array"
+          },
+          "rerankServiceVersion": {
+            "title": "Rerankserviceversion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rankedAgentIds",
+          "rationales",
+          "rerankServiceVersion",
+          "llmAdopted"
+        ],
+        "title": "RerankResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "dispatch-rerank",
+    "version": "0.1.0-skeleton"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/rerank": {
+      "post": {
+        "operationId": "rerank_rerank_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerankRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rerank"
+      }
+    }
+  }
+}
