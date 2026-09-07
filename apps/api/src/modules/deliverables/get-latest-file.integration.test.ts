@@ -9,7 +9,15 @@ import { buildApp } from "../../app.js";
 import { runMigrations } from "../../db/migrate.js";
 import { requireTestDatabaseUrl } from "@agent-market/domain";
 import { buildSignInMessage } from "../auth/signInMessage.js";
-import { saveFile } from "./storage.local.js";
+// T-2300: through the composition root (not `storage.local.js` directly)
+// so this fixture setup writes via whichever provider the route's own real
+// read path (`routes.ts`, also via the composition root) is actually
+// configured to use — a hardcoded `storage.local.js` import here would
+// silently write to local disk while a `DELIVERABLE_STORAGE_PROVIDER=s3`
+// configuration made the real read path look in S3 instead, a genuine
+// test/production mismatch (found via N6 real verification against a real
+// MinIO-backed run, T-2300).
+import { saveFile } from "./storage.js";
 
 // See db/migrate.integration.test.ts's header comment: skipped unless a
 // human opts in with RUN_DB_INTEGRATION_TESTS=1 against a confirmed-safe

@@ -1,0 +1,15 @@
+groups:
+  - name: agent-market-alerts
+    rules:
+      # T-2305 (AC-2305): the minimal real alert this Task's own real
+      # verification exercised — "for" kept short (30s) so a genuine
+      # service outage is caught quickly; real production tuning of this
+      # window is an operational decision outside this Task's scope.
+      - alert: ApiDown
+        expr: up{job="agent-market-api"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "agent-market-api target is down"
+          description: "Prometheus has not been able to scrape GET /internal/metrics from agent-market-api for at least 30s."

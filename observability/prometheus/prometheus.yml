@@ -1,0 +1,27 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+scrape_configs:
+  - job_name: "agent-market-api"
+    metrics_path: /internal/metrics
+    # T-2305 (N4 round 1 P1): GET /internal/metrics (apps/api/src/app.ts)
+    # requires a bearer token matching apps/api's own METRICS_SCRAPE_TOKEN.
+    # `bearer_token_file` (not `bearer_token`) — a literal token value has
+    # no business being committed into this file (AC-2303: "没有任何密钥以
+    # 明文形式出现在代码仓库"). docker-entrypoint.sh writes the real value
+    # (from this container's own METRICS_SCRAPE_TOKEN env var, sourced the
+    # same way apps/api gets it — plaintext .env locally, T-2301's Secrets
+    # Manager path in production) to this path at container start, never
+    # into a file this repo tracks.
+    bearer_token_file: /etc/prometheus/metrics-token
+    static_configs:
+      - targets: ["api:3001"]

@@ -3,6 +3,7 @@ import { computeRetryDelayMs, PollTickError, runPollTick } from "./indexer.js";
 import { findLastConfirmedBlockNumber, findScanCheckpoint } from "./repository.js";
 import { getPool } from "./db.js";
 import { resolveChainId, resolveConfirmationDepth, resolveContractAddress } from "./env.js";
+import { startHealthServer } from "./health-server.js";
 
 /**
  * T-1805's process entry point, extended by T-1806 with real confirmation
@@ -136,6 +137,9 @@ async function main(): Promise<void> {
       `resumedFromScanCheckpoint=${lastScanned !== null} ` +
       `resumedFromConfirmedBreakpoint=${lastConfirmed !== null}`,
   );
+
+  const healthPort = process.env.HEALTH_PORT ? Number(process.env.HEALTH_PORT) : 9090;
+  startHealthServer(healthPort);
 
   let consecutiveFailures = 0;
   while (true) {

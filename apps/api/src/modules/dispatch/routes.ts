@@ -361,6 +361,17 @@ async function matchTask(
     enforceRiskHoldGate: await resolveEnforceRiskHoldGate(),
   };
 
+  // T-2304 (F-2307 "跨服务查询同一请求的全部日志"): this function's own doc
+  // comment already claimed `traceId` "lets a real operator grep
+  // Node/Go/Python's own log lines for the SAME /match call" — true for Go
+  // (`handleMatch`'s `log.Printf("trace_id=%s ...")`) and Python
+  // (`dispatch_rerank_runs.trace_id`), but Node itself never actually
+  // logged it anywhere before this line; it only forwarded the value via
+  // the `X-Trace-Id` header. Same plain-text `trace_id=<uuid> ...` shape
+  // as Go's own line (not pino's JSON) — deliberately, so a log search by
+  // trace_id finds the same textual pattern across every service without
+  // needing to know each one's own log format.
+  console.log(`trace_id=${traceId} calling dispatch POST /match for taskId=${taskId}`);
   let matchResponse;
   try {
     matchResponse = await callMatch(request, { traceId });

@@ -1,0 +1,146 @@
+# T-2305 (Feature 23, F-2307): self-hosted Prometheus + Alertmanager +
+# Grafana — design.md 决策 3's own choice, run entirely via local Docker,
+# no cloud account needed. Run from this directory:
+#   METRICS_SCRAPE_TOKEN=<same value as apps/api's METRICS_SCRAPE_TOKEN> \
+#   GRAFANA_ADMIN_PASSWORD=<a real password> \
+#     docker compose up -d
+#
+# `agent-market-api`'s own container (apps/api/Dockerfile, T-2302) is
+# expected to already be running and reachable as a host named `api` on
+# this compose network — either join it to this same compose project, or
+# add it as an `external_links`/separate network alias in a real
+# deployment. This file's own scope is the observability stack itself, not
+# re-declaring apps/api's service definition a second time.
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    entrypoint: ["/etc/prometheus/docker-entrypoint.sh"]
+    environment:
+      - METRICS_SCRAPE_TOKEN=${METRICS_SCRAPE_TOKEN:?METRICS_SCRAPE_TOKEN must be set — must match apps/api's own value}
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - ./prometheus/docker-entrypoint.sh:/etc/prometheus/docker-entrypoint.sh:ro
+      - prometheus-data:/prometheus
+    # N4 real finding (round 1, T-2304, P2): Prometheus has no built-in
+    # authentication either — same reasoning as Alertmanager/Loki below,
+    # loopback-only for local operator debugging (Grafana, on the compose
+    # network, reaches it regardless of this mapping).
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    # N4 real finding (round 2, T-2305, P2): Alertmanager's HTTP API has no
+    # built-in authentication — it can inspect every alert and CREATE
+    # SILENCES (suppressing this stack's own ApiDown notification path).
+    # Prometheus reaches it over the compose network regardless (no
+    # published port needed for that); this mapping exists only for local
+    # operator debugging, bound to loopback so it is never reachable from
+    # outside this machine.
+    ports:
+      - "127.0.0.1:9093:9093"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      # N4 real finding (round 2, T-2305, P1): a default of "admin" here
+      # meant a deployment that forgot to set GRAFANA_ADMIN_PASSWORD would
+      # publish port 3000 on every host interface with a publicly-known
+      # admin password — full dashboard/datasource takeover. No insecure
+      # default: compose interpolation itself now refuses to start without
+      # a real value, matching METRICS_SCRAPE_TOKEN's identical `:?` gate
+      # above.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set to a real password — no insecure default}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+  # T-2304 (F-2307 "结构化日志集中收集"): design.md 决策 3's other half —
+  # Loki ingests, Promtail ships. Both loopback-only for the same reasoning
+  # as Alertmanager above: Loki's query API has no built-in authentication
+  # either, and would otherwise expose every collected log line (including
+  # any that predate a future redaction fix) to anyone reaching this host.
+  loki:
+    image: grafana/loki:3.2.1
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+
+  # N4 real finding (round 1, T-2304, P1): mounting the real Docker socket
+  # `:ro` only makes the socket INODE read-only — every Docker Engine API
+  # call (including creating a privileged container or mounting host
+  # paths) is still reachable through it; `:ro` gives no API-level
+  # restriction at all. A compromised Promtail with the raw socket is a
+  # full host-compromise path. This proxy sits between Promtail and the
+  # real socket, only ever forwarding the discovery/log-reading endpoints
+  # (`CONTAINERS`/`NETWORKS`/`IMAGES`/`INFO`, all GET-only — `POST=0` below)
+  # Promtail's own `docker_sd_configs` actually needs (it also calls
+  # `GET /networks` to attach each container's network labels) — every
+  # other Docker API surface (exec, create, volumes, ...) stays disabled by
+  # this image's own default.
+  # N4 real finding (round 2, T-2304, P1): even GET-only, this proxy's
+  # `CONTAINERS=1` exposes container INSPECT (every other container's own
+  # env vars — DATABASE_URL, ACCEPTANCE_PERMIT_SIGNER_KEY, ...) and file
+  # ARCHIVE endpoints, not just log reads. Sharing the same default network
+  # as `grafana` (publicly listening on `3000:3000`) meant a compromised
+  # Grafana (a plugin vulnerability, an SSRF from a malicious dashboard
+  # panel) could reach this proxy directly and exfiltrate every other
+  # container's secrets — a real lateral-movement path, not merely a
+  # `POST=0` gap. Isolated onto its own `internal: true` network (no
+  # gateway to the outside, and no OTHER service on this compose file joins
+  # it) that only `promtail` also joins below.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.2.0
+    environment:
+      - CONTAINERS=1
+      - NETWORKS=1
+      - IMAGES=1
+      - INFO=1
+      - POST=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-proxy-internal
+
+  promtail:
+    image: grafana/promtail:3.2.1
+    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      # N4 real finding (round 1, T-2304, P2): the positions file
+      # (promtail-config.yml's own `positions.filename`) tracks how far
+      # into each container's log Promtail has already shipped — without a
+      # named volume it lived in the container's ephemeral `/tmp`, so
+      # recreating this container (a real, routine event — an image
+      # upgrade, `docker compose up` after a host reboot) lost every cursor
+      # and either replayed already-shipped lines or skipped ones emitted
+      # during the gap, depending on each target's own startup timing.
+      - promtail-positions:/tmp
+    # On BOTH networks: `default` (to push to `loki`) and
+    # `docker-proxy-internal` (to reach `docker-socket-proxy`) — the only
+    # service in this file with a foot in both, by design.
+    networks:
+      - default
+      - docker-proxy-internal
+    depends_on:
+      - loki
+      - docker-socket-proxy
+
+networks:
+  docker-proxy-internal:
+    internal: true
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  promtail-positions:

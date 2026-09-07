@@ -20,7 +20,7 @@ import {
   deleteFile,
   readFile,
   saveFile,
-} from "./storage.local.js";
+} from "./storage.js";
 
 /**
  * `@fastify/multipart` does not export its `RequestFileTooLargeError`

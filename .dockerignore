@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+**/.turbo
+.git
+.claude
+specs
+docs
+var
+contracts/artifacts
+contracts/cache
+apps/office-cocos/build
+apps/office-cocos/**/library
+**/*.log
+.env
