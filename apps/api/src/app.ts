@@ -28,6 +28,7 @@ import { registerEvaluationRoutes } from "./modules/evaluation/routes.js";
 import { registerAntifraudAdminRoutes } from "./modules/antifraud/admin-routes.js";
 import { registerRiskHoldAdminRoutes } from "./modules/risk-hold/admin-routes.js";
 import { registerArbitrationCommitteeAdminRoutes } from "./modules/arbitration/admin-routes.js";
+import { registerCustomerServiceRoutes } from "./modules/customer-service/routes.js";
 import type { OfficeFundsReader } from "./modules/office/funds-reader.js";
 
 export interface BuildAppOptions {
@@ -247,6 +248,17 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // Feature 21 (arbitration-committee), T-2106.
   void app.register(async (instance) => {
     registerArbitrationCommitteeAdminRoutes(instance, pool);
+  });
+
+  // Feature 22 (ai-customer-service), T-2204: `GET
+  // /admin/customer-service/conversations` and its `/messages` sibling use
+  // `app.requireAdmin`; `POST /customer-service/conversations` and its
+  // `/messages`/`/escalate` siblings read the session cookie via their own
+  // best-effort (non-401ing) helper, not `app.requireSession` — same
+  // ordering reasoning as every registration above (the relevant decorator
+  // must already exist).
+  void app.register(async (instance) => {
+    await registerCustomerServiceRoutes(instance, pool);
   });
 
   return app;
