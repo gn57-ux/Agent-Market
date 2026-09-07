@@ -122,6 +122,24 @@ jobs:
         # would make this gate permanently red for reasons unrelated to any
         # real regression, defeating the point of adding it.
         run: pnpm --filter @agent-market/api test -- --exclude "**/privy-identity-provider.integration.test.ts" --exclude "**/privy-routes.integration.test.ts"
+      # N4 real finding (Feature 21, T-2105, round 2, P1): the ONLY test
+      # connecting a real Safe multisig execution's own hash to its
+      # persisted `arbitration_decisions` row
+      # (`TaskEscrow.safeMultisigDispute.t.ts`) was opt-in
+      # (`RUN_DB_INTEGRATION_TESTS=1`) but no CI job actually set that
+      # variable for `contracts` — `contracts-quality-gate` below has no
+      # Postgres service and never runs with this flag, so AC-2105's
+      # real-persistence guarantee could regress with every required gate
+      # staying green. This job already has a real Postgres service and
+      # `RUN_DB_INTEGRATION_TESTS=1` set at the job level; only apps/api's
+      # own build output was still missing (the test's own dynamic import
+      # of `apps/api/dist/db/migrate.js`, since `contracts` is CommonJS
+      # and cannot execute `apps/api`'s ESM `.ts` sources directly — see
+      # that test file's own doc comment).
+      - name: Build apps/api (needed by contracts' real-Postgres Safe test)
+        run: pnpm --filter @agent-market/api build
+      - name: Test contracts (real Postgres, T-2105's real Safe multisig persistence test)
+        run: pnpm --filter @agent-market/contracts test
 
   go-quality-gates:
     name: Go build / vet / test

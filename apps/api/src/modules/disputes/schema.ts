@@ -16,3 +16,26 @@ export const submitDisputeSchema = z.object({
 export const taskIdParamSchema = z.object({
   taskId: z.string().uuid(),
 });
+
+/**
+ * Feature 21 (arbitration-committee), T-2108 (F-2110). A single round of
+ * multi-round evidence for an already-open dispute — `content` mirrors
+ * `evidenceSummary`'s own bound (10,000 chars).
+ */
+export const submitDisputeEvidenceSchema = z.object({
+  content: z.string().trim().min(1, "请填写举证内容").max(10_000, "举证内容过长"),
+});
+
+/**
+ * N4 real finding (P2, round 2, T-2108): cursor pagination for
+ * `GET /tasks/:taskId/disputes/evidence` — `after` is an opaque
+ * `sequence_no` cursor (a real `BIGSERIAL` value as a string, since JS
+ * numbers cannot losslessly represent the full `bigint` range), `limit`
+ * bounded generously but not unbounded (`listDisputeEvidenceSubmissions`
+ * itself clamps to `[1, 200]` regardless, this is just the friendly-400
+ * layer for an obviously-wrong value).
+ */
+export const listDisputeEvidenceQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  after: z.string().regex(/^\d+$/, "after 必须是合法的游标").optional(),
+});
