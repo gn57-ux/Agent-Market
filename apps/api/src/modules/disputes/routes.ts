@@ -6,10 +6,22 @@ import { verifySession } from "../auth/session.service.js";
 import { createChainRpcClient } from "../chain/rpc.client.js";
 import type { TaskStatusValue } from "../tasks/repository.js";
 import { getTaskById } from "../tasks/repository.js";
-import { insertDispute } from "./repository.js";
-import { submitDisputeSchema, taskIdParamSchema } from "./schema.js";
+import { getDisputeForTask, getOpenDisputeForTask, insertDispute } from "./repository.js";
+import {
+  listDisputeEvidenceQuerySchema,
+  submitDisputeEvidenceSchema,
+  submitDisputeSchema,
+  taskIdParamSchema,
+} from "./schema.js";
 import { computeEvidenceHash } from "./evidence-hash.js";
 import { getDisputeView } from "./service.js";
+import {
+  insertDisputeEvidenceSubmission,
+  listDisputeEvidenceSubmissions,
+} from "./evidence-repository.js";
+import { resolveDisputeAccessLevel, ARBITRATOR_ROLE } from "./access-guard.js";
+import { normalizeAddress } from "../auth/nonce.store.js";
+import { resolveChainConfig } from "@agent-market/domain";
 
 const TASK_STATE_CONFLICT: ErrorCode = "TASK_STATE_CONFLICT";
 
@@ -232,5 +244,141 @@ export function registerDisputesRoutes(app: FastifyInstance, pool: Pool): void {
     }
 
     return reply.send(result.view);
+  });
+
+  // Feature 21 (arbitration-committee), T-2108 (F-2110). Only this
+  // dispute's actual two parties may submit a new round of evidence —
+  // deliberately NOT the arbitrator (design.md's own "多方" wording means
+  // the disputing parties, requester and Agent, not the reviewer of that
+  // evidence). Requires a real OPEN dispute — submitting evidence for an
+  // already-resolved case would be meaningless (nothing left to review).
+  app.post(
+    "/tasks/:taskId/disputes/evidence",
+    { preHandler: app.requireSession },
+    async (request, reply) => {
+      const paramsParsed = taskIdParamSchema.safeParse(request.params);
+      if (!paramsParsed.success) {
+        return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+      }
+      const bodyParsed = submitDisputeEvidenceSchema.safeParse(request.body);
+      if (!bodyParsed.success) {
+        return reply.status(400).send({ error: { message: bodyParsed.error.message } });
+      }
+      const sessionAddress = requireSessionAddress(request, reply);
+      if (!sessionAddress) return reply;
+
+      const task = await getTaskById(pool, paramsParsed.data.taskId);
+      if (!task) {
+        return reply.status(404).send({ error: { message: "任务不存在。" } });
+      }
+      const dispute = await getOpenDisputeForTask(pool, task.id);
+      if (!dispute) {
+        return reply.status(404).send({ error: { message: "该任务当前没有正在处理的争议。" } });
+      }
+
+      const normalizedSession = sessionAddress.toLowerCase();
+      let submitterRole: "REQUESTER" | "AGENT";
+      if (normalizedSession === task.requesterAddress.toLowerCase()) {
+        submitterRole = "REQUESTER";
+      } else if (
+        task.acceptedAgentAddress &&
+        normalizedSession === task.acceptedAgentAddress.toLowerCase()
+      ) {
+        submitterRole = "AGENT";
+      } else {
+        return reply
+          .status(403)
+          .send({ error: { message: "只有本争议的需求方或 Agent 才能提交举证。" } });
+      }
+
+      const submission = await insertDisputeEvidenceSubmission(pool, {
+        disputeId: dispute.id,
+        submitterAddress: sessionAddress,
+        submitterRole,
+        content: bodyParsed.data.content,
+      });
+      // N4 P1 fix (round 1): `null` means the dispute genuinely stopped
+      // being OPEN between the check above and this atomic insert (a
+      // real concurrent resolution committed in that gap) — the earlier
+      // `getOpenDisputeForTask` check is a fast pre-filter, not the
+      // authoritative one; this re-check inside `insertDisputeEvidence
+      // Submission`'s own SQL is.
+      if (!submission) {
+        return reply.status(409).send({ error: { message: "该争议已被裁决，无法再提交举证。" } });
+      }
+      return reply.status(201).send({
+        id: submission.id,
+        disputeId: submission.disputeId,
+        submitterAddress: submission.submitterAddress,
+        submitterRole: submission.submitterRole,
+        content: submission.content,
+        submittedAt: submission.submittedAt.toISOString(),
+      });
+    },
+  );
+
+  // Same "full" access gate `GET /tasks/:taskId/disputes` already
+  // establishes (`access-guard.ts`'s `resolveDisputeAccessLevel`) — the
+  // multi-round evidence is exactly as private as `evidenceSummary`
+  // itself, read by the same three real parties (requester, Agent,
+  // whoever currently holds `ARBITRATOR_ROLE` on-chain).
+  app.get("/tasks/:taskId/disputes/evidence", async (request, reply) => {
+    const paramsParsed = taskIdParamSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.status(400).send({ error: { message: paramsParsed.error.message } });
+    }
+    const queryParsed = listDisputeEvidenceQuerySchema.safeParse(request.query);
+    if (!queryParsed.success) {
+      return reply.status(400).send({ error: { message: queryParsed.error.message } });
+    }
+    const task = await getTaskById(pool, paramsParsed.data.taskId);
+    if (!task) {
+      return reply.status(404).send({ error: { message: "任务不存在。" } });
+    }
+    const dispute =
+      (await getOpenDisputeForTask(pool, task.id)) ?? (await getDisputeForTask(pool, task.id));
+    if (!dispute) {
+      return reply.status(404).send({ error: { message: "该任务尚无争议记录。" } });
+    }
+
+    const sessionAddress = await readOptionalSessionAddress(request, pool);
+    const accessLevel = await resolveDisputeAccessLevel({
+      sessionAddress,
+      requesterAddress: task.requesterAddress,
+      acceptedAgentAddress: task.acceptedAgentAddress,
+      isArbitrator: async (account) => {
+        const normalizedAccount = normalizeAddress(account) as `0x${string}`;
+        const chainConfig = resolveChainConfig(process.env);
+        return createChainRpcClient().readHasRole(
+          chainConfig.addresses.taskEscrow,
+          ARBITRATOR_ROLE,
+          normalizedAccount,
+        );
+      },
+      onArbitratorCheckError: (error) =>
+        app.log.error(
+          { err: error, taskId: paramsParsed.data.taskId },
+          "disputes: on-chain arbitrator role check failed, failing closed to public projection",
+        ),
+    });
+    if (accessLevel !== "full") {
+      return reply.status(403).send({ error: { message: "无权查看本争议的举证记录。" } });
+    }
+
+    const { submissions, nextCursor } = await listDisputeEvidenceSubmissions(pool, dispute.id, {
+      limit: queryParsed.data.limit,
+      after: queryParsed.data.after,
+    });
+    return reply.status(200).send({
+      submissions: submissions.map((s) => ({
+        id: s.id,
+        disputeId: s.disputeId,
+        submitterAddress: s.submitterAddress,
+        submitterRole: s.submitterRole,
+        content: s.content,
+        submittedAt: s.submittedAt.toISOString(),
+      })),
+      nextCursor,
+    });
   });
 }

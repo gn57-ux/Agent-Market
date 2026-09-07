@@ -27,6 +27,7 @@ import { registerEvaluationAdminRoutes } from "./modules/evaluation/admin-routes
 import { registerEvaluationRoutes } from "./modules/evaluation/routes.js";
 import { registerAntifraudAdminRoutes } from "./modules/antifraud/admin-routes.js";
 import { registerRiskHoldAdminRoutes } from "./modules/risk-hold/admin-routes.js";
+import { registerArbitrationCommitteeAdminRoutes } from "./modules/arbitration/admin-routes.js";
 import type { OfficeFundsReader } from "./modules/office/funds-reader.js";
 
 export interface BuildAppOptions {
@@ -241,6 +242,11 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   // admin action, never implicit).
   void app.register(async (instance) => {
     registerRiskHoldAdminRoutes(instance, pool);
+  });
+
+  // Feature 21 (arbitration-committee), T-2106.
+  void app.register(async (instance) => {
+    registerArbitrationCommitteeAdminRoutes(instance, pool);
   });
 
   return app;
