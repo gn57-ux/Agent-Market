@@ -23,7 +23,23 @@ import { seedKbArticles, KB_ARTICLE_SEEDS } from "./seed-kb-articles.js";
  * local Ollama at OLLAMA_BASE_URL (default http://127.0.0.1:11434) with
  * `bge-m3:latest` installed; no mocking.
  */
-const runIfOptedIn = process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
+// N6 real finding: this file makes genuine calls to a real local Ollama
+// daemon (no fake server, unlike routes.integration.test.ts/
+// credential-redaction.integration.test.ts) — CI's own
+// `db-integration-quality-gates` job sets RUN_DB_INTEGRATION_TESTS=1 but
+// has no Ollama daemon at all, so gating on that flag alone made this
+// file a genuine CI failure (real ECONNREFUSED against 127.0.0.1:11434 in
+// GitHub Actions), first observed on PR #8. Requiring
+// RUN_OLLAMA_INTEGRATION_TESTS too (the same flag
+// intent-classifier.integration.test.ts already uses for its own
+// real-Ollama-only suite) makes this correctly skip in CI while still
+// running for a human with a real local Ollama — matching this repo's
+// established "real-model tests are locally verified, not CI-gated"
+// convention.
+const runIfOptedIn =
+  process.env.RUN_DB_INTEGRATION_TESTS === "1" && process.env.RUN_OLLAMA_INTEGRATION_TESTS === "1"
+    ? describe
+    : describe.skip;
 
 const migrationsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../migrations");
 

@@ -36,7 +36,19 @@ import { CUSTOMER_SERVICE_EVALUATION_SET } from "../src/modules/customer-service
  * number, which would make this test flaky for reasons that have nothing
  * to do with a real regression.
  */
-const runIfOptedIn = process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
+// N6 real finding: this file makes genuine calls to a real local Ollama
+// daemon (no fake server). CI's own `db-integration-quality-gates` job
+// sets RUN_DB_INTEGRATION_TESTS=1 but has no Ollama daemon at all, so
+// gating on that flag alone made this file a genuine CI failure (real
+// ECONNREFUSED against 127.0.0.1:11434 in GitHub Actions), first observed
+// on PR #8. Requiring RUN_OLLAMA_INTEGRATION_TESTS too (the same flag
+// intent-classifier.integration.test.ts already uses for its own
+// real-Ollama-only suite) makes this correctly skip in CI while still
+// running for a human with a real local Ollama.
+const runIfOptedIn =
+  process.env.RUN_DB_INTEGRATION_TESTS === "1" && process.env.RUN_OLLAMA_INTEGRATION_TESTS === "1"
+    ? describe
+    : describe.skip;
 
 const migrationsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../migrations");
 
