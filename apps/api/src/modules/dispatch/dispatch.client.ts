@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CandidateSnapshot } from "./repository.js";
+import { dispatchMatchDuration } from "../../observability/metrics.js";
 
 /**
  * `POST /match`'s request wire format — field names match `matchRequest`
@@ -222,7 +223,30 @@ export function resetRiskHoldGateCapabilityCacheForTests(): void {
  * non-2xx status — becomes a `DispatchServiceUnavailableError`; the caller
  * (routes.ts) is the only place that decides what HTTP status that maps to.
  */
+/**
+ * T-2305 (F-2307 "匹配延迟"): thin timing wrapper around `doCallMatch` —
+ * kept separate rather than inlining the stopwatch into the function body
+ * below so every one of that function's several throw points (network
+ * failure, non-2xx, invalid JSON, schema mismatch) and its one success
+ * return automatically get measured through one `try/catch/finally`,
+ * without threading timing logic through each branch individually.
+ */
 export async function callMatch(
+  request: MatchRequest,
+  options: { traceId?: string } = {},
+): Promise<MatchResponse> {
+  const stop = dispatchMatchDuration.startTimer();
+  try {
+    const result = await doCallMatch(request, options);
+    stop({ outcome: "success" });
+    return result;
+  } catch (error) {
+    stop({ outcome: "failure" });
+    throw error;
+  }
+}
+
+async function doCallMatch(
   request: MatchRequest,
   options: { traceId?: string } = {},
 ): Promise<MatchResponse> {

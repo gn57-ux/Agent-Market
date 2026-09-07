@@ -1,0 +1,8 @@
+# T-2305: minimal routing — a real deployment replaces the "null" receiver
+# with a real notification channel (email/Slack/webhook); this Feature's
+# own scope is proving alerts genuinely FIRE (AC-2305), not standing up a
+# specific external notification integration nobody has asked for yet.
+route:
+  receiver: "null"
+receivers:
+  - name: "null"

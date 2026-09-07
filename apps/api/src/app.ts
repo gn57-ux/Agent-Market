@@ -30,6 +30,7 @@ import { registerRiskHoldAdminRoutes } from "./modules/risk-hold/admin-routes.js
 import { registerArbitrationCommitteeAdminRoutes } from "./modules/arbitration/admin-routes.js";
 import { registerCustomerServiceRoutes } from "./modules/customer-service/routes.js";
 import type { OfficeFundsReader } from "./modules/office/funds-reader.js";
+import { httpRequestDuration, metricsContentType, renderMetrics } from "./observability/metrics.js";
 
 export interface BuildAppOptions {
   /** Test seam: pass a Pool bound to a throwaway test database instead of
@@ -95,6 +96,51 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   app.get("/health", async () => {
     return { status: "ok" };
+  });
+
+  // N4 real finding (round 1, T-2305, P1): this route shares the SAME
+  // listening port/host (`0.0.0.0`) as every public API route — the
+  // original comment here claimed network-level isolation the code never
+  // actually implemented, meaning any client reaching the public API could
+  // also scrape internal metrics (information disclosure) and trigger this
+  // route's two DB queries on demand (resource exhaustion). A shared
+  // bearer token (Prometheus's own standard `bearer_token`/
+  // `bearer_token_file` scrape-config field, not a bespoke scheme) is real,
+  // enforceable defense-in-depth regardless of whatever network topology a
+  // given deployment does or doesn't also add — session/admin middleware
+  // is deliberately NOT reused here (this is a machine-to-machine scrape
+  // credential, not a user session). No token configured means this route
+  // refuses every request (fail closed) rather than silently falling back
+  // to "no protection" the way a missing PRIVY_APP_SECRET gracefully
+  // degrades — metrics exposure has no equivalent safe default.
+  app.get("/internal/metrics", async (request, reply) => {
+    const expectedToken = process.env.METRICS_SCRAPE_TOKEN;
+    const authHeader = request.headers.authorization;
+    const providedToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+    if (!expectedToken || providedToken !== expectedToken) {
+      return reply.status(401).send({ error: { message: "unauthorized" } });
+    }
+    const body = await renderMetrics(pool);
+    return reply.header("content-type", metricsContentType).send(body);
+  });
+
+  // Observes every request's duration — registered as an onResponse hook
+  // (not per-route) so no existing route needs to change to be measured;
+  // `/internal/metrics` itself is deliberately excluded (a scrape endpoint
+  // counting its own scrapes would be a confusing, self-referential series
+  // with no real observability value).
+  app.addHook("onResponse", async (request, reply) => {
+    if (request.routeOptions.url === "/internal/metrics") {
+      return;
+    }
+    httpRequestDuration.observe(
+      {
+        method: request.method,
+        route: request.routeOptions.url ?? "unmatched",
+        status_code: String(reply.statusCode),
+      },
+      reply.elapsedTime / 1000,
+    );
   });
 
   // Wrapped in its own app.register(...): GET /auth/session (Task E's whoami

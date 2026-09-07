@@ -1,0 +1,29 @@
+server:
+  http_listen_port: 9080
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # T-2304 (F-2307 "结构化日志集中收集"): discovers every running container
+  # via the Docker daemon rather than a hand-maintained static target list
+  # — a new service container (T-2302's worker/indexer/dispatch images
+  # included) is picked up automatically the next relabel cycle, no
+  # promtail config change needed. Talks to `docker-socket-proxy` (N4
+  # round 1 P1), never the real socket directly — see docker-compose.yml's
+  # own comment on that service for why.
+  - job_name: docker
+    docker_sd_configs:
+      - host: tcp://docker-socket-proxy:2375
+        refresh_interval: 5s
+    relabel_configs:
+      # `/agent-market-api` -> `agent-market-api` — Docker's own container
+      # name always has a leading slash in this label's raw value.
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: "container"
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: "stream"

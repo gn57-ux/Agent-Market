@@ -34,9 +34,15 @@ vi.mock("./repository.js", async (importOriginal) => {
   };
 });
 
+// T-2300: mocks the composition root (`./storage.js`), not
+// `./storage.local.js` directly — `routes.ts`'s real cleanup call now goes
+// through the composition root regardless of which backend
+// `DELIVERABLE_STORAGE_PROVIDER` selects, so mocking the old, bypassed
+// module here would silently never intercept the real call (found via N6
+// real verification against a real MinIO-backed run, T-2300).
 const deleteFileMock = vi.fn();
-vi.mock("./storage.local.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./storage.local.js")>();
+vi.mock("./storage.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./storage.js")>();
   deleteFileMock.mockImplementation((filePath: string) => actual.deleteFile(filePath));
   return {
     ...actual,
@@ -49,7 +55,7 @@ const { runMigrations } = await import("../../db/migrate.js");
 const { requireTestDatabaseUrl } = await import("@agent-market/domain");
 const { buildSignInMessage } = await import("../auth/signInMessage.js");
 const { DeliverableSubmissionNotAllowedError } = await import("./repository.js");
-const { readFile: storageReadFile } = await import("./storage.local.js");
+const { readFile: storageReadFile } = await import("./storage.js");
 
 const runIfOptedIn = process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
 

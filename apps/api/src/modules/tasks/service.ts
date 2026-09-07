@@ -20,7 +20,12 @@ import {
 } from "../chain/event-sync.js";
 import type { ChainRpcClient } from "../chain/rpc.client.js";
 import { verifyResultSubmissionTransaction } from "../chain/result-submission-tx-verifier.js";
-import { applySettlementStats, type SettlementEventKind } from "../chain/settlement-stats.js";
+import {
+  applySettlementStats,
+  deltaFor,
+  type SettlementEventKind,
+} from "../chain/settlement-stats.js";
+import { settlementOutcomeTotal, tasksPublishedTotal } from "../../observability/metrics.js";
 import { verifySettlementTransaction } from "../chain/settlement-tx-verifier.js";
 import { checkTransactionNotUsed, verifyFundingTransaction } from "../chain/tx-verifier.js";
 import {
@@ -849,6 +854,11 @@ export async function verifyFunding(
     return { ok: false, reason: "conflict", currentStatus: transition.currentStatus };
   }
 
+  // T-2305 (F-2307 "任务发布量"): only reached on a genuine, first-time
+  // AWAITING_FUNDING -> OPEN transition — the idempotent-retry branch above
+  // (transition.outcome === "conflict" but already OPEN with the same
+  // txHash) returns earlier, so a client retry never double-counts.
+  tasksPublishedTotal.inc();
   return { ok: true, status: "OPEN", confirmations: verification.confirmations };
 }
 
@@ -1765,6 +1775,16 @@ export async function verifySettlement(
     return { ok: false, reason: "conflict", currentStatus: transition.currentStatus };
   }
 
+  // T-2305 (F-2307 "结算成功率"): only incremented here, AFTER
+  // `transitionTaskStatus`'s transaction (containing `applySettlementStats`
+  // above) has genuinely committed — see `settlement-stats.ts`'s own doc
+  // comment on why the metric must not increment from inside that
+  // transaction, which could still roll back on a later step's failure.
+  // Reuses `deltaFor`'s existing success/non-success mapping rather than
+  // re-deciding it here.
+  settlementOutcomeTotal.inc({
+    outcome: deltaFor(plan.statsKind).successDelta === 1 ? "success" : "non_success",
+  });
   return { ok: true, status: plan.toStatus, confirmations: verification.confirmations };
 }
 
@@ -2259,6 +2279,12 @@ export async function verifyDisputeResolution(
     return { ok: false, reason: "conflict", currentStatus: transition.currentStatus };
   }
 
+  // T-2305 (F-2307 "结算成功率"): same reasoning as `verifySettlement`'s
+  // identical increment — only after this transaction has genuinely
+  // committed.
+  settlementOutcomeTotal.inc({
+    outcome: deltaFor(statsKind).successDelta === 1 ? "success" : "non_success",
+  });
   return { ok: true, status: toStatus, confirmations: verification.confirmations };
 }
 

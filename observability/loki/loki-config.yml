@@ -1,0 +1,53 @@
+# T-2304: single-binary Loki (design.md 决策 3) — no cloud object storage,
+# everything on local disk, matching this Feature's "no cloud account
+# needed" scope for T-2304/T-2305.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # T-2304: allows the same log line to be ingested more than once across
+  # retries during local verification — a real production tuning pass is
+  # outside this Task's scope (design.md left exact retention/limits to
+  # implementation time, same convention as storage.local.ts's MIME
+  # whitelist).
+  reject_old_samples: false
+  # N4 real finding (round 1, T-2304, P2): this stack ingests every running
+  # container's logs onto a persistent volume with no expiry — left
+  # unbounded, the volume grows until the host disk fills and Loki (and
+  # anything else sharing that disk) fails. 30 days is a reasonable
+  # starting retention for a demo-scope deployment (design.md deliberately
+  # leaves the exact production value to implementation time, matching
+  # storage.local.ts's own MIME-whitelist precedent) — an operator tunes
+  # this per real compliance/debugging needs.
+  retention_period: 720h
+
+compactor:
+  working_directory: /loki/compactor
+  # Retention deletion is the compactor's job, not the ingester's — without
+  # this flag, `limits_config.retention_period` above is silently a no-op
+  # and old chunks are never actually deleted.
+  retention_enabled: true
+  delete_request_store: filesystem

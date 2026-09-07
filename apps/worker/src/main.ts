@@ -9,6 +9,7 @@ import {
   type QueueAdapter,
 } from "@agent-market/queue";
 import { applyInteractionEvent, isInteractionEventPayload } from "./interaction-events.js";
+import { startHealthServer } from "./health-server.js";
 
 /**
  * F-1806 / T-1804: the independent Worker deployment unit — a real,
@@ -123,11 +124,15 @@ async function main(): Promise<void> {
   await queue.subscribe<EventEnvelope<unknown>>(QUEUE_NAME, handler);
   console.log(`apps/worker started: consuming "${QUEUE_NAME}" (DLQ "${DLQ_NAME}")`);
 
+  const healthPort = process.env.HEALTH_PORT ? Number(process.env.HEALTH_PORT) : 9090;
+  const healthServer = startHealthServer(healthPort);
+
   let shuttingDown = false;
   async function shutdown(signal: NodeJS.Signals): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`apps/worker received ${signal}, shutting down`);
+    healthServer.close();
     await queue.unsubscribe(QUEUE_NAME);
     await queue.stop();
     await pool.end();

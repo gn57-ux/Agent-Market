@@ -1,6 +1,7 @@
 import { resolveChainConfig } from "@agent-market/domain";
 import { buildApp } from "./app.js";
 import { getPool } from "./db/pool.js";
+import { hydrateAgentCredentialsFromManager, hydrateSecretsFromManager } from "./config/secrets.js";
 import { createChainRpcClient } from "./modules/chain/rpc.client.js";
 import { createResultSubmittedLogScanner } from "./modules/chain/result-submitted-log-scanner.js";
 import { verifySignerMatchesContract } from "./modules/dispatch/permit.service.js";
@@ -15,8 +16,15 @@ import {
   type ReleaseStagePollerHandle,
 } from "./modules/ctr-training/release-stage-poller.js";
 
-const app = buildApp();
-const port = Number(process.env.API_PORT ?? 3001);
+// T-2301 (F-2303): must complete BEFORE `buildApp()` — `buildApp()` itself
+// calls `getPool()` synchronously (reads `DATABASE_URL`) and reads
+// `PRIVY_APP_SECRET` while registering the auth module, so both need
+// `process.env` already hydrated. This is why `app`/`port` moved from
+// top-level `const`s into `main()`'s local scope: a top-level `buildApp()`
+// call runs at import time, before any `await` in this file could ever
+// run first.
+let app: ReturnType<typeof buildApp>;
+let port: number;
 let resultSubmissionPollerHandle: ResultSubmissionPollerHandle | undefined;
 let dagPollerHandle: DagPollerHandle | undefined;
 let releaseStagePollerHandle: ReleaseStagePollerHandle | undefined;
@@ -142,12 +150,6 @@ async function stopBackgroundPollers(): Promise<void> {
   releaseStagePollerHandle = undefined;
 }
 
-async function start(): Promise<void> {
-  await verifyStartupSignerConfig();
-  startBackgroundPollers();
-  await app.listen({ port, host: "0.0.0.0" });
-}
-
 /**
  * Graceful shutdown (human N4 follow-up, T-905): stops the poller BEFORE
  * closing the Fastify instance (which itself closes the shared `pool` via
@@ -162,22 +164,46 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   process.exit(0);
 }
 
-process.on("SIGTERM", (signal) => {
-  shutdown(signal).catch((error: unknown) => {
-    app.log.error(error);
-    process.exit(1);
-  });
-});
-process.on("SIGINT", (signal) => {
-  shutdown(signal).catch((error: unknown) => {
-    app.log.error(error);
-    process.exit(1);
-  });
-});
+async function main(): Promise<void> {
+  // T-2301: must run before `buildApp()` — see this file's top-of-file
+  // comment on why `app`/`port` are no longer top-level `const`s.
+  await hydrateSecretsFromManager();
 
-// Same failure-exit path for both the signer check and listen() failing —
-// no new failure-handling mechanism invented for this new startup step.
-start().catch((error) => {
-  app.log.error(error);
+  app = buildApp();
+  port = Number(process.env.API_PORT ?? 3001);
+  // T-2301 (N4 round 2 P1): dynamic per-Agent credential names
+  // (`env://AGENT_<id>`) can't be listed statically — see
+  // `hydrateAgentCredentialsFromManager`'s own doc comment. `buildApp()`
+  // already created the pool `getPool()` now returns, and this must
+  // complete before `app.listen()` starts accepting invocation traffic.
+  await hydrateAgentCredentialsFromManager(getPool());
+
+  process.on("SIGTERM", (signal) => {
+    shutdown(signal).catch((error: unknown) => {
+      app.log.error(error);
+      process.exit(1);
+    });
+  });
+  process.on("SIGINT", (signal) => {
+    shutdown(signal).catch((error: unknown) => {
+      app.log.error(error);
+      process.exit(1);
+    });
+  });
+
+  await verifyStartupSignerConfig();
+  startBackgroundPollers();
+  await app.listen({ port, host: "0.0.0.0" });
+}
+
+// Before `app` exists (a secrets-hydration failure), fall back to
+// `console.error` — same reasoning `app.log.error` couldn't apply here
+// even before this Task, just now reachable slightly earlier in startup.
+main().catch((error) => {
+  if (app) {
+    app.log.error(error);
+  } else {
+    console.error(error);
+  }
   process.exit(1);
 });

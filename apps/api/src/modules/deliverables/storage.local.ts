@@ -1,47 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile as fsReadFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  ALLOWED_MIME_TYPES,
+  DeliverableFileTooLargeError,
+  DeliverableFileTypeNotAllowedError,
+  MAX_FILE_SIZE_BYTES,
+  validateDeliverableFile,
+} from "./storage.validation.js";
 
 /**
- * PRD §15.1 "限制上传文件类型、大小" — the single source of truth for both
- * limits (T-901). design.md deliberately left the exact whitelist for
- * implementation time rather than the requirements stage ("不在需求阶段预先
- * 穷举以免与实际演示素材脱节"); this is that concrete list — common
- * document/archive/image types a task deliverable would realistically be,
- * matching the demo scope this Feature targets.
+ * Re-exported from `storage.validation.ts` (the single source of truth,
+ * T-2300) so existing imports of these names from `storage.local.ts`
+ * (this module's own test file, and any pre-composition-root call site)
+ * keep working unchanged — this module no longer defines them itself.
  */
-export const ALLOWED_MIME_TYPES = [
-  "application/pdf",
-  "application/zip",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "text/plain",
-  "text/markdown",
-  "image/png",
-  "image/jpeg",
-] as const;
-
-/** 20 MiB — a reasonable ceiling for a demo-scope local filesystem, not a
- * business rule derived from any spec number (design.md left the concrete
- * value to implementation time, same as the type whitelist above). */
-export const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
-
-export class DeliverableFileTypeNotAllowedError extends Error {
-  constructor(public readonly mimeType: string) {
-    super(`File type not allowed: ${mimeType}`);
-    this.name = "DeliverableFileTypeNotAllowedError";
-  }
-}
-
-export class DeliverableFileTooLargeError extends Error {
-  constructor(
-    public readonly sizeBytes: number,
-    public readonly maxBytes: number,
-  ) {
-    super(`File size ${sizeBytes} exceeds maximum ${maxBytes}`);
-    this.name = "DeliverableFileTooLargeError";
-  }
-}
+export {
+  ALLOWED_MIME_TYPES,
+  DeliverableFileTooLargeError,
+  DeliverableFileTypeNotAllowedError,
+  MAX_FILE_SIZE_BYTES,
+};
 
 /** Thrown by `readFile` when asked to read outside the configured storage
  * root — defense-in-depth against a malformed/tampered stored `file_path`
@@ -91,12 +70,7 @@ export interface SavedFile {
  * rather than requiring it to pre-exist.
  */
 export async function saveFile(input: SaveFileInput): Promise<SavedFile> {
-  if (!ALLOWED_MIME_TYPES.includes(input.mimeType as (typeof ALLOWED_MIME_TYPES)[number])) {
-    throw new DeliverableFileTypeNotAllowedError(input.mimeType);
-  }
-  if (input.buffer.byteLength > MAX_FILE_SIZE_BYTES) {
-    throw new DeliverableFileTooLargeError(input.buffer.byteLength, MAX_FILE_SIZE_BYTES);
-  }
+  validateDeliverableFile(input);
 
   const root = storageRoot();
   await mkdir(root, { recursive: true });

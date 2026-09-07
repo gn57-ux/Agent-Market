@@ -35,7 +35,15 @@ interface SettlementCountDelta {
   overdueDelta: 0 | 1;
 }
 
-function deltaFor(kind: SettlementEventKind): SettlementCountDelta {
+/**
+ * T-2305 (F-2307 "结算成功率"): exported so callers can label the
+ * `settlement_outcome_total` metric AFTER their surrounding DB transaction
+ * actually commits (see `applySettlementStats`'s own doc comment on why
+ * the metric increment must not happen from inside this module, which runs
+ * INSIDE that transaction and could still be rolled back by a later step)
+ * — without duplicating this mapping a second time at each call site.
+ */
+export function deltaFor(kind: SettlementEventKind): SettlementCountDelta {
   switch (kind) {
     case "RESULT_APPROVED":
     case "REVIEW_TIMEOUT_FINALIZED":
